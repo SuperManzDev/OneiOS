@@ -38,3 +38,25 @@ jobs:
       - name: Test internal touch priority and S Pen hover event alias
         working-directory: runtime/xnuhost
         run: ASAN_OPTIONS=detect_leaks=0 build/host/test_xnuhost
+
+  brightness-passive:
+    name: Passive backlight probe (fake SM8850 sysfs)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test brightness bridge and strictly read-only inspect
+        run: make -C runtime/bridges/brightness test
+
+  display-safety:
+    name: Display helper protocol and no-takeover guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Test display helper and refuse --takeover in displayctl
+        run: make -C runtime/display test
