@@ -163,26 +163,13 @@ hw_backend_checks() {
     mkdir -p "$S24/dev/input"
     echo 4 > "$S24/.fake/hal/vibrator"
     rm -f "$VL"
-    # This read-only AIDL probe must not log any on/off/amplitude call.
+    # This AIDL getCapabilities probe must never call on/off/amplitude.
     out=$(with_hal "$S24" env ASAN_OPTIONS=detect_leaks=0 "$BCTL" haptic-hal-inspect 2>&1); st=$?
-    [ $st = 0 ] && printf '%s\n' "$out" | grep -q 'haptic-hal-inspect: android.hardware.vibrator.IVibrator/default version 2 capabilities 0x4 (amplitude=yes)' \
-      && printf '%s\n' "$out" | grep -q '^haptic-hal-inspect: ok (getCapabilities only; no on, off, amplitude or FF events)
-    [ $st = 1 ] && printf '%s\n' "$out" | grep -q 'hw: haptics: backend samsung (the default)' && printf '%s\n' "$out" | grep -q 'haptics: off: no force-feedback device with FF_PERIODIC + FF_SINE under' \
-      && [ ! -e "$VL" ] && ok "hw-backend: haptics samsung (the default): the evdev search, the vibrator HAL never called" || bad "hw-backend: haptics samsung" "status $st: $(printf '%s' "$out" | tr '\n' '|')"
-    out=$(with_hal "$S24" env ASAN_OPTIONS=detect_leaks=0 ONEIOS_INPUT_DIR="$S24/dev/input" ONEIOS_HW_BACKEND=treble "$BCTL" haptic 40 2>&1); st=$?
-    [ $st = 0 ] && printf '%s\n' "$out" | grep -q 'haptics: on: the vibrator HAL android.hardware.vibrator.IVibrator/default (version 2, capabilities 0x4: amplitude control' \
-      && printf '%s\n' "$out" | grep -q 'effect 1 played on the vibrator HAL: 40 ms' && [ "$(tr "\n" " " < "$VL")" = "on 40 amplitude 1.00 off off " ] \
-      && ok "hw-backend: haptics treble: the vibrator HAL plays on(40) at amplitude 1, off when it ends and again at the close (the motor is stopped whatever the worker believed)" || bad "hw-backend: haptics treble" "status $st: $(printf '%s' "$out" | tr '\n' '|'); HAL: $(tr '\n' ' ' < "$VL" 2>/dev/null)"
-    rm -f "$VL" "$S24/.fake/hal/vibrator"
-    out=$(with_hal "$S24" env ASAN_OPTIONS=detect_leaks=0 ONEIOS_INPUT_DIR="$S24/dev/input" ONEIOS_HW_BACKEND_HAPTICS=treble "$BCTL" haptic 40 2>&1); st=$?
-    [ $st = 1 ] && [ "$(printf '%s\n' "$out" | grep -c 'treble: missing:')" = 1 ] && printf '%s\n' "$out" | grep -q 'hw: haptics: treble: missing: android.hardware.vibrator.IVibrator/default (no service: .*the bridge stays off' \
-      && ! printf '%s\n' "$out" | grep -q 'force-feedback' && ok "hw-backend: haptics treble, no vibrator HAL: one missing line, off, no evdev search" || bad "hw-backend: haptics treble, no vibrator HAL" "status $st: $(printf '%s' "$out" | tr '\n' '|')"
-  elif [ -n "$HAVE_HAL" ]; then bad "hw-backend: bridgectl does not build" "$(tail -n 2 "$W/hw-build.txt" | tr '\n' '|')"; fi
-  rm -rf "$T"
-}
- \
-      && [ ! -e "$VL" ] && ok "hw-backend: passive vibrator AIDL probe reports capabilities with no state-changing calls" \
-      || bad "hw-backend: passive vibrator HAL probe" "status $st: $(printf '%s' "$out" | tr '\n' '|'); HAL: $(cat "$VL" 2>/dev/null)"
+    if [ "$st" = 0 ] && printf '%s\n' "$out" | grep -Fq "haptic-hal-inspect: android.hardware.vibrator.IVibrator/default version 2 capabilities 0x4 (amplitude=yes)" && printf '%s\n' "$out" | grep -Fq "haptic-hal-inspect: ok (getCapabilities only; no on, off, amplitude or FF events)" && [ ! -e "$VL" ]; then
+      ok "hw-backend: passive vibrator AIDL probe reports capabilities without any on/off/amplitude"
+    else
+      bad "hw-backend: passive vibrator HAL probe" "status $st: $(printf '%s' "$out" | tr '\n' '|'); HAL: $(cat "$VL" 2>/dev/null)"
+    fi
     out=$(with_hal "$S24" env ASAN_OPTIONS=detect_leaks=0 ONEIOS_INPUT_DIR="$S24/dev/input" "$BCTL" haptic 40 2>&1); st=$?
     [ $st = 1 ] && printf '%s\n' "$out" | grep -q 'hw: haptics: backend samsung (the default)' && printf '%s\n' "$out" | grep -q 'haptics: off: no force-feedback device with FF_PERIODIC + FF_SINE under' \
       && [ ! -e "$VL" ] && ok "hw-backend: haptics samsung (the default): the evdev search, the vibrator HAL never called" || bad "hw-backend: haptics samsung" "status $st: $(printf '%s' "$out" | tr '\n' '|')"
