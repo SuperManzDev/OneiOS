@@ -366,13 +366,25 @@ static void test_displayctl(const char *displayctl, const char *dir)
   snprintf(command, sizeof command, "TMPDIR=%s %s test --seconds 1 --size 64x48 --helper %s > %s/out 2>&1", dir, displayctl, self_path, dir);
   status = system(command);
   CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
-  snprintf(command, sizeof command, "grep -q 'removed its layer and exited 0' %s/out && grep -q '^displayctl: ok' %s/out && rm -f %s/out", dir, dir, dir);
+  snprintf(command, sizeof command, "grep -q 'removed its layer and exited 0' %s/out && grep -q '^displayctl: ok' %s/out", dir, dir);
+  CHECK(system(command) == 0);
+  // One initial full-frame hello flush + exactly one union rectangle per
+  // animation update. This catches the S26 flicker-causing double flush.
+  snprintf(command, sizeof command,
+           "awk '/^displayctl: [0-9]+ frames in / {steps=$2+0} /^test-helper: [0-9]+ flush messages$/ {packets=$2+0} END {exit !(steps>0 && packets==steps+1)}' %s/out",
+           dir);
   CHECK(system(command) == 0);
   // The half-float pattern: the stand-in checks the stride, the white edge and the wide band's P3 red.
   snprintf(command, sizeof command, "TMPDIR=%s %s test --seconds 1 --size 64x48 --format rgba16f --helper %s > %s/out 2>&1", dir, displayctl, self_path, dir);
   status = system(command);
   CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
-  snprintf(command, sizeof command, "grep -q 'pattern in R,G,B,A half float' %s/out && grep -q '^displayctl: ok' %s/out && rm -f %s/out", dir, dir, dir);
+  snprintf(command, sizeof command, "grep -q 'pattern in R,G,B,A half float' %s/out && grep -q '^displayctl: ok' %s/out", dir, dir);
+  CHECK(system(command) == 0);
+  snprintf(command, sizeof command,
+           "awk '/^displayctl: [0-9]+ frames in / {steps=$2+0} /^test-helper: [0-9]+ flush messages$/ {packets=$2+0} END {exit !(steps>0 && packets==steps+1)}' %s/out",
+           dir);
+  CHECK(system(command) == 0);
+  snprintf(command, sizeof command, "rm -f %s/out", dir);
   CHECK(system(command) == 0);
   // A live One UI diagnostic must reject destructive or endpoint-overriding
   // helper flags before spawning a helper or creating a test session.
@@ -401,14 +413,29 @@ static int as_helper(const char *socket_path)
   struct xhd_frame frame;
   if (fd < 0 || xhd_recv_hello(fd, &frame, 5000)) return 9;
   struct xhd_rect damage = { 0, 0, 0, 0 };
-  int full = 0, partial = 0;
+  int full = 0, partial = 0, flushes = 0;
   for (int i = 0; i < 2000; i++) {
-    int state = xhd_drain(fd, &frame, &damage);
-    if (damage.w == frame.width && damage.h == frame.height) full++;
-    else if (damage.w) partial++;
-    damage = (struct xhd_rect){ 0, 0, 0, 0 };
-    if (state < 0) {
-      if (frame.format == XHD_FORMAT_BGRX) return full && partial && frame.pixels[3] == 255 ? 0 : 8;
+    // Count wire packets, not helper presentations: a double-flush per
+    // animation step would pass the image tests yet flicker on the S26.
+    struct xhd_message m;
+    ssize_t n = recv(fd, &m, sizeof m, MSG_DONTWAIT);
+    if (n < 0 && errno == EINTR) continue;
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) { usleep(5000); continue; }
+    if (n < 0) return 10;
+    if (n > 0) {
+      if (n != sizeof m || memcmp(m.magic, "XHDF", 4)) return 11;
+      struct xhd_rect r = { m.a, m.b, m.c, m.d };
+      if (!xhd_rect_clip(&r, frame.width, frame.height)) return 12;
+      flushes++;
+      if (r.w == frame.width && r.h == frame.height) full++;
+      else partial++;
+      continue;
+    }
+    // Peer closed: one initial full flush plus ONE union flush per
+    // completed animation step. These counts must agree with displayctl.
+    printf("test-helper: %d flush messages\n", flushes);
+    fflush(stdout);
+    if (frame.format == XHD_FORMAT_BGRX) return full && partial && frame.pixels[3] == 255 ? 0 : 8;
       // half floats: the white edge at 1.0, and the wide band's P3 red (second eighth, lowest quarter) above sRGB's 1.0
       // (the bouncing square may cover part of the band: any pixel of the row will do)
       uint16_t edge[4], p3[4];
@@ -421,7 +448,6 @@ static int as_helper(const char *socket_path)
       int ok = frame.format == XHD_FORMAT_RGBA16F && frame.stride == frame.width * 8 && edge[0] == 0x3c00 && edge[3] == 0x3c00 && wide;
       return full && partial && ok ? 0 : 6;
     }
-    usleep(5000);
   }
   return 7;
 }
