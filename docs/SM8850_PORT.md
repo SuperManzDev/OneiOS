@@ -293,6 +293,27 @@ ok
 
 **Why preset before compose:** the current S26 HAL mask `0x3c` lacks `CAP_PERFORM_CALLBACK`, so `perform()` accepts a null callback; `compose()` requires implementing `IVibratorCallback.onComplete()` even though CAP_COMPOSE_EFFECTS is present. Using an existing CLICK preset is a narrower test than introducing callback handling and compound waveform semantics at once. Do not start XNU/guest iOS, hot-switch or take ownership of One UI resources.
 
+## Native AIDL CLICK playback validated on S26; stronger preset trial pending (2026-11-16)
+
+The owner deployed Android ARM64 runtime from **Actions run 43833060687**, verified the archive (`oneios-runtime-0.0.0-ci-arm64.tar.zst: OK`) with SHA256, and ran the previously gated one-shot `ONEIOS_HAPTIC_ACTIVE_TEST=1 bridgectl haptic-hal-click` on the real rooted SM8850 while One UI stayed running.
+
+```text
+haptic-hal-click: HAL accepted one CLICK MEDIUM (reported duration 60 ms)
+haptic-hal-click: done (one perform; no off, gain, compose or fallback; tactile verification required)
+ok
+ADB exit status: 0
+```
+
+The owner **felt one short, proper haptic-style click** but described the sensation as **still very faint/weak**. **AIDL preset CLICK (MEDIUM) acceptance and physical actuation: PASS; subjective strength: OPEN/WEAK.** The returned 60 ms is the vendor's `perform(CLICK)` estimate, **not** the separate 20 ms `getPrimitiveDuration(CompositePrimitive.CLICK)`. A preset `Effect.CLICK` and a composable `CompositePrimitive.CLICK` are different AIDL APIs and need not share timing, force, or waveform.
+
+There is no evidence of an AIDL/Binder invocation failure or motor failure in this test. Samsung One UI uses proprietary `SemHaptic` patterns which may feel stronger/different than AIDL's standard `on()` or preset. Increasing `on()` intensity earlier to 400/1000 was still weak. This does **not** establish whether stock Samsung keyboard feedback is perceptibly stronger; collect a direct qualitative comparison. Do not infer that the AIDL medium strength means a linear 50% of motor force.
+
+**Next bounded active trial implemented (not yet physically validated):**
+- `bridgectl haptic-hal-heavy-click` sends **exactly one** AIDL `perform(Effect.HEAVY_CLICK=5, EffectStrength.STRONG=2, callback=null)`, only when `ONEIOS_HAPTIC_ACTIVE_TEST=1`. The SM8850 HAL previously advertised effect ID 5, and the implementation re-checks `getSupportedEffects()` before issuing the active call. It does not call `on()`, `off()`, `setAmplitude()`, `compose()`, `setExternalControl()`, touch `FF_CUSTOM`/evdev or automatically retry. It caps accepted HAL-reported duration to 1000 ms and waits for the bounded one-shot effect to end.
+- AOSP stable AIDL defines `HEAVY_CLICK` as a stronger crisp click and `EffectStrength.STRONG` as strength value 2. S26 does not advertise `CAP_PERFORM_CALLBACK`, so the null callback used for the earlier successful CLICK is retained.
+- Mock HAL regression tests cover no active call when opt-in is absent, exactly one `perform 5 2`, and fail-closed behavior when the vendor removes the HEAVY_CLICK capability. The existing CLICK/MEDIUM test remains.
+- Gate real phone use on **current-head CI success**, checksum-verified new ARM64 artifact and an idle phone (no call or concurrent vibration). Run **once** and report whether clearly tactile or still too faint. If strong HEAVY_CLICK remains unsatisfactory, stop standard HAL intensity escalation and investigate Samsung's framework-controlled native `SemHaptic` path before proposing an iOS haptic map. Never use unverified vendor trigger indices or modify system vibration policy. No XNU boot or hot-switch.
+
 ## Captured S Pen evdev trace (2026-11-16)
 
 The user provided 11,126 `getevent -lt /dev/input/event12` log lines across 17.82 s, containing 3,507 SYN_REPORT frames, 2 complete hover/contact/out-of-range cycles and a third, still-in-hover cycle truncated by the recording timeout. No `BTN_STYLUS` press/release appeared in this capture (the side button capability exists but remains untested dynamically).
