@@ -123,6 +123,7 @@ typedef struct {
                             // "virtual" (no controller, transport 10), "hidl" (the phone's controller, transport 1, H4)
                             // or "sim" (a stand-in controller, bridges/bt/hci_sim.c, transport 1: a boot with no phone;
                             // works with the bridges off)
+  int   haptics_native_impacts; // explicit session opt-in: 1 enables Treble HAL presets and guest boot arg; 0 off, -1 unset
   char  haptics[8];         // "auto" (the phone's force-feedback device when the bridges are on), "off" (none: the guest
                             // has no actuator, no Actuator audio device, no /product/haptics) or "sim" (a stand-in
                             // actuator, bridges/haptics/haptic.c, that counts and logs: a boot with no phone; works

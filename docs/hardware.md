@@ -2834,3 +2834,16 @@ as well as runtime and kernel tests. That includes the standalone native
 PCM classifier test (`drivers/haptics/test_actuator.c`) that had been
 omitted from local CI. These tests use fake devices on Linux; a live
 S26 Ultra guest boot remains necessary to prove actual iOS haptics.
+
+### Native impacts: session opt-in path (2026-11-16)
+
+An ordinary OneOS switch starts `xnuhost` without forwarding the
+`ONEIOS_HAPTIC_NATIVE_IMPACTS` host environment variable; until now the
+host's preflight therefore could not be enabled by the image settings alone.
+`haptics-native-impacts=1` in the staged image's `xnuhost.conf` now enables
+the host's native preset capability check and adds `oneios_native_impacts=1`
+to the existing guest boot arguments. It refuses non-Treble haptics or
+`hw-backend-fallback=1` and never defaults on. This is the explicit session
+opt-in; staging still requires normal image manifest and checksum verification
+before any device switch. Tested by host configuration regressions; actual
+guest-to-HAL tactile behavior remains unverified.

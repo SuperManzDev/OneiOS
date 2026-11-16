@@ -1698,7 +1698,8 @@ static void test_config(const char *dir)
   CHECK(strstr(c.kernel, "/image/kernel.kc") && c.ndisk == 4 && strstr(c.disk[3].path, "data.seed") && !c.disk[3].writable && !c.disk[0].writable && strstr(c.disk[1].path, "systemos.img"));
   CHECK(c.disk[2].data_store && c.disk[2].writable && strstr(c.disk[2].path, "/data.img") && strstr(c.disk[2].seed, "data.seed"));
   CHECK(c.ncpu >= 1 && c.ncpu <= XH_MAX_CPUS && !strcmp(c.display, "shm") && c.input && c.tasks);
-  CHECK(c.bridges == 1 && !strcmp(c.bluetooth, "auto") && !strcmp(c.wifi, "auto"));                       // on in a session; the phone's HAL when it is there
+  CHECK(c.bridges == 1 && !strcmp(c.bluetooth, "auto") && !strcmp(c.wifi, "auto"));
+  CHECK(c.haptics_native_impacts == 0 && strstr(c.boot_args, "oneios_native_impacts=") == NULL);                       // on in a session; the phone's HAL when it is there
   CHECK(c.touch_sleep && xh_config_set(&c, "touch-sleep", "0") == 0 && !c.touch_sleep && xh_config_set(&c, "touch-sleep", "maybe") != 0);
   c.touch_sleep = true;
   // the image set's own settings, and what the command line overrides
@@ -1936,6 +1937,47 @@ static void test_config(const char *dir)
   xh_config_defaults(&c);
   CHECK(xh_config_args(&c, 5, hw2) == 0 && xh_config_finish(&c) == 0 && br_hw_choose(&c.hw, BR_HW_THERMAL, BR_HW_UNSET, NULL, 0) == BR_HW_SAMSUNG);
   CHECK(br_hw_choose(&c.hw, BR_HW_KEYS, BR_HW_UNSET, NULL, 0) == BR_HW_SAMSUNG && br_hw_fallback_allowed(&c.hw));
+  // The ordinary OneOS switch cannot inject host environment variables:
+  // xnuhost.conf must opt in the guest boot argument and Treble HAL together.
+  f = fopen(path, "w");
+  fputs("haptics-native-impacts=1\nhw-backend-haptics=treble\nhw-backend-fallback=0\n", f);
+  fclose(f);
+  xh_config_defaults(&c);
+  CHECK(xh_config_args(&c, 13, argv) == 0 && xh_config_finish(&c) == 0);
+  CHECK(c.haptics_native_impacts == 1 &&
+        br_hw_choose(&c.hw, BR_HW_HAPTICS, BR_HW_UNSET, NULL, 0) == BR_HW_TREBLE &&
+        strstr(c.boot_args, "oneios_native_impacts=1") != NULL &&
+        strstr(c.boot_args, "native-source-storage=1") != NULL);  // existing essential args kept
+  // Existing explicit guest opt-in is preserved once, not duplicated.
+  f = fopen(path, "w");
+  fputs("haptics-native-impacts=1\nhw-backend-haptics=treble\nboot-args=-v oneios_native_impacts=1\n", f);
+  fclose(f);
+  xh_config_defaults(&c);
+  CHECK(xh_config_args(&c, 13, argv) == 0 && xh_config_finish(&c) == 0);
+  CHECK(!strcmp(c.boot_args, "-v oneios_native_impacts=1"));
+  // A conflicting guest disable, Samsung fallback or missing Treble option fails closed.
+  f = fopen(path, "w");
+  fputs("haptics-native-impacts=1\nhw-backend-haptics=treble\nboot-args=-v oneios_native_impacts=0\n", f);
+  fclose(f);
+  xh_config_defaults(&c);
+  CHECK(xh_config_args(&c, 13, argv) == 0 && xh_config_finish(&c) == -1);
+  f = fopen(path, "w");
+  fputs("haptics-native-impacts=1\nhw-backend-haptics=treble\nhw-backend-fallback=1\n", f);
+  fclose(f);
+  xh_config_defaults(&c);
+  CHECK(xh_config_args(&c, 13, argv) == 0 && xh_config_finish(&c) == -1);
+  f = fopen(path, "w");
+  fputs("haptics-native-impacts=1\nhw-backend-haptics=samsung\n", f);
+  fclose(f);
+  xh_config_defaults(&c);
+  CHECK(xh_config_args(&c, 13, argv) == 0 && xh_config_finish(&c) == -1);
+  // A command-line override can disable an image opt-in and must not append the guest arg.
+  char *hwopt[] = { "xnuhost", "--image", image, "--set", "haptics-native-impacts=0" };
+  xh_config_defaults(&c);
+  CHECK(xh_config_args(&c, 5, hwopt) == 0 && xh_config_finish(&c) == 0 &&
+        c.haptics_native_impacts == 0 && strstr(c.boot_args, "oneios_native_impacts=") == NULL);
+  CHECK(xh_config_set(&c, "haptics-native-impacts", "maybe") != 0);
+  
   char *hw3[] = { "xnuhost", "--image", image, "--hw-backend", "pixel" };
   xh_config_defaults(&c);
   CHECK(xh_config_args(&c, 5, hw3) == -1);

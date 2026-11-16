@@ -531,6 +531,19 @@ sched_preemption_disable_debug_mode=0 wdt=-1 sheng-smp=1 oneios-data-wait=3000" 
 
 ## 6. On the phone
 
+### Native haptic test preflight
+
+After standalone CI passes for the current runtime commit, use
+`oneios-tool phone status`, `phone sums`, `phone image-check` and
+`cycle --dry-run` to inspect the staged phone image and rollback path.
+Do not run `phone switch` until the image is known to contain the
+matching guest kernel, the return scripts have been verified, and the
+image manifest includes the opt-in `xnuhost.conf`. In that config,
+`hw-backend-haptics=treble`, `hw-backend-fallback=0`, and
+`haptics-native-impacts=1` enable host and guest native preset opt-in
+without overriding essential guest boot args. See `docs/booter.md`.
+The automatic CI watcher must never perform these phone operations.
+
 ### Test cycle on the phone
 
 **Phone and app work goes through `oneios-tool`** (`phone`, `app`, `cycle`; `tools/oneios-tool/README.md` has every
