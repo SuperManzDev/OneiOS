@@ -135,6 +135,16 @@ The original `thermalctl` listed **30 thermal zones of interest**, including **`
 
 **Conclusion:** The narrowly scoped pseudo-zone exclusion works in the actual S26 Ultra thermal sysfs, eliminates the false SoC 105 C / trapping report, and retains actual CPU/GPU/DDR and case/battery temperatures. The existing host regression also preserves real high-temperature alerts; the phone test does not itself establish every high-heat response. This is **thermal sensor classification and nominal pressure PASS**, not XNU boot/guest thermal-policy validation. No sysfs writes, hot-switch or physical thermal load test was performed.
 
+## On-device Wi-Fi status / Supplicant AIDL (2026-11-16)
+
+The owner deployed the existing, checksum-verified `wifictl` ARM64 utility from the CI runtime to `/data/local/tmp/oneios-m3q-diag/bin/wifictl` and ran **`wifictl status` only**, with One UI connected to Wi-Fi. No SSID, passphrase, join/leave, interface ownership change, or network reset was performed.
+
+- **Status probe PASS:** `wlan0` exists; `android.hardware.wifi.supplicant.ISupplicant/default` is available; station interface `wlan0` returned successfully. The interface and supplicant both reported the same MAC address (omitted from this public document).
+- Supplicant reported **one configured network** (network ID `0`) and a valid `signal poll`: **-49 dBm**, reported transmit PHY rate **468 Mb/s**, receive PHY rate **526 Mb/s**, frequency **5805 MHz** (5 GHz, channel 161). Utility exited with **`ok`**.
+- These are currently reported station/link statistics, **not** a measured IP throughput or proof of guest networking. The AIDL service lookup and read-only status query work on SM8850 under One UI.
+- Source review: `wifictl status` uses `br_supplicant_open(ifname, 0, ...)`, `br_supplicant_status`, and close; it does not call `br_wlan_prepare`, remove configured networks or change IP addresses. `wifictl scan [SECONDS [IFACE]]` uses nl80211 **`NL80211_CMD_TRIGGER_SCAN`** and **`GET_SCAN`**; it triggers a real radio scan (possibly causing brief connectivity/latency variation), but does not call the disruptive session `join` path. A single supervised `scan 6 wlan0` is the next candidate check, with returned SSIDs/BSSIDs redacted before sharing.
+- **Pending:** nl80211 scan on physical SM8850, guest virtual `en0`, association from iOS, DHCP, data frames, disconnect and restoration. **Do not run `wifictl join` or `restore`** while still in passive checks; those can change One UI Wi-Fi state. No XNU boot/hot-switch.
+
 ## Captured S Pen evdev trace (2026-11-16)
 
 The user provided 11,126 `getevent -lt /dev/input/event12` log lines across 17.82 s, containing 3,507 SYN_REPORT frames, 2 complete hover/contact/out-of-range cycles and a third, still-in-hover cycle truncated by the recording timeout. No `BTN_STYLUS` press/release appeared in this capture (the side button capability exists but remains untested dynamically).
