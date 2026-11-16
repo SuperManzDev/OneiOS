@@ -2,6 +2,7 @@
 // bridgectl: tries each host bridge on the phone, without xnuhost or a guest. Run as root (su):
 //   bridgectl cpu [NVCPU]            the host's cores and the vCPU plan made from them
 //   bridgectl haptic-inspect              O_RDONLY evdev queries only: name, sine/periodic/gain bits, max effects
+//   bridgectl haptic-hal-inspect          read-only AIDL getCapabilities/version: never on, off or amplitude
 //   bridgectl haptic [MS [INTENSITY [HZ]]]   one vibration (default 200 ms, 1000, resonance)
 //   bridgectl haptic-pattern         three taps and a ramp: what an iOS pattern feels like
 // The backend: ONEIOS_HW_BACKEND, ONEIOS_HW_BACKEND_<BRIDGE>, ONEIOS_HW_FALLBACK (bridges/hw_backend.h): haptic's is
@@ -19,6 +20,7 @@
 #define _GNU_SOURCE
 #include "bridges/bridges.h"
 #include "bridges/hw_backend.h"
+#include "../hal/hal.h"
 #include <math.h>
 #include <dirent.h>
 #include <errno.h>
@@ -89,6 +91,41 @@ static int haptic_inspect(void)
   closedir(d);
   if (!found) { puts("haptic-inspect: no readable FF_PERIODIC + FF_SINE device"); return 1; }
   puts("haptic-inspect: ok (O_RDONLY; no FF_GAIN, EVIOCSFF, or playback)");
+  return 0;
+}
+
+// The active Samsung evdev FF_SINE upload fails with EINVAL on SM8850,
+// while One UI can play FF_CUSTOM. Before considering HAL playback, verify
+// whether the stock AIDL vibrator is accessible with *read-only* calls.
+// Opening and closing a HAL handle here does not call IVibrator.off()/on().
+static int haptic_hal_take_caps(void *ctx, ab_reader *r)
+{
+  *(int32_t *)ctx = ab_get_i32(r);
+  return r->bad ? -EPROTO : 0;
+}
+
+static int haptic_hal_inspect(void)
+{
+  char why[256] = "";
+  br_hal *hal = br_hal_open(NULL, HAL_VIBRATOR_INSTANCE, HAL_VIBRATOR, why, sizeof why);
+  if (!hal) {
+    printf("haptic-hal-inspect: no usable %s: %s\n", HAL_VIBRATOR_INSTANCE, why);
+    return 1;
+  }
+  const int32_t version = br_hal_version(hal);
+  int32_t caps = 0;
+  ab_parcel req;
+  br_hal_parcel(&req, HAL_VIBRATOR);
+  int rc = br_hal_call(hal, HAL_VIB_GET_CAPABILITIES, &req, haptic_hal_take_caps, &caps);
+  br_hal_close(hal);
+  if (rc) {
+    printf("haptic-hal-inspect: getCapabilities failed: %s\n", br_hal_error(rc));
+    return 1;
+  }
+  printf("haptic-hal-inspect: %s version %d capabilities 0x%x (amplitude=%s)\n",
+         HAL_VIBRATOR_INSTANCE, version, (unsigned)caps,
+         (caps & HAL_VIB_CAP_AMPLITUDE) ? "yes" : "no");
+  puts("haptic-hal-inspect: ok (getCapabilities only; no on, off, amplitude or FF events)");
   return 0;
 }
 
@@ -355,9 +392,10 @@ int main(int argc, char **argv)
   br_hw_settings_init(&hw);
   if (br_hw_settings_env(&hw, &bad)) { fprintf(stderr, "bridgectl: bad %s (samsung or treble; ONEIOS_HW_FALLBACK 0 or 1)\n", bad); return 2; }
   br_hw_configure(&hw);
-  if (argc < 2) { fprintf(stderr, "usage: bridgectl cpu|haptic-inspect|haptic|haptic-pattern|bt|net|audio|audio-loop ... (see tools/bridgectl.c)\n"); return 2; }
+  if (argc < 2) { fprintf(stderr, "usage: bridgectl cpu|haptic-inspect|haptic-hal-inspect|haptic|haptic-pattern|bt|net|audio|audio-loop ... (see tools/bridgectl.c)\n"); return 2; }
   if (!strcmp(argv[1], "cpu")) rc = cpu(argc, argv);
   else if (!strcmp(argv[1], "haptic-inspect")) rc = haptic_inspect();
+  else if (!strcmp(argv[1], "haptic-hal-inspect")) rc = haptic_hal_inspect();
   else if (!strcmp(argv[1], "haptic")) rc = haptic(argc, argv, false);
   else if (!strcmp(argv[1], "haptic-pattern")) rc = haptic(argc, argv, true);
   else if (!strcmp(argv[1], "bt")) rc = bt();
