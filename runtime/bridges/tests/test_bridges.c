@@ -203,15 +203,15 @@ static void test_sm8850_cpu(const char *tmp)
     const unsigned minimum = i < 6 ? 384000 : 768000;
     const unsigned policy = i < 6 ? 0 : 6;
     snprintf(rel, sizeof rel, "devices/system/cpu/cpu%u/cpu_capacity", i);
-    snprintf(value, sizeof value, "%u\\n", capacity); put_file(root, rel, value);
+    snprintf(value, sizeof value, "%u\n", capacity); put_file(root, rel, value);
     snprintf(rel, sizeof rel, "devices/system/cpu/cpu%u/cpufreq/cpuinfo_max_freq", i);
-    snprintf(value, sizeof value, "%u\\n", maximum); put_file(root, rel, value);
+    snprintf(value, sizeof value, "%u\n", maximum); put_file(root, rel, value);
     snprintf(rel, sizeof rel, "devices/system/cpu/cpu%u/cpufreq/cpuinfo_min_freq", i);
-    snprintf(value, sizeof value, "%u\\n", minimum); put_file(root, rel, value);
+    snprintf(value, sizeof value, "%u\n", minimum); put_file(root, rel, value);
     snprintf(rel, sizeof rel, "devices/system/cpu/cpu%u/cpufreq/related_cpus", i);
-    snprintf(value, sizeof value, "%u\\n", policy); put_file(root, rel, value);
+    snprintf(value, sizeof value, "%u\n", policy); put_file(root, rel, value);
     snprintf(rel, sizeof rel, "devices/system/cpu/cpu%u/regs/identification/midr_el1", i);
-    put_file(root, rel, "0x510f0021\\n");
+    put_file(root, rel, "0x510f0021\n");
   }
   br_cpu_topology t;
   br_cpu_plan plan;
