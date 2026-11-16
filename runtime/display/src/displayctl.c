@@ -111,14 +111,18 @@ int main(int argc, char **argv)
     else return usage();
   }
   if (W < 16 || H < 16 || W > 8192 || H > 8192 || seconds <= 0 || seconds > 3600) return usage();
-  // displayctl is a diagnostic over a running One UI, never a session
-  // takeover tool. Do not pass through an option that changes panel modes,
-  // projection or Android display ownership, even if the user asks for it.
+  // Only non-disruptive display options may reach the helper. In particular
+  // --takeover changes panel ownership and --session/--socket override the
+  // diagnostic endpoint (and can re-enable the production ready-file hold).
   for (int i = extra; i < argc; i++) {
-    if (!strcmp(argv[i], "--takeover")) {
-      fprintf(stderr, "displayctl: refusing --takeover: test mode must leave One UI display state alone\n");
-      return 2;
+    const char *opt = argv[i];
+    if (!strcmp(opt, "--no-projection")) continue;
+    if (!strcmp(opt, "--hz") || !strcmp(opt, "--format") || !strcmp(opt, "--dataspace")) {
+      if (++i >= argc) return usage();
+      continue;
     }
+    fprintf(stderr, "displayctl: refusing %s: test mode only accepts --hz, --format, --dataspace or --no-projection\n", opt);
+    return 2;
   }
   if (!*helper) {
     char self[PATH_MAX];
@@ -151,8 +155,11 @@ int main(int argc, char **argv)
     char **args = calloc((size_t)(argc - extra) + 6, sizeof *args);
     int k = 0;
     args[k++] = helper;
-    args[k++] = "--session";
-    args[k++] = session;
+    // A test pattern is already ready; only a real guest session needs
+    // session/ready. --socket tells OneiOSDisplay to post the first frame
+    // immediately instead of waiting for an XNU-created marker forever.
+    args[k++] = "--socket";
+    args[k++] = path;
     args[k++] = "--wait";
     args[k++] = "5";
     for (int i = extra; i < argc; i++) args[k++] = argv[i];
