@@ -82,7 +82,8 @@ br_virtio_snd_create(base2, spi2, audio, audio_ctx);    // /arm-io/virtio-snd
 ```sh
 adb push build/android/bridgectl build/android/oneios-audio /data/local/tmp/
 adb shell su -c '/data/local/tmp/bridgectl cpu'
-adb shell su -c '/data/local/tmp/bridgectl haptic 200 1000'
+adb shell su -c '/data/local/tmp/bridgectl haptic-inspect'  # O_RDONLY only, no FF gain or uploads
+adb shell su -c '/data/local/tmp/bridgectl haptic 200 1000' # ACTIVE: only after device-specific validation
 adb shell su -c '/data/local/tmp/bridgectl haptic-pattern'
 adb shell su -c '/data/local/tmp/bridgectl bt'            # with Bluetooth off in One UI's settings (see below)
 adb shell su -c '/data/local/tmp/bridgectl audio /data/local/tmp/oneios-audio'          # 2 s, then 0.5 s
@@ -97,6 +98,8 @@ controller is on (status 0)`, `state 1`, two events `<- type 4, 6 bytes: 0e 04 0
 bridge's own lines (`error: bluetooth: ...`) say which step failed: not registered / find denied, `initialize`
 refused, or no `initializationComplete` in 15 s (then look for `avc: denied` lines with `hal_bluetooth` in dmesg). `haptic`
 and `audio` are harmless beside One UI.
+
+**SM8850 haptic warning (2026-11-16).** The S26 Ultra reports `sec_vibrator_inputff` at `/dev/input/event7` with `FF_PERIODIC`, `FF_SINE`, `FF_CUSTOM`, `FF_GAIN`. The first actual `bridgectl haptic 80 150` trial selected the correct device, but the worker reported **`EINVAL`**, **0 effects played** and **1 failed**. The old `bridgectl` incorrectly returned `ok` despite failure. **Do not retry stronger vibrations or pattern mode.** A new `haptic-inspect` subcommand opens the input devices `O_RDONLY`, queries the name, supported waveform flags and maximum effect slots, and exits without issuing `FF_GAIN`, `EVIOCSFF` or play events. Worker error logging now distinguishes upload and playback, includes parameters (80 ms/150 maps to period 6 ms, level 72); the CLI waits for the worker and returns failure on any rejected effect. This is **diagnostic hardening, not a hardware haptics fix**. Active S26 haptic waveform support remains blocked pending verified driver behavior. In contrast, the S24 `haptic` commands above are historical references for a previously tested device.
 
 **Wi-Fi** (`build/android/wifictl`, `bin/wifictl` in the runtime package):
 
