@@ -164,6 +164,29 @@ The owner ran `adb shell su -c 'getevent -pl'` and filtered **only for haptic/vi
 
 
 
+## S26 haptic fault localized to FF upload (2026-11-16)
+
+With the **new instrumented binary**, the user performed exactly one repeat of the **80 ms / intensity 150** Samsung evdev test, while One UI was active. Result:
+
+```
+hw: haptics: backend samsung (hw-backend-haptics=samsung)
+haptics: on: /dev/input/event7 (sine effects, period 4..10 ms, level 40..255)
+error: haptics: effect upload failed: Invalid argument
+       (80 ms, intensity 150, period 6 ms, level 72, effect id -1)
+bridgectl: haptic failed (effects played=0, failed=1)
+haptics: counters: ... 0 effects played, 0 stopped, 1 failed ...
+failed
+ADB exit status: 1
+```
+
+**Definitive failing operation: `ioctl(fd, EVIOCSFF, &ff_effect)` / `FF_PERIODIC` + `FF_SINE` upload returns `-EINVAL`.** Since the effect ID is -1 (allocate new) and the upload returns negative, **no effect ID was created and the `EV_FF` play event was never issued by this test**. The diagnostic tool's changed exit status now correctly reflects the worker failure. The `FF_GAIN=10000` initial write did not generate an error report, but the evdev gain is a state-changing action and its interaction with One UI gain policy is not yet established.
+
+A separate read-only `dmesg` excerpt shows the Samsung kernel's `cs40l26 53-0040` actuator repeatedly accepting **`FF_CUSTOM` waveform uploads of `len=2`**, followed by `cs40l26_playback_effect` effect ID 0 start and stop. Example trigger indices from the Android system were `0x01000032`, `0x01000020`, `0x01000024`. These are *internal firmware trigger indices*, **not** safe arguments to blindly use with `FF_CUSTOM` or an identified mapping of the vendor's waveform bank. This demonstrates that the standard Android haptic path is functioning but does **not** establish why the S26 rejects the OneiOS sine effect. A public Google CS40L26 implementation has an `FF_SINE` path but the S26's exact Samsung build and driver contract have not yet been confirmed. Upstream Linux's `ff-core.c` uses `-ENOSPC` if no effect slot is free; the phone instead returned `EINVAL`, which makes a full four-slot capacity less likely as the sole explanation. The four-slot maximum is not a current usage count.
+
+**No automatic `FF_CUSTOM` fallback or parameter guessing has been added.** Potential explanations that still require vendor-driver evidence include effect format restrictions, an unavailable sine/buzz generator path, unsupported firmware configuration, or Samsung-specific validation in the evdev handler.
+
+**Passive next step:** A new `bridgectl haptic-hal-inspect` command uses the existing stable AIDL client to resolve `android.hardware.vibrator.IVibrator/default`, query its descriptor/version and call **`getCapabilities()` only**, then release the binder handle. Unlike `ONEIOS_HW_BACKEND_HAPTICS=treble bridgectl haptic`, it makes **no `on()`, `off()`, `setAmplitude()`, gain write or evdev effect upload**, and cannot accidentally use the Samsung evdev fallback if the AIDL service is missing. Fake-HAL tests assert no active calls. The existing Samsung and treble **production haptic backends remain unchanged**; choosing whether to use the vendor HAL for the S26 requires physical service inspection and later a separately authorized reversible actuation test.
+
 ## Captured S Pen evdev trace (2026-11-16)
 
 The user provided 11,126 `getevent -lt /dev/input/event12` log lines across 17.82 s, containing 3,507 SYN_REPORT frames, 2 complete hover/contact/out-of-range cycles and a third, still-in-hover cycle truncated by the recording timeout. No `BTN_STYLUS` press/release appeared in this capture (the side button capability exists but remains untested dynamically).
