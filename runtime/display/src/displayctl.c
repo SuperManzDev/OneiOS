@@ -111,6 +111,15 @@ int main(int argc, char **argv)
     else return usage();
   }
   if (W < 16 || H < 16 || W > 8192 || H > 8192 || seconds <= 0 || seconds > 3600) return usage();
+  // displayctl is a diagnostic over a running One UI, never a session
+  // takeover tool. Do not pass through an option that changes panel modes,
+  // projection or Android display ownership, even if the user asks for it.
+  for (int i = extra; i < argc; i++) {
+    if (!strcmp(argv[i], "--takeover")) {
+      fprintf(stderr, "displayctl: refusing --takeover: test mode must leave One UI display state alone\n");
+      return 2;
+    }
+  }
   if (!*helper) {
     char self[PATH_MAX];
     ssize_t n = readlink("/proc/self/exe", self, sizeof self - 1);
