@@ -97,7 +97,20 @@ The diagnostic's original animation loop called `xhd_send_flush` **twice** per l
 - This result validates the **diagnostic's one-union-flush-per-step flicker mitigation on real SM8850 hardware**. Helper posts and diagnostic steps count different things; `377/5.01` steps per second is not a verified sustained 120 application FPS merely because the panel advertises 120 Hz.
 - `Connection reset by peer` is logged when the diagnostic client closes its socket on completion; no failure status followed, and teardown succeeded.
 
-**Next stage:** Test the same no-takeover diagnostic using `displayctl test --seconds 5 --format rgba16f` to inspect Android 17's native RGBA_FP16 / scRGB-linear route (or a logged fallback), then inspect remaining host bridges and a separately verified recovery plan. This 8-bit overlay PASS does **not** demonstrate XNU boot, guest Metal rendering, S Pen routed into iOS, active brightness writes, or safe hot-switch.
+### On-device RGBA_FP16 / scRGB-linear acceptance (2026-11-16)
+
+The user ran the already-staged no-takeover command `/data/local/tmp/oneios-m3q-diag/bin/displayctl test --seconds 5 --format rgba16f` on the Galaxy S26 Ultra. Full on-phone diagnostic result:
+
+- Native internal panel **1440x3120, 120 Hz**, 1:1 layer geometry.
+- Sender: `pattern in R,G,B,A half float, linear extended sRGB`; frame stride **11520 bytes** (1440 x 8), protocol **format 2**.
+- Helper selected Android **buffer format 22 RGBA_FP16**, actual buffer stride **1472 pixels**, and **`scRGB-linear` dataspace `0x18410000`**. This is the actual posted buffer, not merely the desired format. **No BGRA_8888 fallback** was reported.
+- Helper log: `layer up`, `first frame posted (1440x3120 buffer, stride 1472, format 22 RGBA_FP16, dataspace 0x18410000 scrgb-linear; ...)`, `the socket closed after 459 frames`, `layer removed`, `displayctl: ok`.
+- Diagnostic generated **496 animation steps in 5.00 seconds** (~99.2 steps/s); helper posted 459 buffers (~91.8 posts/s). These are different counts. The panel's refresh capability is 120 Hz, **not** proof of sustained 120 application FPS.
+- `Connection reset by peer` preceded normal layer teardown when the diagnostic ended, consistent with previous successful trials.
+
+**Result: PASS for host-to-Android native RGBA_FP16 allocation, frame posting, dataspace tagging and clean overlay teardown on SM8850.** Still **unverified by eye**: actual wide-gamut P3 separation in the patches, full-screen visual stability/flicker in the FP16 mode, extra HDR brightness/headroom, and precise color accuracy. The panel announced SRGB among available modes `NATIVE,SRGB,DISPLAY_P3`; the current active color mode does not alone establish visible P3 reproduction. No destructive `--takeover` was used.
+
+**Next stage:** Passive read-only checks of SM8850 battery and thermal sensors using `batteryctl` and `thermalctl` from the same verified runtime; record which readings are valid and which are missing. Defer haptic playback, audio routing, Bluetooth controller takeover, camera acquisition, brightness writes and especially XNU hot-switch until independently validated, individually reversible tests and recovery checks. This successful FP16 host overlay does **not** establish guest Metal rendering, S Pen routed into iOS, XNU boot or safe recovery.
 
 ## Captured S Pen evdev trace (2026-11-16)
 
