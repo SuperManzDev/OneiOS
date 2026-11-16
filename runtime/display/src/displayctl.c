@@ -191,7 +191,19 @@ int main(int argc, char **argv)
     if ((int)y + dy < 2 || y + side + (uint32_t)(dy > 0 ? dy : 0) > H - 2) dy = -dy;
     x = (uint32_t)((int)x + dx); y = (uint32_t)((int)y + dy);
     box(x, y, side);
-    if (xhd_send_flush(client, old_x, old_y, side, side) == -EPIPE || xhd_send_flush(client, x, y, side, side) == -EPIPE) { gone = 1; break; }
+    // Present one *complete* animation step. Two separate flush packets allow
+    // the helper to post after only the old square's damage is copied, leaving
+    // the new square's moving edge stale for an intermediate visible buffer.
+    // The union covers both the erased old position and the newly drawn one.
+    struct xhd_rect changed = { old_x, old_y, side, side };
+    struct xhd_rect next = { x, y, side, side };
+    xhd_rect_union(&changed, &next);
+    int rc = xhd_send_flush(client, changed.x, changed.y, changed.w, changed.h);
+    if (rc < 0) {
+      fprintf(stderr, "displayctl: frame flush failed: %s\n", strerror(-rc));
+      gone = 1;
+      break;
+    }
     old_x = x; old_y = y;
     frames++;
     struct timespec nap = { 0, 1000000000 / 120 };
