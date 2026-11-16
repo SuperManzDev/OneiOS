@@ -69,6 +69,17 @@ Adaptive brightness was intended to be disabled for repeatability; the user manu
 
 **Key safety finding:** The active brightness bridge currently sets its ceiling to `br_bright_ceiling(12750) = 12750` by default; it only halves special max values 510/51000. The measured `panel0-backlight/brightness` at a near-high manual slider setting was **2300**, far lower than 12750. The upper region could be reserved for high-brightness/HDR handling or another extended hardware mode; there is not enough evidence yet to infer its purpose or safe maximum. **Do not run active `brightctl info/levels` or an SM8850 iOS brightness session using the unbounded default ceiling.** Need a passive reading at the slider's normal maximum (without extra-brightness/HBM toggles) and a validated ceiling policy before enabling active writes.
 
+## Physical display helper diagnostic and correction (2026-11-16)
+
+The verified SM8850 CI runtime `oneios-runtime-0.0.0-ci-arm64.tar.zst` was extracted and the display/brightness diagnostic binaries staged under `/data/local/tmp/oneios-m3q-diag` on the phone. This is **not** an iOS session.
+
+- `brightctl inspect`: **PASS**, no writes. `panel` max/brightness/actual=0; `panel0-backlight` max=12750, brightness=645, actual=0, bl_power=0, chosen. Ends `inspect ok (no state changes)`.
+- First `displayctl test --seconds 5`: the helper connects to Android's SurfaceFlinger and detects a 1440x3120 internal panel, native 120 Hz, SRGB mode, HDR types 2/3/4, reported panel max luminance 1275 nits (panel capability report, **not** measured actual brightness), and posts a SurfaceControl layer. Buffer type 5 (BGRA_8888), sRGB dataspace 0x08810000, 1:1 native size. On exit the layer was removed, process status 0.
+- **Not yet a visual display PASS:** `displayctl` sent **482** test updates over 5.01s but `oneios-display` logged `the first frame waits for /data/local/tmp/displayctl.*/ready`, then `the socket closed after 0 frames`. The command's old `displayctl: ok` only certified transport and cleanup, not actual on-screen presentation.
+- **Root cause in diagnostic harness:** `displayctl` launched `oneios-display --session DIR`, which waits for the real XNU `session/ready` file; a standalone color-bar diagnostic has no XNU process and never creates that file. This is distinct from and does not indicate an Android GPU/display driver failure.
+- **Code fix:** `displayctl test` now launches `oneios-display --socket DIR/display.sock` so the helper uses its existing no-ready-hold diagnostic path. The production XNU `--session` readiness behavior is unchanged. The test now allowlists forwarded options, rejecting `--takeover`, `--session`, `--socket`, `--lib`, `--wait` and other potential endpoint/takeover overrides. Host test asserts `--socket` plus path, processes the test frame and checks that the temporary directory is removed.
+- **Acceptance for next on-phone test:** `oneios-display: first frame posted (...)`, a positive helper frame count on close, a visible moving white square over colored bars, and the layer removed to restore One UI. Until then, display output itself remains unverified.
+
 ## Captured S Pen evdev trace (2026-11-16)
 
 The user provided 11,126 `getevent -lt /dev/input/event12` log lines across 17.82 s, containing 3,507 SYN_REPORT frames, 2 complete hover/contact/out-of-range cycles and a third, still-in-hover cycle truncated by the recording timeout. No `BTN_STYLUS` press/release appeared in this capture (the side button capability exists but remains untested dynamically).
