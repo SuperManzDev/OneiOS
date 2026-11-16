@@ -1160,6 +1160,14 @@ static void count_power_press(void) { power_presses++; }
 
 static void test_input_filter(void)
 {
+  // S26 Ultra: both the internal sec_touchscreen and a connected HUAWEI Band
+  // advertise INPUT_PROP_DIRECT. Native input wins even if event IDs change.
+  CHECK(xh_input_accept_touch("sec_touchscreen", true, false, true));
+  CHECK(!xh_input_accept_touch("HUAWEI Band 11-F88", true, false, true));
+  CHECK(!xh_input_accept_touch("sec_touchpad", false, false, true));
+  CHECK(!xh_input_accept_touch("sec_touchscreen", true, true, true));
+  CHECK(xh_input_accept_touch("generic touchscreen", true, false, false));
+  CHECK(!xh_input_accept_touch("generic touchscreen", false, false, false));
   driver d = { .dev = xh_virtio_input_create(0, 45) };
   CHECK(d.dev && driver_init(&d, 0, 2, GUEST_PA + 0x10000));
   for (unsigned i = 0; i < 8; i++) driver_send(&d, 0, (const uint64_t[][3]){ { GUEST_PA + 0x50000 + i * 8, 8, 1 } }, 1, false);
