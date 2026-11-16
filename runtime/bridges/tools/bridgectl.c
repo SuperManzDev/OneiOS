@@ -5,6 +5,7 @@
 //   bridgectl haptic-hal-inspect          read-only AIDL getCapabilities/version: never on, off or amplitude
 //   bridgectl haptic-hal-primitives       read-only AIDL composition/effect support and primitive durations
 //   bridgectl haptic-hal-click            ACTIVE one-shot IVibrator.perform(CLICK, MEDIUM); explicit opt-in required
+//   bridgectl haptic-hal-heavy-click      ACTIVE one-shot IVibrator.perform(HEAVY_CLICK, STRONG); explicit opt-in required
 //   bridgectl haptic [MS [INTENSITY [HZ]]]   one vibration (default 200 ms, 1000, resonance)
 //   bridgectl haptic-pattern         three taps and a ramp: what an iOS pattern feels like
 // The backend: ONEIOS_HW_BACKEND, ONEIOS_HW_BACKEND_<BRIDGE>, ONEIOS_HW_FALLBACK (bridges/hw_backend.h): haptic's is
@@ -239,27 +240,31 @@ static int haptic_hal_primitives(void)
   return 0;
 }
 
-// Bounded, opt-in ACTIVE test of the S26 vendor's advertised preset CLICK.
-// This bypasses the generic on()/setAmplitude() waveform which was too faint,
-// and never selects an evdev fallback. The HAL owns this predefined duration:
-// no gain, off(), compose(), external control, driver waveform or loop here.
-// Do not call while another Android vibration is in progress.
-static int haptic_hal_click(int argc)
+// Bounded, opt-in ACTIVE test of a vendor-advertised AOSP preset.
+// Exactly one AIDL perform() request: no FF fallback, manual waveform,
+// amplitude/gain setting, on/off, loop, external control or compose.
+// Do not use while the Android framework is already vibrating.
+static int haptic_hal_preset(int argc, bool heavy)
 {
+  const char *cmd = heavy ? "haptic-hal-heavy-click" : "haptic-hal-click";
+  const char *effect_name = heavy ? "HEAVY_CLICK" : "CLICK";
+  const char *strength_name = heavy ? "STRONG" : "MEDIUM";
+  const int32_t effect = heavy ? HAL_VIB_EFFECT_HEAVY_CLICK : HAL_VIB_EFFECT_CLICK;
+  const int32_t strength = heavy ? HAL_VIB_STRENGTH_STRONG : HAL_VIB_STRENGTH_MEDIUM;
   if (argc != 2) {
-    puts("usage: ONEIOS_HAPTIC_ACTIVE_TEST=1 bridgectl haptic-hal-click");
+    printf("usage: ONEIOS_HAPTIC_ACTIVE_TEST=1 bridgectl %s\n", cmd);
     return 2;
   }
   const char *ack = getenv("ONEIOS_HAPTIC_ACTIVE_TEST");
   if (!ack || strcmp(ack, "1") != 0) {
-    puts("haptic-hal-click: blocked; set ONEIOS_HAPTIC_ACTIVE_TEST=1 to authorize one active CLICK");
+    printf("%s: blocked; set ONEIOS_HAPTIC_ACTIVE_TEST=1 to authorize one active %s\n", cmd, effect_name);
     return 1;
   }
 
   char why[256] = "";
   br_hal *hal = br_hal_open(NULL, HAL_VIBRATOR_INSTANCE, HAL_VIBRATOR, why, sizeof why);
   if (!hal) {
-    printf("haptic-hal-click: no usable %s: %s\n", HAL_VIBRATOR_INSTANCE, why);
+    printf("%s: no usable %s: %s\n", cmd, HAL_VIBRATOR_INSTANCE, why);
     return 1;
   }
   haptic_int_list effects = {0};
@@ -267,41 +272,41 @@ static int haptic_hal_click(int argc)
   br_hal_parcel(&p, HAL_VIBRATOR);
   int rc = br_hal_call(hal, HAL_VIB_SUPPORTED_EFFECTS, &p, haptic_take_list, &effects);
   if (rc) {
-    printf("haptic-hal-click: getSupportedEffects failed: %s\n", br_hal_error(rc));
+    printf("%s: getSupportedEffects failed: %s\n", cmd, br_hal_error(rc));
     br_hal_close(hal);
     return 1;
   }
-  bool click = false;
+  bool advertised = false;
   for (int32_t i = 0; i < effects.n; i++)
-    if (effects.id[i] == HAL_VIB_EFFECT_CLICK) click = true;
-  if (!click) {
-    puts("haptic-hal-click: CLICK not in supported effects; no actuation attempted");
+    if (effects.id[i] == effect) advertised = true;
+  if (!advertised) {
+    printf("%s: %s not in supported effects; no actuation attempted\n", cmd, effect_name);
     br_hal_close(hal);
     return 1;
   }
 
   br_hal_parcel(&p, HAL_VIBRATOR);
-  ab_put_i32(&p, HAL_VIB_EFFECT_CLICK);
-  ab_put_i32(&p, HAL_VIB_STRENGTH_MEDIUM);
-  ab_put_null_binder(&p);                 // CAP_PERFORM_CALLBACK absent on SM8850
+  ab_put_i32(&p, effect);
+  ab_put_i32(&p, strength);
+  ab_put_null_binder(&p);                 // S26 CAP_PERFORM_CALLBACK not advertised
   int32_t duration_ms = -1;
   rc = br_hal_call(hal, HAL_VIB_PERFORM, &p, haptic_hal_take_caps, &duration_ms);
   if (rc) {
-    printf("haptic-hal-click: perform(CLICK, MEDIUM) rejected: %s\n", br_hal_error(rc));
+    printf("%s: perform(%s, %s) rejected: %s\n", cmd, effect_name, strength_name, br_hal_error(rc));
     br_hal_close(hal);
     return 1;
   }
-  printf("haptic-hal-click: HAL accepted one CLICK MEDIUM (reported duration %d ms)\n", duration_ms);
+  printf("%s: HAL accepted one %s %s (reported duration %d ms)\n", cmd, effect_name, strength_name, duration_ms);
   if (duration_ms <= 0 || duration_ms > 1000) {
-    puts("haptic-hal-click: HAL returned an unexpected duration; no follow-up effects");
+    printf("%s: HAL returned an unexpected duration; no follow-up effects\n", cmd);
     br_hal_close(hal);
     return 1;
   }
-  // Give the HAL time to finish its own bounded effect; do not call off(),
-  // which could cancel a concurrent One UI vibration that started afterwards.
+  // Let the HAL finish its own effect; off() could cancel unrelated Android
+  // vibration starting after our one-shot preset.
   usleep((useconds_t)(duration_ms + 80) * 1000u);
   br_hal_close(hal);
-  puts("haptic-hal-click: done (one perform; no off, gain, compose or fallback; tactile verification required)");
+  printf("%s: done (one perform; no off, gain, compose or fallback; tactile verification required)\n", cmd);
   return 0;
 }
 
@@ -568,12 +573,13 @@ int main(int argc, char **argv)
   br_hw_settings_init(&hw);
   if (br_hw_settings_env(&hw, &bad)) { fprintf(stderr, "bridgectl: bad %s (samsung or treble; ONEIOS_HW_FALLBACK 0 or 1)\n", bad); return 2; }
   br_hw_configure(&hw);
-  if (argc < 2) { fprintf(stderr, "usage: bridgectl cpu|haptic-inspect|haptic-hal-inspect|haptic-hal-primitives|haptic-hal-click|haptic|haptic-pattern|bt|net|audio|audio-loop ... (see tools/bridgectl.c)\n"); return 2; }
+  if (argc < 2) { fprintf(stderr, "usage: bridgectl cpu|haptic-inspect|haptic-hal-inspect|haptic-hal-primitives|haptic-hal-click|haptic-hal-heavy-click|haptic|haptic-pattern|bt|net|audio|audio-loop ... (see tools/bridgectl.c)\n"); return 2; }
   if (!strcmp(argv[1], "cpu")) rc = cpu(argc, argv);
   else if (!strcmp(argv[1], "haptic-inspect")) rc = haptic_inspect();
   else if (!strcmp(argv[1], "haptic-hal-inspect")) rc = haptic_hal_inspect();
   else if (!strcmp(argv[1], "haptic-hal-primitives")) rc = haptic_hal_primitives();
-  else if (!strcmp(argv[1], "haptic-hal-click")) rc = haptic_hal_click(argc);
+  else if (!strcmp(argv[1], "haptic-hal-click")) rc = haptic_hal_preset(argc, false);
+  else if (!strcmp(argv[1], "haptic-hal-heavy-click")) rc = haptic_hal_preset(argc, true);
   else if (!strcmp(argv[1], "haptic")) rc = haptic(argc, argv, false);
   else if (!strcmp(argv[1], "haptic-pattern")) rc = haptic(argc, argv, true);
   else if (!strcmp(argv[1], "bt")) rc = bt();
