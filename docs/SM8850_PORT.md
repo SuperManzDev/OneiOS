@@ -259,6 +259,40 @@ The owner queried current settings (no writes):
 
 **Next read-only probe added to source:** `bridgectl haptic-hal-primitives`. It calls the registered AIDL v3 `IVibrator/default` `getCapabilities()` then, only if `CAP_COMPOSE_EFFECTS` is advertised, calls `getCompositionDelayMax()`, `getCompositionSizeMax()`, `getSupportedPrimitives()`, `getPrimitiveDuration()` for reported IDs, and `getSupportedEffects()`. These are **pure query methods**: no `on()`, `off()`, `setAmplitude()`, `perform()`, `compose()`, `setExternalControl()`, `FF_GAIN` or `EVIOCSFF`. The fake AIDL service has matching getter responses and mock tests assert no actuation calls. **Await CI and real-phone output before claiming which primitives Samsung actually supports**; an AOSP enum listing alone is not an S26 hardware capability inventory. The `compose()` actuation API also has callback/composition requirements and must not be invoked until those are separately validated.
 
+## S26 VibratorManager and native effect inventory — physical PASS (2026-11-16)
+
+After fixing the `dumpsys` service name, the owner inspected `dumpsys vibrator_manager` on a running One UI system (passive). The relevant non-identifying fields were:
+
+- `vibrateOn=true`; `defaultVibrationAmplitude=255`; the service's single vibrator `id=0` reports loaded `VibratorInfo`, `currentAmplitude=0.0` while idle, capabilities `COMPOSE_EFFECTS`, `AMPLITUDE_CONTROL`, `EXTERNAL_CONTROL` and `EXTERNAL_AMPLITUDE_CONTROL`.
+- Android framework's **supported presets:** CLICK, DOUBLE_CLICK, TICK, HEAVY_CLICK.
+- Android framework's **supported primitives and durations:** CLICK 20 ms, THUD 300 ms, SPIN 130 ms, QUICK_RISE 150 ms, SLOW_RISE 500 ms, QUICK_FALL 100 ms, TICK 20 ms, LOW_TICK 20 ms.
+- Android's ordinary keyboard/touch uses proprietary `SemHaptic` effects through its framework (examples have internal IDs 50025 and 50075). These IDs must **not** be copied into direct FF_CUSTOM or AIDL payloads. The dump has no obvious global suppression or vibrate-disabled state; it does not prove amplitude-force linearity.
+
+The owner also downloaded the CI runtime from Actions **43830452598**, verified `oneios-runtime-0.0.0-ci-arm64.tar.zst: OK` via SHA256, deployed `bridgectl` and ran `haptic-hal-primitives` **read-only** on actual SM8850. Exact meaningful output:
+
+```text
+haptic-hal-primitives: AIDL version 3 capabilities 0x3c compose=yes
+haptic-hal-primitives: max delay 1000 ms, max composition entries 10
+haptic-hal-primitives: 8 supported primitive(s)
+  primitive 1 CLICK        duration 20 ms
+  primitive 2 THUD         duration 300 ms
+  primitive 3 SPIN         duration 130 ms
+  primitive 4 QUICK_RISE   duration 150 ms
+  primitive 5 SLOW_RISE    duration 500 ms
+  primitive 6 QUICK_FALL   duration 100 ms
+  primitive 7 LIGHT_TICK   duration 20 ms
+  primitive 8 LOW_TICK     duration 20 ms
+haptic-hal-primitives: 4 supported preset effect(s): 0 1 2 5
+haptic-hal-primitives: ok (read-only AIDL getters; no on, off, compose, perform, amplitude or FF)
+ok
+```
+
+**Naming distinction:** AOSP's stable `CompositePrimitive` calls primitive ID 7 **LIGHT_TICK**, while Android's framework diagnostic dump renders its corresponding native support as **TICK**. The same underlying 20-ms primitive is meant here; do not conflate `Effect.TICK` (preset ID 2) with `CompositePrimitive.LIGHT_TICK` (primitive ID 7). The 4 standard preset ID mappings from AOSP are **0 CLICK, 1 DOUBLE_CLICK, 2 TICK, 5 HEAVY_CLICK**. These **physical getter results are PASS**. No active native primitive or preset was played as part of this inventory.
+
+**Immediate next stage: one native preset acceptance test.** A new `bridgectl haptic-hal-click` deliberately uses **`IVibrator.perform(Effect.CLICK, EffectStrength.MEDIUM, null)`**; AOSP AIDL declares this method with result `durationMs`. Before performing, the tool requires `ONEIOS_HAPTIC_ACTIVE_TEST=1` and re-queries `getSupportedEffects()` to ensure CLICK is actually advertised. It makes exactly **one** effect request, never automatically retries, stops, changes gain, calls `on()`, `off()`, `setAmplitude()`, `compose()`, enters external control or uses evdev fallback. It waits only for the HAL-returned estimated duration plus a short margin (max 1s duration accepted). It is **an active vibration**: run only once when One UI is idle, not on a call, and compare perceived feedback with Samsung keyboard haptics. On failure record the exact Binder error and exit code; on success obtain tactile confirmation and do not assume full iOS haptic fidelity.
+
+**Why preset before compose:** the current S26 HAL mask `0x3c` lacks `CAP_PERFORM_CALLBACK`, so `perform()` accepts a null callback; `compose()` requires implementing `IVibratorCallback.onComplete()` even though CAP_COMPOSE_EFFECTS is present. Using an existing CLICK preset is a narrower test than introducing callback handling and compound waveform semantics at once. Do not start XNU/guest iOS, hot-switch or take ownership of One UI resources.
+
 ## Captured S Pen evdev trace (2026-11-16)
 
 The user provided 11,126 `getevent -lt /dev/input/event12` log lines across 17.82 s, containing 3,507 SYN_REPORT frames, 2 complete hover/contact/out-of-range cycles and a third, still-in-hover cycle truncated by the recording timeout. No `BTN_STYLUS` press/release appeared in this capture (the side button capability exists but remains untested dynamically).
