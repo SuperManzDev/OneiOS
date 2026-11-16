@@ -137,8 +137,9 @@ static int incoming(void *ctx, uint64_t object, uint32_t code, uint32_t flags, a
       uint64_t local = 0;
       bool callback = ab_get_binder(r, &handle, &local);
       bool click = effect == HAL_VIB_EFFECT_CLICK && strength == HAL_VIB_STRENGTH_MEDIUM;
+      bool tick = effect == HAL_VIB_EFFECT_TICK && strength == HAL_VIB_STRENGTH_LIGHT;
       bool heavy = effect == HAL_VIB_EFFECT_HEAVY_CLICK && strength == HAL_VIB_STRENGTH_STRONG;
-      if (r->bad || callback || (!click && !heavy) ||
+      if (r->bad || callback || (!click && !heavy && !tick) ||
           (click && file_text("vibrator_effects_no_click", text, sizeof text)) ||
           (heavy && file_text("vibrator_effects_no_heavy_click", text, sizeof text))) {
         ab_put_service_error(reply, 1);
@@ -146,7 +147,7 @@ static int incoming(void *ctx, uint64_t object, uint32_t code, uint32_t flags, a
       }
       note("perform %d %d", effect, strength);
       ab_put_ok(reply);
-      ab_put_i32(reply, heavy ? 60 : 20);
+      ab_put_i32(reply, heavy ? 60 : tick ? 20 : 20);
       return 0;
     }
     // Read-only AIDL capability/primitive queries. Do NOT call note() for

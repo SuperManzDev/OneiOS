@@ -233,7 +233,11 @@ static void test_sm8850_cpu(const char *tmp)
 }
 
 // ---- haptics -------------------------------------------------------------------------------------
-typedef struct { unsigned uploads, plays, stops, last_length, last_period, last_magnitude, gain; int next_id, fail_upload, fail_play; } fake_motor;
+typedef struct {
+  unsigned uploads, plays, stops, last_length, last_period, last_magnitude, gain;
+  unsigned impacts, last_kind, impact_ms;
+  int next_id, fail_upload, fail_play, fail_impact;
+} fake_motor;
 static int fm_upload(void *ctx, int id, unsigned length_ms, unsigned period_ms, unsigned magnitude)
 {
   fake_motor *m = ctx;
@@ -243,7 +247,17 @@ static int fm_upload(void *ctx, int id, unsigned length_ms, unsigned period_ms, 
 }
 static int fm_play(void *ctx, int id, bool on) { fake_motor *m = ctx; (void)id; if (on && m->fail_play) return -EINVAL; if (on) m->plays++; else m->stops++; return 0; }
 static int fm_gain(void *ctx, unsigned gain) { ((fake_motor *)ctx)->gain = gain; return 0; }
-static const br_haptic_backend fake_motor_backend = { .upload = fm_upload, .play = fm_play, .gain = fm_gain };
+static int fm_impact(void *ctx, unsigned kind, unsigned *duration_ms)
+{
+  fake_motor *m = ctx;
+  if (m->fail_impact) return -EINVAL;
+  m->impacts++; m->last_kind = kind;
+  *duration_ms = m->impact_ms ? m->impact_ms : 400;
+  return 0;
+}
+static const br_haptic_backend fake_motor_backend = {
+  .upload = fm_upload, .play = fm_play, .gain = fm_gain, .impact = fm_impact
+};
 
 static void test_haptic(void)
 {
@@ -298,6 +312,36 @@ static void test_haptic(void)
   br_haptic_stats_get(sim, &st);
   CHECK(st.vib == 20 && st.played == 20 && st.stop == 1 && st.stopped == 1 && st.failed == 0 && st.replaced == 0);
   br_haptic_close(sim);
+
+  // Explicit native impacts are opt-in and use the same serialized worker.
+  // One isolated impact is not mapped to repeated VIB segments.
+  fake_motor impact_motor = { .impact_ms = 400 };
+  br_haptic *native = br_haptic_open_backend(&fake_motor_backend, &impact_motor);
+  CHECK(native != NULL && !br_haptic_impacts_available(native));
+  CHECK(br_haptic_impact(native, BR_HAPTIC_IMPACT_HEAVY) == -EOPNOTSUPP);
+  br_haptic_close(native);
+  setenv("ONEIOS_HAPTIC_NATIVE_IMPACTS", "1", 1);
+  native = br_haptic_open_backend(&fake_motor_backend, &impact_motor);
+  CHECK(native != NULL && br_haptic_impacts_available(native));
+  CHECK(br_haptic_impact(native, 999) == -EOPNOTSUPP);
+  CHECK(br_haptic_impact(native, BR_HAPTIC_IMPACT_HEAVY) == 0);
+  br_haptic_flush(native);
+  br_haptic_stats_get(native, &st);
+  CHECK(impact_motor.impacts == 1 && impact_motor.last_kind == BR_HAPTIC_IMPACT_HEAVY &&
+        impact_motor.plays == 0 && st.impacts == 1 && st.played == 1 && st.failed == 0);
+  br_haptic_stop(native);
+  br_haptic_flush(native);
+  CHECK(impact_motor.stops == 1);            // immediate stop cancels in-flight preset
+  CHECK(br_haptic_impact(native, BR_HAPTIC_IMPACT_LIGHT) == 0);
+  br_haptic_flush(native);
+  CHECK(impact_motor.impacts == 2 && impact_motor.last_kind == BR_HAPTIC_IMPACT_LIGHT);
+  usleep(450000);
+  br_haptic_stop(native);
+  br_haptic_flush(native);
+  CHECK(impact_motor.stops == 1);            // completed preset: do not interrupt One UI
+  br_haptic_close(native);
+  CHECK(impact_motor.stops == 1);
+  unsetenv("ONEIOS_HAPTIC_NATIVE_IMPACTS");
 
   // S26 Ultra's first physical evdev test yielded EINVAL and the old CLI
   // returned "ok" even when 0 effects played. Model both possible failure
@@ -582,6 +626,10 @@ static void test_bridge_device(const char *tmp)
   send_message(&g, OB_CH_HAPTIC, OB_HAPTIC_STOP, NULL, 0);
   br_haptic_flush(haptic);
   CHECK(motor.stops == 1);
+  struct ob_haptic_impact ignored = { OB_IMPACT_HEAVY };
+  send_message(&g, OB_CH_HAPTIC, OB_HAPTIC_IMPACT, &ignored, sizeof ignored);
+  br_haptic_flush(haptic);
+  CHECK(motor.impacts == 0 && motor.plays == 1); // feature absent => fail closed
   br_haptic_stats hs;                                 // the guest's two messages (and the device start's stops), as counted
   br_haptic_stats_get(haptic, &hs);
   CHECK(hs.vib == 1 && hs.stop >= 1 && hs.played == 1 && hs.stopped == 1 && hs.failed == 0);
@@ -647,6 +695,45 @@ static void test_bridge_device(const char *tmp)
   br_haptic_flush(haptic);
   CHECK(motor.stops == 2 && dev_radio.closes == closes + 2);   // the reopen above closed it once
   br_haptic_close(haptic);
+}
+
+// A native-impacts-enabled host replies with an extended HELLO without
+// changing OB_PROTO_VERSION, and accepts only correctly typed impact payloads.
+static void test_bridge_native_impacts(void)
+{
+  setenv("ONEIOS_HAPTIC_NATIVE_IMPACTS", "1", 1);
+  fake_motor motor = { .impact_ms = 400 };
+  br_haptic *haptic = br_haptic_open_backend(&fake_motor_backend, &motor);
+  CHECK(haptic && br_haptic_impacts_available(haptic));
+  br_bridge_config cfg = { .haptic = haptic };
+  xh_virtio *dev = br_bridge_create(0, 41, &cfg);
+  CHECK(dev != NULL);
+  guest g;
+  guest_up(&g, dev, 2, 0);
+  static uint8_t rx[OB_MAX_MESSAGE];
+  post1(&g, OB_QUEUE_RX, rx, sizeof rx, true);
+  struct ob_ctl_hello request = { OB_PROTO_VERSION, 0 };
+  send_message(&g, OB_CH_CONTROL, OB_CTL_HELLO, &request, sizeof request);
+  CHECK(reap(&g, OB_QUEUE_RX) == (int)(sizeof(struct ob_header) + sizeof(struct ob_ctl_hello_ext)));
+  struct ob_ctl_hello_ext reply;
+  memcpy(&reply, rx + sizeof(struct ob_header), sizeof reply);
+  CHECK(reply.version == OB_PROTO_VERSION && (reply.channels & (1u << OB_CH_HAPTIC)) &&
+        (reply.features & OB_FEAT_HAPTIC_IMPACT));
+
+  struct ob_haptic_impact impact = { OB_IMPACT_HEAVY };
+  send_message(&g, OB_CH_HAPTIC, OB_HAPTIC_IMPACT, &impact, sizeof impact);
+  br_haptic_flush(haptic);
+  CHECK(motor.impacts == 1 && motor.plays == 0 && motor.last_kind == BR_HAPTIC_IMPACT_HEAVY);
+  impact.kind = 99;
+  send_message(&g, OB_CH_HAPTIC, OB_HAPTIC_IMPACT, &impact, sizeof impact);
+  send_message(&g, OB_CH_HAPTIC, OB_HAPTIC_IMPACT, &impact, 2);
+  br_haptic_flush(haptic);
+  CHECK(motor.impacts == 1);                   // invalid kind and truncated payload ignored
+  send_message(&g, OB_CH_HAPTIC, OB_HAPTIC_STOP, NULL, 0);
+  br_haptic_flush(haptic);
+  CHECK(motor.stops == 1);                    // guest STOP cancels the active impact
+  br_haptic_close(haptic);
+  unsetenv("ONEIOS_HAPTIC_NATIVE_IMPACTS");
 }
 
 // The battery channel: the hello's bit, the first state on the query, a change pushed by the worker, no more after a reset.
@@ -997,6 +1084,7 @@ int main(void)
   test_bt(tmp);
   test_bt_sim();
   test_bridge_device(tmp);
+  test_bridge_native_impacts();
   test_bridge_brightness(tmp);
   test_bridge_battery(tmp);
   test_net_device();

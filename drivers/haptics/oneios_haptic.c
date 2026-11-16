@@ -71,6 +71,7 @@ static LCK_MTX_DECLARE(oh_wlock, &oh_grp);      /* the stream state */
 
 static bool oh_ready;                           /* the host serves the haptic channel */
 static uint32_t oh_ui = 1;
+static bool oh_native_impacts;          /* user opt-in AND host advertised the feature */
 static uint32_t oh_part, oh_part_peak;          /* the open 2 ms block */
 static int16_t oh_last;                         /* the previous sample, for zero crossings */
 static uint64_t oh_frames, oh_loud_blocks;
@@ -111,6 +112,22 @@ oneios_haptic_vib(uint32_t ms, uint32_t intensity, uint32_t frequency_hz)
 		printf("ONEIOS HAPTIC: play %u: %u ms, intensity %u of 1000, %u Hz%s\n", oh_vibs, ms, vib.intensity,
 		    vib.frequency_hz, vib.frequency_hz ? "" : " (resonance)");
 	}
+	return rc;
+}
+
+/* A separately tagged single impact; never reinterpret duration-based VIB
+ * traffic. The receiver is available only through the host's extended HELLO.
+ * The host does not make an unsafe fallback to the Samsung sine path. */
+int
+oneios_haptic_impact(uint32_t kind)
+{
+	if (!oh_ready || !(oneios_bridge_features() & OB_FEAT_HAPTIC_IMPACT) ||
+	    kind < OB_IMPACT_LIGHT || kind > OB_IMPACT_HEAVY) {
+		return -1;
+	}
+	struct ob_haptic_impact impact = { .kind = kind };
+	int rc = oneios_bridge_send(OB_CH_HAPTIC, OB_HAPTIC_IMPACT, &impact, sizeof impact);
+	if (rc != 0) oh_send_failed++;
 	return rc;
 }
 
@@ -158,6 +175,7 @@ oneios_haptic_actuator_running(bool on)
 		oh_act_stops++;
 	}
 	bzero(&oh_act, sizeof(oh_act));
+	oh_act.native_taps = oh_native_impacts;
 	lck_mtx_unlock(&oh_alock);
 	if (starts <= 3u || !on) {
 		char who[32];
@@ -183,6 +201,7 @@ oneios_haptic_actuator_play(const int16_t *frames, uint32_t count, uint32_t chan
 		peak = m > peak ? m : peak;
 	}
 	lck_mtx_lock(&oh_alock);
+	oh_act.native_taps = oh_native_impacts;
 	struct oa_request r = oa_period(&oh_act, frames, count, channels);
 	oh_act_periods++;
 	oh_act_frames += count;
@@ -201,6 +220,12 @@ oneios_haptic_actuator_play(const int16_t *frames, uint32_t count, uint32_t chan
 		(void)oneios_haptic_vib(r.ms, r.intensity, r.hz);
 	} else if (r.action == OA_STOP) {
 		(void)oneios_haptic_vib(0, 0, 0);
+	} else if (r.action == OA_IMPACT) {
+		/* Short isolated samples are distinct from 20/50 ms segments
+		 * of a sustained waveform. The 3 thresholds are experimental. */
+		uint32_t kind = r.intensity <= 250 ? OB_IMPACT_LIGHT :
+		    r.intensity <= 800 ? OB_IMPACT_MEDIUM : OB_IMPACT_HEAVY;
+		(void)oneios_haptic_impact(kind);
 	}
 	return count;
 }
@@ -501,6 +526,14 @@ oneios_haptic_start(void)
 		printf("ONEIOS HAPTIC: off: the host has no actuator (no force-feedback device opened)\n");
 		return -1;
 	}
+	/* The normal audio envelope path is unchanged unless BOTH the guest
+	 * boot argument and the host's negotiated feature enable native taps. */
+	uint32_t impact_optin = 0;
+	(void)PE_parse_boot_argn("oneios_native_impacts", &impact_optin, sizeof impact_optin);
+	oh_native_impacts = impact_optin == 1 &&
+	    (oneios_bridge_features() & OB_FEAT_HAPTIC_IMPACT) != 0;
+	printf("ONEIOS HAPTIC: native impacts %s (guest opt-in %u, host features %#x)\n",
+	    oh_native_impacts ? "enabled" : "off", impact_optin, oneios_bridge_features());
 	oh_ready = true;
 	printf("ONEIOS HAPTIC: on: host actuator over the bridge channel (amplitude 0..1000, frequency in Hz)\n");
 	if (kernel_thread_start(oh_root_thread, NULL, &th) == KERN_SUCCESS) {

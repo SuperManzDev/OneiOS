@@ -131,6 +131,10 @@ br_haptic *br_haptic_open_backend(const br_haptic_backend *backend, void *ctx)
   h->backend = backend;
   h->ctx = ctx;
   h->effect = -1;
+  // Custom/fake backends can opt in explicitly. The Treble backend overrides
+  // this after querying getSupportedEffects() on the real vendor HAL.
+  const char *opt = getenv("ONEIOS_HAPTIC_NATIVE_IMPACTS");
+  h->impact_enabled = backend && backend->impact && opt && !strcmp(opt, "1");
   snprintf(h->name, sizeof h->name, "the back end");
   pthread_mutex_init(&h->lock, NULL);
   pthread_cond_init(&h->wake, NULL);
@@ -309,7 +313,13 @@ static br_haptic *open_evdev(const char *dev_dir) { (void)dev_dir; return NULL; 
 // ---- the vibrator HAL back end (treble) ----------------------------------------------------------
 // The effect is a length and a level: on(length) then, with amplitude control, setAmplitude(level / 255 x gain), as
 // AOSP's vibrator service orders them. The period has no place in IVibrator's on(): the HAL plays at its own resonance.
-typedef struct { br_hal *hal; int32_t caps; unsigned length_ms, magnitude, gain; } vib_ctx;
+typedef struct {
+  br_hal *hal;
+  int32_t caps;
+  unsigned length_ms, magnitude, gain;
+  uint32_t preset_mask;            // validated at open, only with explicit opt-in
+  bool native_enabled, continuous; // no unconditional off after a completed preset
+} vib_ctx;
 
 static int vib_simple(vib_ctx *v, uint32_t code)
 {
@@ -329,12 +339,17 @@ static int vib_play(void *ctx, int id, bool on)
 {
   vib_ctx *v = ctx;
   (void)id;
-  if (!on) return vib_simple(v, HAL_VIB_OFF);
+  if (!on) {
+    int rc = vib_simple(v, HAL_VIB_OFF);
+    if (!rc) v->continuous = false;
+    return rc;
+  }
   ab_parcel p;
   br_hal_parcel(&p, HAL_VIBRATOR);
   ab_put_i32(&p, (int32_t)v->length_ms);
   ab_put_null_binder(&p);                    // no callback: the worker does not wait for the end
   int rc = br_hal_call(v->hal, HAL_VIB_ON, &p, NULL, NULL);
+  if (!rc) v->continuous = true;  // even if a later setAmplitude() fails
   if (rc || !(v->caps & HAL_VIB_CAP_AMPLITUDE)) return rc;
   float amplitude = (float)v->magnitude / (float)LEVEL_MAX * (float)v->gain / 10000.0f;
   if (amplitude > 1.0f) amplitude = 1.0f;
@@ -343,15 +358,63 @@ static int vib_play(void *ctx, int id, bool on)
   ab_put_float(&p, amplitude);
   return br_hal_call(v->hal, HAL_VIB_SET_AMPLITUDE, &p, NULL, NULL);
 }
+static int vib_take_i32(void *ctx, ab_reader *r)
+{
+  *(int32_t *)ctx = ab_get_i32(r);
+  return r->bad ? -EPROTO : 0;
+}
+
+static int vib_take_effects(void *ctx, ab_reader *r)
+{
+  uint32_t *mask = ctx;
+  int32_t n = ab_get_i32(r);
+  if (r->bad || n < 0 || n > 32) return -EPROTO;
+  for (int32_t i = 0; i < n; ++i) {
+    int32_t e = ab_get_i32(r);
+    if (e >= 0 && e < 32) *mask |= 1u << e;
+  }
+  return r->bad ? -EPROTO : 0;
+}
+
+// Explicit one-shot impact: the calibrated vendor preset is separate from
+// the legacy duration/frequency path. No EVIOCSFF or Samsung trigger indices.
+static int vib_impact(void *ctx, unsigned kind, unsigned *duration_ms)
+{
+  vib_ctx *v = ctx;
+  if (!v->native_enabled) return -EOPNOTSUPP;
+  int32_t effect, strength;
+  switch (kind) {
+  case BR_HAPTIC_IMPACT_LIGHT:  effect = HAL_VIB_EFFECT_TICK; strength = HAL_VIB_STRENGTH_LIGHT; break;
+  case BR_HAPTIC_IMPACT_MEDIUM: effect = HAL_VIB_EFFECT_CLICK; strength = HAL_VIB_STRENGTH_MEDIUM; break;
+  case BR_HAPTIC_IMPACT_HEAVY:  effect = HAL_VIB_EFFECT_HEAVY_CLICK; strength = HAL_VIB_STRENGTH_STRONG; break;
+  default: return -EINVAL;
+  }
+  if (!(v->preset_mask & (1u << effect))) return -EOPNOTSUPP;
+  ab_parcel p;
+  br_hal_parcel(&p, HAL_VIBRATOR);
+  ab_put_i32(&p, effect);
+  ab_put_i32(&p, strength);
+  ab_put_null_binder(&p);
+  int32_t duration = -1;
+  int rc = br_hal_call(v->hal, HAL_VIB_PERFORM, &p, vib_take_i32, &duration);
+  if (rc) return rc;
+  if (duration < 1 || duration > 1000) return -EPROTO;
+  *duration_ms = (unsigned)duration;
+  return 0;
+}
 static int vib_gain(void *ctx, unsigned gain) { ((vib_ctx *)ctx)->gain = gain > 10000 ? 10000 : gain; return 0; }
 static void vib_close(void *ctx)
 {
   vib_ctx *v = ctx;
-  (void)vib_simple(v, HAL_VIB_OFF);
+  // Legacy non-native behavior is preserved; a native preset must not send
+  // an off() after it naturally completed (One UI may be vibrating by then).
+  if (!v->native_enabled || v->continuous) (void)vib_simple(v, HAL_VIB_OFF);
   br_hal_close(v->hal);
   free(v);
 }
-static const br_haptic_backend hal_backend = { .upload = vib_upload, .play = vib_play, .gain = vib_gain, .close = vib_close };
+static const br_haptic_backend hal_backend = {
+  .upload = vib_upload, .play = vib_play, .gain = vib_gain, .impact = vib_impact, .close = vib_close
+};
 
 static int take_caps(void *ctx, ab_reader *r) { *(int32_t *)ctx = ab_get_i32(r); return r->bad ? -EPROTO : 0; }
 
@@ -368,9 +431,28 @@ static br_haptic *open_hal(const char *binder, char *why, size_t size)
   int rc = br_hal_call(v->hal, HAL_VIB_GET_CAPABILITIES, &p, take_caps, &v->caps);
   if (rc) { snprintf(why, size, "%s: getCapabilities: %s", HAL_VIBRATOR_INSTANCE, br_hal_error(rc)); br_hal_close(v->hal); free(v); return NULL; }
   int32_t version = br_hal_version(v->hal);
+  const char *opt = getenv("ONEIOS_HAPTIC_NATIVE_IMPACTS");
+  if (opt && !strcmp(opt, "1")) {
+    uint32_t mask = 0;
+    br_hal_parcel(&p, HAL_VIBRATOR);
+    rc = br_hal_call(v->hal, HAL_VIB_SUPPORTED_EFFECTS, &p, vib_take_effects, &mask);
+    const uint32_t required = (1u << HAL_VIB_EFFECT_TICK) |
+                              (1u << HAL_VIB_EFFECT_CLICK) |
+                              (1u << HAL_VIB_EFFECT_HEAVY_CLICK);
+    if (!rc && (mask & required) == required) {
+      v->preset_mask = mask;
+      v->native_enabled = true;
+    } else {
+      br_log(0, "haptics: native impacts unavailable: %s (supported preset mask %#x), continuous path unchanged",
+             rc ? br_hal_error(rc) : "not all TICK/CLICK/HEAVY_CLICK presets advertised", mask);
+    }
+  }
   br_haptic *h = br_haptic_open_backend(&hal_backend, v);
   if (!h) { br_hal_close(v->hal); free(v); snprintf(why, size, "no worker thread"); return NULL; }
+  h->impact_enabled = v->native_enabled;
   snprintf(h->name, sizeof h->name, "the vibrator HAL");
+  if (h->impact_enabled)
+    br_log(1, "haptics: native impacts enabled (explicit opt-in; TICK/CLICK/HEAVY_CLICK preflight PASS)");
   br_log(1, "haptics: on: the vibrator HAL %s (version %d, capabilities 0x%x: %s; level %u..%u as the amplitude)", HAL_VIBRATOR_INSTANCE, version,
          (unsigned)v->caps, v->caps & HAL_VIB_CAP_AMPLITUDE ? "amplitude control" : "no amplitude control, every effect at the HAL's own strength", LEVEL_FLOOR, LEVEL_MAX);
   return h;

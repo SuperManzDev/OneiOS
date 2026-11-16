@@ -34,7 +34,9 @@
 #define HAL_VIB_ON           3u                   // on(int timeoutMs, IVibratorCallback callback): callback null here
 #define HAL_VIB_PERFORM      4u                   // perform(Effect, EffectStrength, IVibratorCallback): duration in ms
 #define HAL_VIB_EFFECT_CLICK 0                    // android.hardware.vibrator.Effect.CLICK
+#define HAL_VIB_EFFECT_TICK 2                     // android.hardware.vibrator.Effect.TICK
 #define HAL_VIB_EFFECT_HEAVY_CLICK 5              // android.hardware.vibrator.Effect.HEAVY_CLICK
+#define HAL_VIB_STRENGTH_LIGHT 0                  // android.hardware.vibrator.EffectStrength.LIGHT
 #define HAL_VIB_STRENGTH_MEDIUM 1                 // android.hardware.vibrator.EffectStrength.MEDIUM
 #define HAL_VIB_STRENGTH_STRONG 2                 // android.hardware.vibrator.EffectStrength.STRONG
 #define HAL_VIB_SUPPORTED_EFFECTS 5u              // getSupportedEffects(): Effect[] (read only)
