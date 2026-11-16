@@ -38,7 +38,10 @@ if printf '%s\n' "$out" | grep -Fq 'WARNING:'; then
 fi
 
 # A directory with only zero-max nodes must not claim success.
+# Reset BOTH max values: earlier cases deliberately left panel0-backlight usable.
+chmod u+w "$dir/panel0-backlight/max_brightness"
 printf '0\n' > "$dir/panel/max_brightness"
+printf '0\n' > "$dir/panel0-backlight/max_brightness"
 if ONEIOS_BRIGHT_DIR="$dir" "$binary" inspect > "$dir/failed.txt"; then
   echo "inspect accepted all-zero maxima" >&2
   exit 1
