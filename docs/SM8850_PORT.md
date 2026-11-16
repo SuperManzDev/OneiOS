@@ -53,8 +53,11 @@ Keep any `displayctl` test separate from input inventory: it intentionally creat
 
 Input compatibility is now covered by `runtime/xnuhost/tests/test_xnuhost.c` and the `xnuhost-input` SM8850 CI job; the tests do not emulate the Samsung hardware itself. Capture a **bounded** non-destructive event trace of S Pen hover, tip contact and lift, including all raw keys/MSC/ABS codes, before making claims about hover support.
 
-## Scope of first commit series
+## Scope and boundaries of the SM8850 development branch
 
-Only a regression fixture for SM8850 CPU topology and the companion OneOS submodule URL/branch were added. No changes to xnuhost, kernel, Metal or GPU driver behavior are justified solely by these measurements. OneOS still blocks hot-switch on SM8850 until independent recovery verification.
+- Added CPU topology regression fixture from measured SM8850 sysfs and companion OneOS submodule fork/branch wiring.
+- Added **minimal** changes to xnuhost's evdev host input: accept the exact tool-less Samsung `sec_e-pen` capability signature (tip presses only until a real hover trace is available) and prefer a genuine direct `sec_touchscreen` over direct virtual touch devices from connected wearables. Both changes have targeted host unit tests and a dedicated SM8850 CI job.
+- Display and backlight findings are **documented only**. No display-driver, brightness or Samsung touch-power writes have been attempted on the S26.
+- No modifications to XNU, kernel patches, GPU driver behavior or the Android kernel. OneOS still blocks hot-switch on SM8850 until independent recovery verification. A green host CI suite is not proof of real-phone pen, touch, graphics, iOS boot, or safe recovery.
 
 Companion: https://github.com/YMGPwcca/OneOS/tree/feat/oneios-sm8850-m3q
