@@ -220,6 +220,26 @@ The flags `CAP_ON_CALLBACK` (0x01), `CAP_PERFORM_CALLBACK` (0x02), and frequency
 
 **Next on-device test candidate (active, separately reversible):** when the phone is idle and the owner explicitly expects a brief buzz, run exactly one `ONEIOS_HW_BACKEND_HAPTICS=treble ONEIOS_HW_FALLBACK=0 bridgectl haptic 80 150`. Inspect `haptics: on: the vibrator HAL`, `effect 1 played`, `0 failed` and exit code 0, then obtain visual/tactile confirmation. Note that this command calls HAL `on(80)` and `setAmplitude` (if supported), and **`off()` during normal close**, which can interrupt a concurrent One UI vibration. Do not assume a successful `on` result proves perceived amplitude, persistence or guest iOS haptic fidelity. No `FF_CUSTOM` guess, controller takeover, recovery/hot-switch or production-default change is authorized by this passive HAL result.
 
+## S26 active Vibrator HAL playback — PASS, too faint for practical use (2026-11-16)
+
+Following the successful passive AIDL v3 probe, the owner ran exactly one **active, supervised HAL backend** test under One UI:
+
+```text
+ONEIOS_HW_BACKEND_HAPTICS=treble ONEIOS_HW_FALLBACK=0 bridgectl haptic 80 150
+hw: haptics: backend treble (hw-backend-haptics=treble)
+haptics: on: the vibrator HAL android.hardware.vibrator.IVibrator/default (version 3, capabilities 0x3c: amplitude control; level 40..255 as the amplitude)
+haptics: effect 1 played on the vibrator HAL: 80 ms, period 6 ms, level 72 (intensity 150, 0 Hz asked)
+haptics: counters: 1 requests from the guest (1 vibrate, 0 stop; 0 replaced before they started), 1 effects played, 0 stopped, 0 failed on the vibrator HAL
+ok
+ADB exit status: 0
+```
+
+**Result: physical HAL haptic playback PASS, but tactile strength/calibration remains OPEN.** The owner reported the phone did vibrate, **so faintly that it was nearly imperceptible**. HAL AIDL calls `on(80, null)` and `setAmplitude(72/255)` both succeeded; normal bridge shutdown calls `off()`. This is not a claim that the full iOS/CoreHaptics experience, shape, latency, strength, or frequency mapping has passed.
+
+The requested amplitude value is `72/255 ≈ 0.282`, **not** a measured physical vibration strength. The existing Samsung/S24-derived intensity mapper computes `magnitude = intensity ? 40 + 215*intensity/1000 : 0`, and the HAL translates magnitude to an amplitude fraction. The short **80 ms** pulse and moderate-to-low requested amplitude plausibly explain the faint sensation. Also, HAL `on()` is sent before `setAmplitude()`; the resulting transition delay and system policy have not been measured. The frequency request `0` maps to the software's 6 ms nominal period, but HAL `on()` does **not** accept or use that period; it uses the vendor actuator's own behavior.
+
+**Next safe calibration proposal:** keep `treble` and `ONEIOS_HW_FALLBACK=0`, use **one 200 ms / intensity 400** test (maps to magnitude **126/255 ≈ 0.494**). Run with the phone idle, explicitly expecting an active vibration and possible interference with Android's concurrent haptics; record whether it is clearly perceptible, comfortable, or too strong. An intermediate test should precede any full-scale test; **do not** use `haptic-pattern` or attempt `FF_CUSTOM` trigger indices, change system gains or make `treble` the SM8850 production default before real calibration. For eventual crisp iOS-style taps, AIDL `CAP_COMPOSE_EFFECTS` (bit `0x20`) suggests a possible vendor-native composition path, but its primitive support, waveform repertoire, and fidelity are **not** yet proven.
+
 ## Captured S Pen evdev trace (2026-11-16)
 
 The user provided 11,126 `getevent -lt /dev/input/event12` log lines across 17.82 s, containing 3,507 SYN_REPORT frames, 2 complete hover/contact/out-of-range cycles and a third, still-in-hover cycle truncated by the recording timeout. No `BTN_STYLUS` press/release appeared in this capture (the side button capability exists but remains untested dynamically).
