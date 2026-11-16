@@ -185,6 +185,34 @@ hw_backend_checks() {
       bad "hw-backend: passive AIDL primitive inventory" "status $st: $(printf '%s' "$out" | tr '\n' '|'); HAL: $(cat "$VL" 2>/dev/null)"
     fi
     echo 4 > "$S24/.fake/hal/vibrator"
+    # A native effect MUST require explicit opt-in; the blocked path sends no
+    # active HAL request. Only CLICK/MEDIUM is allowed when the test is enabled.
+    rm -f "$VL"
+    out=$(with_hal "$S24" env ASAN_OPTIONS=detect_leaks=0 "$BCTL" haptic-hal-click 2>&1); st=$?
+    if [ "$st" = 1 ] && printf '%s\n' "$out" | grep -Fq 'blocked; set ONEIOS_HAPTIC_ACTIVE_TEST=1' && [ ! -e "$VL" ]; then
+      ok "hw-backend: native haptic CLICK is opt-in and refuses without actuation"
+    else
+      bad "hw-backend: haptic CLICK opt-in" "status $st: $(printf '%s' "$out" | tr '\n' '|'); HAL: $(cat "$VL" 2>/dev/null)"
+    fi
+
+    out=$(with_hal "$S24" env ASAN_OPTIONS=detect_leaks=0 ONEIOS_HAPTIC_ACTIVE_TEST=1 "$BCTL" haptic-hal-click 2>&1); st=$?
+    if [ "$st" = 0 ] && printf '%s\n' "$out" | grep -Fq 'HAL accepted one CLICK MEDIUM (reported duration 20 ms)' \
+      && printf '%s\n' "$out" | grep -Fq 'done (one perform; no off, gain, compose or fallback' \
+      && [ "$(cat "$VL" 2>/dev/null)" = "perform 0 1" ]; then
+      ok "hw-backend: one native preset CLICK with no on/off/gain/compose"
+    else
+      bad "hw-backend: native preset CLICK" "status $st: $(printf '%s' "$out" | tr '\n' '|'); HAL: $(cat "$VL" 2>/dev/null)"
+    fi
+
+    rm -f "$VL"
+    echo 1 > "$S24/.fake/hal/vibrator_effects_no_click"
+    out=$(with_hal "$S24" env ASAN_OPTIONS=detect_leaks=0 ONEIOS_HAPTIC_ACTIVE_TEST=1 "$BCTL" haptic-hal-click 2>&1); st=$?
+    if [ "$st" = 1 ] && printf '%s\n' "$out" | grep -Fq 'CLICK not in supported effects; no actuation attempted' && [ ! -e "$VL" ]; then
+      ok "hw-backend: native CLICK refuses unsupported effect without playback"
+    else
+      bad "hw-backend: native CLICK unsupported" "status $st: $(printf '%s' "$out" | tr '\n' '|'); HAL: $(cat "$VL" 2>/dev/null)"
+    fi
+    rm -f "$S24/.fake/hal/vibrator_effects_no_click"
     out=$(with_hal "$S24" env ASAN_OPTIONS=detect_leaks=0 ONEIOS_INPUT_DIR="$S24/dev/input" "$BCTL" haptic 40 2>&1); st=$?
     [ $st = 1 ] && printf '%s\n' "$out" | grep -q 'hw: haptics: backend samsung (the default)' && printf '%s\n' "$out" | grep -q 'haptics: off: no force-feedback device with FF_PERIODIC + FF_SINE under' \
       && [ ! -e "$VL" ] && ok "hw-backend: haptics samsung (the default): the evdev search, the vibrator HAL never called" || bad "hw-backend: haptics samsung" "status $st: $(printf '%s' "$out" | tr '\n' '|')"
