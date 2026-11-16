@@ -144,7 +144,7 @@ In the runtime package: `bin/oneios-display`, `bin/liboneios-display.so`, `lib/o
 With One UI running, as root. `displayctl` makes a session folder of its own under `/data/local/tmp`, serves a
 1440x3120 frame the way xnuhost does, starts the helper on it and draws for 5 s: eight colour bars, darker at the
 top, inside a white frame two pixels wide, with a white square that bounces. Then it closes the socket; the
-helper removes its layer and One UI is back. Nothing of the display's state is changed (no `--takeover`).
+helper removes its layer and One UI is back. Nothing of the display's state is changed (no `--takeover`). The `displayctl test` command **explicitly rejects** forwarding `--takeover` to the helper, even after `--`; regression tests enforce this, so a diagnostic cannot accidentally select the session-only mode. It still displays a transient top layer: close any sensitive app content before testing and be prepared to restart the display helper if it misbehaves.
 
 ```sh
 make -C runtime/display
