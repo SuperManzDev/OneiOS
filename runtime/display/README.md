@@ -93,8 +93,9 @@ NDK's `ANativeWindow` on that `Surface`, from the mapped memfd straight into the
   and the panel was black until iOS's Apple logo (phone, main 3233fed, 2026-11-15). Lines: `the first frame waits
   for DIR/ready (xnuhost's first frame of the guest's own with content); the boot screen stays`, then `first frame
   posted (...; held T s for session/ready, N wakes for flushes not shown)`. A helper started again in a session that is ready
-  (`oneios-tool phone display-restart`) posts at once. `--socket PATH` (and `displayctl` after the SM8850 diagnostic fix) never waits. Tested on
-  the phone yet; the host test is `test_hold_first`. The bars' black background layer (only for a frame that is not
+  (`oneios-tool phone display-restart`) posts at once. `--socket PATH` (and `displayctl` after the SM8850 diagnostic fix) never waits.
+  The production session's first-frame hold is covered by `test_hold_first`, while the standalone test's
+  socket selection is checked by `test_displayctl`. The bars' black background layer (only for a frame that is not
   the panel's size) is still drawn before the hold: in a session the frame is the panel's size, so there is none.
 - **Colour.** The buffers are tagged with a dataspace (`ANativeWindow_setBuffersDataSpace`, libnativewindow's: the
   library links `-lnativewindow` and `-Wl,-z,defs`; without the first, `1f7dd1f`'s library could not be loaded on the
