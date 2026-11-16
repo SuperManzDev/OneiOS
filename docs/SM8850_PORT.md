@@ -126,7 +126,14 @@ The original `thermalctl` listed **30 thermal zones of interest**, including **`
 
 **Fix:** `runtime/bridges/thermal/thermal.c` now narrowly excludes `cpu-hw-trip-*` before treating `cpu-*` as a genuine live CPU sensor. Their value/name strongly suggests a hardware trip threshold pseudo-zone, though the precise Samsung driver implementation is not verified. The regression test adds both 105 C pseudo-zones and checks they do not cause a false critical pressure, while verifying a **genuine** CPU zone at 105.5 C still triggers `TRAPPING`. A second fixture mirrors the user's cool readings and expects nominal pressure and cap 0. No generic temperature ceiling was lowered, no thermal safety mechanisms were disabled, no S24 behavior changed.
 
-**Expected post-fix:** about **28** relevant zones, real CPU max **37.4 C**, `soc` around **37.4 C**, pressure **nominal (0)** at similar physical temperatures, cap **0**. This is **pending on-phone retest** with a *new* `thermalctl` binary; snapshot values vary with load. The source and host regression fix alone are not yet a physical PASS for thermal.
+**Post-fix on-device acceptance: PASS (2026-11-16).** The owner downloaded runtime artifact from [Actions run 43802356785](https://github.com/YMGPwcca/OneiOS/actions/runs/43802356785), verified `oneios-runtime-0.0.0-ci-arm64.tar.zst: OK` with SHA256, deployed only the updated `thermalctl`, and reran the read-only check with One UI still active:
+
+- `backend: samsung`; **`zones: 28 of interest`**; neither `cpu-hw-trip-0` nor `cpu-hw-trip-1` appears among the accepted live zones.
+- `reading (C): cpu 40.5 gpu 37.4 ddr 37.4 soc 40.5 (cpu-0-5-1) xo - ap 33.3 battery 29.6 lrp 32.4; case = 32.4 (lrp)`.
+- **`level: nominal (0); case rule 0, SoC rule 0, battery rule 0; xnuhost step 0`**.
+- The list printed `cpu-0-5-1` at 40.1 C, while the later aggregated read was 40.5 C. The two readings occur at different times and can naturally change, especially with CPU activity; no inconsistency is established.
+
+**Conclusion:** The narrowly scoped pseudo-zone exclusion works in the actual S26 Ultra thermal sysfs, eliminates the false SoC 105 C / trapping report, and retains actual CPU/GPU/DDR and case/battery temperatures. The existing host regression also preserves real high-temperature alerts; the phone test does not itself establish every high-heat response. This is **thermal sensor classification and nominal pressure PASS**, not XNU boot/guest thermal-policy validation. No sysfs writes, hot-switch or physical thermal load test was performed.
 
 ## Captured S Pen evdev trace (2026-11-16)
 
