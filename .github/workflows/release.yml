@@ -184,9 +184,9 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "Built by [run $GITHUB_RUN_ID](https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID) from OneiOS commit \x60$GITHUB_SHA\x60."
+            echo "Built by [run $GITHUB_RUN_ID](https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID) from OneiOS commit $GITHUB_SHA."
             echo
-            echo "- **Runtime** \x60oneios-runtime-$VERSION-arm64.tar.zst\x60 (+ \x60.sha256\x60): OneiOS's own runtime code, no Apple firmware; the iOS image set is built locally. See [docs/releases.md](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/docs/releases.md)."
+            echo "- **Runtime** oneios-runtime-$VERSION-arm64.tar.zst (+ .sha256): OneiOS runtime code, no Apple firmware; the iOS image set is built locally. See [docs/releases.md](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/docs/releases.md)."
             echo "- **No APK** is built or published by this workflow."
           } > notes.md
           cat notes.md
