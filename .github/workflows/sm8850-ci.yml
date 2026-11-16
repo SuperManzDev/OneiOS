@@ -26,3 +26,14 @@ jobs:
           bash -n runtime/bridges/tests/host.sh
       - name: Compile and test host bridges
         run: make -C runtime/bridges test
+
+  xnuhost-input:
+    name: SM8850 touch and S Pen host regression tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build xnuhost unit tests with ASan and UBSan
+        run: make -C runtime/xnuhost build/host/test_xnuhost
+      - name: Test internal touch priority and tool-less S Pen detection
+        run: ASAN_OPTIONS=detect_leaks=0 runtime/xnuhost/build/host/test_xnuhost
