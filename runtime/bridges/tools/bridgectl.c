@@ -3,6 +3,7 @@
 //   bridgectl cpu [NVCPU]            the host's cores and the vCPU plan made from them
 //   bridgectl haptic-inspect              O_RDONLY evdev queries only: name, sine/periodic/gain bits, max effects
 //   bridgectl haptic-hal-inspect          read-only AIDL getCapabilities/version: never on, off or amplitude
+//   bridgectl haptic-hal-primitives       read-only AIDL composition/effect support and primitive durations
 //   bridgectl haptic [MS [INTENSITY [HZ]]]   one vibration (default 200 ms, 1000, resonance)
 //   bridgectl haptic-pattern         three taps and a ramp: what an iOS pattern feels like
 // The backend: ONEIOS_HW_BACKEND, ONEIOS_HW_BACKEND_<BRIDGE>, ONEIOS_HW_FALLBACK (bridges/hw_backend.h): haptic's is
@@ -126,6 +127,114 @@ static int haptic_hal_inspect(void)
          HAL_VIBRATOR_INSTANCE, version, (unsigned)caps,
          (caps & HAL_VIB_CAP_AMPLITUDE) ? "yes" : "no");
   puts("haptic-hal-inspect: ok (getCapabilities only; no on, off, amplitude or FF events)");
+  return 0;
+}
+
+// Only AIDL getters. No IVibrator.on/off/compose/perform/setAmplitude,
+// no sysfs writes, no opening the evdev node for playback. This query
+// establishes vendor-supported primitive IDs before any physical trial.
+typedef struct { int32_t n, id[32]; } haptic_int_list;
+static int haptic_take_list(void *ctx, ab_reader *r)
+{
+  haptic_int_list *l = ctx;
+  int32_t n = ab_get_i32(r);
+  if (r->bad || n < 0 || n > (int32_t)(sizeof l->id / sizeof l->id[0])) return -EPROTO;
+  for (int32_t i = 0; i < n; i++) l->id[i] = ab_get_i32(r);
+  if (r->bad) return -EPROTO;
+  l->n = n;
+  return 0;
+}
+static const char *haptic_primitive_name(int32_t id)
+{
+  switch (id) {
+  case 0: return "NOOP";
+  case 1: return "CLICK";
+  case 2: return "THUD";
+  case 3: return "SPIN";
+  case 4: return "QUICK_RISE";
+  case 5: return "SLOW_RISE";
+  case 6: return "QUICK_FALL";
+  case 7: return "LIGHT_TICK";
+  case 8: return "LOW_TICK";
+  default: return "unknown";
+  }
+}
+
+static int haptic_hal_primitives(void)
+{
+  char why[256] = "";
+  br_hal *hal = br_hal_open(NULL, HAL_VIBRATOR_INSTANCE, HAL_VIBRATOR, why, sizeof why);
+  if (!hal) {
+    printf("haptic-hal-primitives: no usable %s: %s\n", HAL_VIBRATOR_INSTANCE, why);
+    return 1;
+  }
+  ab_parcel p;
+  int32_t caps = 0;
+  br_hal_parcel(&p, HAL_VIBRATOR);
+  int rc = br_hal_call(hal, HAL_VIB_GET_CAPABILITIES, &p, haptic_hal_take_caps, &caps);
+  if (rc) {
+    printf("haptic-hal-primitives: getCapabilities failed: %s\n", br_hal_error(rc));
+    br_hal_close(hal);
+    return 1;
+  }
+  printf("haptic-hal-primitives: AIDL version %d capabilities 0x%x compose=%s\n",
+         br_hal_version(hal), (unsigned)caps,
+         (caps & HAL_VIB_CAP_COMPOSE) ? "yes" : "no");
+  if (!(caps & HAL_VIB_CAP_COMPOSE)) {
+    puts("haptic-hal-primitives: composition not advertised; no primitive queries");
+    br_hal_close(hal);
+    return 0;
+  }
+
+  int32_t max_delay = -1, max_size = -1;
+  br_hal_parcel(&p, HAL_VIBRATOR);
+  rc = br_hal_call(hal, HAL_VIB_COMPOSE_DELAY_MAX, &p, haptic_hal_take_caps, &max_delay);
+  if (!rc) {
+    br_hal_parcel(&p, HAL_VIBRATOR);
+    rc = br_hal_call(hal, HAL_VIB_COMPOSE_SIZE_MAX, &p, haptic_hal_take_caps, &max_size);
+  }
+  if (rc) {
+    printf("haptic-hal-primitives: composition limits query failed: %s\n", br_hal_error(rc));
+    br_hal_close(hal);
+    return 1;
+  }
+  printf("haptic-hal-primitives: max delay %d ms, max composition entries %d\n", max_delay, max_size);
+
+  haptic_int_list primitives = {0};
+  br_hal_parcel(&p, HAL_VIBRATOR);
+  rc = br_hal_call(hal, HAL_VIB_SUPPORTED_PRIMITIVES, &p, haptic_take_list, &primitives);
+  if (rc) {
+    printf("haptic-hal-primitives: getSupportedPrimitives failed: %s\n", br_hal_error(rc));
+    br_hal_close(hal);
+    return 1;
+  }
+  printf("haptic-hal-primitives: %d supported primitive(s)\n", primitives.n);
+  for (int32_t i = 0; i < primitives.n; i++) {
+    int32_t duration = -1;
+    br_hal_parcel(&p, HAL_VIBRATOR);
+    ab_put_i32(&p, primitives.id[i]);
+    rc = br_hal_call(hal, HAL_VIB_PRIMITIVE_DURATION, &p, haptic_hal_take_caps, &duration);
+    if (rc) {
+      printf("  primitive %d %-12s duration unavailable: %s\n",
+             primitives.id[i], haptic_primitive_name(primitives.id[i]), br_hal_error(rc));
+    } else {
+      printf("  primitive %d %-12s duration %d ms\n",
+             primitives.id[i], haptic_primitive_name(primitives.id[i]), duration);
+    }
+  }
+
+  haptic_int_list effects = {0};
+  br_hal_parcel(&p, HAL_VIBRATOR);
+  rc = br_hal_call(hal, HAL_VIB_SUPPORTED_EFFECTS, &p, haptic_take_list, &effects);
+  if (rc) {
+    printf("haptic-hal-primitives: getSupportedEffects unavailable: %s\n", br_hal_error(rc));
+  } else {
+    printf("haptic-hal-primitives: %d supported preset effect(s):", effects.n);
+    for (int32_t i = 0; i < effects.n; i++) printf(" %d", effects.id[i]);
+    putchar('\n');
+  }
+  br_hal_close(hal);
+  puts("haptic-hal-primitives: ok (read-only AIDL getters; no on, off, compose, perform, amplitude or FF)");
   return 0;
 }
 
@@ -392,10 +501,11 @@ int main(int argc, char **argv)
   br_hw_settings_init(&hw);
   if (br_hw_settings_env(&hw, &bad)) { fprintf(stderr, "bridgectl: bad %s (samsung or treble; ONEIOS_HW_FALLBACK 0 or 1)\n", bad); return 2; }
   br_hw_configure(&hw);
-  if (argc < 2) { fprintf(stderr, "usage: bridgectl cpu|haptic-inspect|haptic-hal-inspect|haptic|haptic-pattern|bt|net|audio|audio-loop ... (see tools/bridgectl.c)\n"); return 2; }
+  if (argc < 2) { fprintf(stderr, "usage: bridgectl cpu|haptic-inspect|haptic-hal-inspect|haptic-hal-primitives|haptic|haptic-pattern|bt|net|audio|audio-loop ... (see tools/bridgectl.c)\n"); return 2; }
   if (!strcmp(argv[1], "cpu")) rc = cpu(argc, argv);
   else if (!strcmp(argv[1], "haptic-inspect")) rc = haptic_inspect();
   else if (!strcmp(argv[1], "haptic-hal-inspect")) rc = haptic_hal_inspect();
+  else if (!strcmp(argv[1], "haptic-hal-primitives")) rc = haptic_hal_primitives();
   else if (!strcmp(argv[1], "haptic")) rc = haptic(argc, argv, false);
   else if (!strcmp(argv[1], "haptic-pattern")) rc = haptic(argc, argv, true);
   else if (!strcmp(argv[1], "bt")) rc = bt();
