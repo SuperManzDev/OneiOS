@@ -187,6 +187,39 @@ A separate read-only `dmesg` excerpt shows the Samsung kernel's `cs40l26 53-0040
 
 **Passive next step:** A new `bridgectl haptic-hal-inspect` command uses the existing stable AIDL client to resolve `android.hardware.vibrator.IVibrator/default`, query its descriptor/version and call **`getCapabilities()` only**, then release the binder handle. Unlike `ONEIOS_HW_BACKEND_HAPTICS=treble bridgectl haptic`, it makes **no `on()`, `off()`, `setAmplitude()`, gain write or evdev effect upload**, and cannot accidentally use the Samsung evdev fallback if the AIDL service is missing. Fake-HAL tests assert no active calls. The existing Samsung and treble **production haptic backends remain unchanged**; choosing whether to use the vendor HAL for the S26 requires physical service inspection and later a separately authorized reversible actuation test.
 
+## On-phone Vibrator HAL AIDL capability probe (2026-11-16)
+
+**Passive AIDL probe PASS on SM8850/Android 17.** The owner checked `service list` and found the registered services:
+
+- `android.frameworks.vibrator.IVibratorControlService/default`
+- `android.hardware.vibrator.IVibrator/default`
+- `android.hardware.vibrator.IVibratorManager/default`
+- `external_vibrator_service` (`android.os.IExternalVibratorService`)
+- `vibrator_manager` (`android.os.IVibratorManagerService`)
+
+The owner downloaded Android ARM64 runtime from Actions **43824202427**, verified the archive with `sha256sum -c` (`oneios-runtime-0.0.0-ci-arm64.tar.zst: OK`), staged only `bridgectl`, and ran `bridgectl haptic-hal-inspect` with One UI running. Output:
+
+```
+haptic-hal-inspect: android.hardware.vibrator.IVibrator/default version 3 capabilities 0x3c (amplitude=yes)
+haptic-hal-inspect: ok (getCapabilities only; no on, off, amplitude or FF events)
+ok
+```
+
+**Bitmask decoded against AOSP stable vibrator AIDL:**
+
+| Flag | Meaning |
+| --- | --- |
+| `0x04 CAP_AMPLITUDE_CONTROL` | `setAmplitude` supported in normal mode |
+| `0x08 CAP_EXTERNAL_CONTROL` | supports entering external-control mode |
+| `0x10 CAP_EXTERNAL_AMPLITUDE_CONTROL` | amplitude support while external control is enabled |
+| `0x20 CAP_COMPOSE_EFFECTS` | vibrator effect composition supported |
+
+The flags `CAP_ON_CALLBACK` (0x01), `CAP_PERFORM_CALLBACK` (0x02), and frequency-control/PWLE support are **not** set in the reported mask. Their absence does **not** prevent calling `on(ms, null)`, because the bridge deliberately provides a null callback. HAL version 3 refers to the stable AIDL interface version, **not a guarantee of iOS haptic feature parity**. AOSP source: https://android.googlesource.com/platform/hardware/interfaces/+/refs/heads/master/vibrator/aidl/android/hardware/vibrator/IVibrator.aidl
+
+`haptic-hal-inspect` itself only resolves Binder, checks descriptor/version, calls `getCapabilities()`, and closes its own Binder handle: **no vibration, `on`, `off`, `setAmplitude`, `setExternalControl`, `FF_GAIN`, `EVIOCSFF`, or evdev play**. This gives a viable candidate alternative to the Samsung `FF_SINE` path (which definitively failed at `EVIOCSFF`), but **active HAL playback is not yet validated on device**. `CAP_EXTERNAL_CONTROL` does not mean external control is currently active, and should **not** be enabled for the simple `on(ms)` diagnostic.
+
+**Next on-device test candidate (active, separately reversible):** when the phone is idle and the owner explicitly expects a brief buzz, run exactly one `ONEIOS_HW_BACKEND_HAPTICS=treble ONEIOS_HW_FALLBACK=0 bridgectl haptic 80 150`. Inspect `haptics: on: the vibrator HAL`, `effect 1 played`, `0 failed` and exit code 0, then obtain visual/tactile confirmation. Note that this command calls HAL `on(80)` and `setAmplitude` (if supported), and **`off()` during normal close**, which can interrupt a concurrent One UI vibration. Do not assume a successful `on` result proves perceived amplitude, persistence or guest iOS haptic fidelity. No `FF_CUSTOM` guess, controller takeover, recovery/hot-switch or production-default change is authorized by this passive HAL result.
+
 ## Captured S Pen evdev trace (2026-11-16)
 
 The user provided 11,126 `getevent -lt /dev/input/event12` log lines across 17.82 s, containing 3,507 SYN_REPORT frames, 2 complete hover/contact/out-of-range cycles and a third, still-in-hover cycle truncated by the recording timeout. No `BTN_STYLUS` press/release appeared in this capture (the side button capability exists but remains untested dynamically).
