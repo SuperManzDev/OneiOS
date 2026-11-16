@@ -189,6 +189,49 @@ static void test_cpu(const char *tmp)
   CHECK(br_cpu_read("/nonexistent", &t) == -1);
 }
 
+// Galaxy S26 Ultra (SM-S948B / m3q / SM8850), captured from a rooted Android 17 host.
+// These sysfs capacities are relative scheduler scores: 741 does not imply six
+// physical efficiency cores. Until XNU scheduling is validated on SM8850 we
+// test the current automatic 6E/2P classification instead of silently changing it.
+static void test_sm8850_cpu(const char *tmp)
+{
+  char root[400], rel[128], value[64];
+  snprintf(root, sizeof root, "%s/sm8850", tmp);
+  for (unsigned i = 0; i < 8; i++) {
+    const unsigned capacity = i < 6 ? 741 : 1024;
+    const unsigned maximum = i < 6 ? 3628800 : 4742400;
+    const unsigned minimum = i < 6 ? 384000 : 768000;
+    const unsigned policy = i < 6 ? 0 : 6;
+    snprintf(rel, sizeof rel, "devices/system/cpu/cpu%u/cpu_capacity", i);
+    snprintf(value, sizeof value, "%u\\n", capacity); put_file(root, rel, value);
+    snprintf(rel, sizeof rel, "devices/system/cpu/cpu%u/cpufreq/cpuinfo_max_freq", i);
+    snprintf(value, sizeof value, "%u\\n", maximum); put_file(root, rel, value);
+    snprintf(rel, sizeof rel, "devices/system/cpu/cpu%u/cpufreq/cpuinfo_min_freq", i);
+    snprintf(value, sizeof value, "%u\\n", minimum); put_file(root, rel, value);
+    snprintf(rel, sizeof rel, "devices/system/cpu/cpu%u/cpufreq/related_cpus", i);
+    snprintf(value, sizeof value, "%u\\n", policy); put_file(root, rel, value);
+    snprintf(rel, sizeof rel, "devices/system/cpu/cpu%u/regs/identification/midr_el1", i);
+    put_file(root, rel, "0x510f0021\\n");
+  }
+  br_cpu_topology t;
+  br_cpu_plan plan;
+  CHECK(br_cpu_read(root, &t) == 0);
+  CHECK(t.ncpu == 8 && t.n_e == 6 && t.n_p == 2);
+  CHECK(t.cpu[0].capacity == 741 && t.cpu[5].type == 'E');
+  CHECK(t.cpu[6].capacity == 1024 && t.cpu[7].type == 'P');
+  CHECK(br_cpu_plan_make(&t, 8, false, &plan) == 0);
+  CHECK(plan.n_e == 6 && plan.n_p == 2 && plan.nvcpu == 8);
+  CHECK(plan.v[0].affinity == 0x3f && plan.v[5].affinity == 0x3f);
+  CHECK(plan.v[6].affinity == 0xc0 && plan.v[7].affinity == 0xc0);
+  CHECK(plan.v[0].max_khz == 3628800 && plan.v[7].max_khz == 4742400);
+  CHECK(plan.v[0].host_cpu == 0 && plan.v[7].host_cpu == 7);
+  CHECK(br_cpu_plan_make(&t, 8, true, &plan) == 0);
+  CHECK(plan.v[0].affinity == 0x01 && plan.v[5].affinity == 0x20);
+  CHECK(plan.v[6].affinity == 0x40 && plan.v[7].affinity == 0x80);
+  CHECK(br_cpu_plan_make(&t, 4, false, &plan) == 0);
+  CHECK(plan.n_e == 1 && plan.n_p == 3); // current plan policy with reduced vCPU count
+}
+
 // ---- haptics -------------------------------------------------------------------------------------
 typedef struct { unsigned uploads, plays, stops, last_length, last_period, last_magnitude, gain; int next_id; } fake_motor;
 static int fm_upload(void *ctx, int id, unsigned length_ms, unsigned period_ms, unsigned magnitude)
@@ -920,6 +963,7 @@ int main(void)
   char tmp[] = "/tmp/oneios-bridges-XXXXXX";
   if (!mkdtemp(tmp)) return 2;
   test_cpu(tmp);
+  test_sm8850_cpu(tmp);
   test_haptic();
   test_net();
   test_bt(tmp);
