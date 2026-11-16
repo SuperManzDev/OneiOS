@@ -27,13 +27,21 @@ are 50-60 C above it. This bridge does, inside xnuhost only.
 
 | Reading | Node | Note |
 |---|---|---|
-| cpu | the hottest `cpu-*` / `cpuss-*` zone of `/sys/class/thermal` | millidegrees; a zone that reads -273 C is skipped |
+| cpu | the hottest genuine `cpu-*` / `cpuss-*` temperature zone of `/sys/class/thermal` | millidegrees; an off sensor (-273 C) is skipped; `cpu-hw-trip-*` hardware trip pseudo-zones are excluded |
 | gpu | the hottest `gpuss-*` zone | |
 | ddr, xo | `ddr`, `xo-therm` | |
 | soc | the hottest of cpu, gpu, ddr, with the zone's name | |
 | ap (board) | `/sys/class/sec/sec-ap-thermistor/temperature` | tenths; Samsung's board thermistor by the SoC |
 | battery | `/sys/class/power_supply/battery/temp` | tenths |
 | lrp (case) | `/sys/class/power_supply/battery/lrp` | tenths. Samsung's charger limits current by it from 37-39 C with the screen on and acts again at 46 C (the phone's device tree: `battery,temp_table_LRP_NORMAL` 390/380/380/370, `battery,mix_v2_lrp_cond` 460). Taken as the case temperature [inference]; `ap` when there is no `lrp` |
+
+### SM8850 thermal-zone classification fix (2026-11-16)
+
+A read-only `thermalctl` scan on Samsung Galaxy S26 Ultra (SM-S948B/m3q) reported **30 zones of interest**, including `cpu-hw-trip-0` and `cpu-hw-trip-1` at a fixed **105000 millidegrees** each, while other live CPU zones were **35.1–37.4 C**, GPU zones **34.7–35.9 C**, DDR **35.5 C**, board AP **32.2 C**, case LRP **32.1 C**, and battery **30.1 C**. The old `group_of` matched any `cpu-*` prefix, so it misclassified the two `cpu-hw-trip-*` nodes as live CPU readings. This yielded a false `cpu 105.0, soc 105.0` and `level trapping (40), SoC rule 40`. The cap remained step 0 by policy, but forwarding `trapping` to iOS would have been wrong.
+
+The backend now skips **only** the exact `cpu-hw-trip-` family before matching the general CPU zone prefix. The reported 105000 values look like hardware trip thresholds, not current temperatures; their role is inferred from naming, constant values, and disagreement with other sensors, not confirmed by vendor thermal driver source. The narrow filter preserves legitimate live CPU zones above 105 C. Fake-sysfs regression checks verify the pseudo-zones do not increase the live CPU/SoC maximum and that real CPU overheating still triggers `trapping`.
+
+Expected for the same S26 snapshot once an updated `thermalctl` binary is run: **28 zones**, `cpu 37.4`, `gpu 35.9`, `ddr 35.5`, `soc 37.4`, `case 32.1`, `battery 30.1`, `level nominal (0)`, `xnuhost step 0`. Those exact temperatures are **snapshot expectations, not live sensor promises**. Existing S24 tests retain their behavior. Avoid guest boot until real-phone verification.
 
 Read every 5 s from xnuhost's start (about 40 files), whether or not iOS listens.
 
