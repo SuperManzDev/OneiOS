@@ -233,14 +233,15 @@ static void test_sm8850_cpu(const char *tmp)
 }
 
 // ---- haptics -------------------------------------------------------------------------------------
-typedef struct { unsigned uploads, plays, stops, last_length, last_period, last_magnitude, gain; int next_id; } fake_motor;
+typedef struct { unsigned uploads, plays, stops, last_length, last_period, last_magnitude, gain; int next_id, fail_upload, fail_play; } fake_motor;
 static int fm_upload(void *ctx, int id, unsigned length_ms, unsigned period_ms, unsigned magnitude)
 {
   fake_motor *m = ctx;
   m->uploads++; m->last_length = length_ms; m->last_period = period_ms; m->last_magnitude = magnitude;
+  if (m->fail_upload) return -EINVAL;
   return id < 0 ? m->next_id++ : id;
 }
-static int fm_play(void *ctx, int id, bool on) { fake_motor *m = ctx; (void)id; if (on) m->plays++; else m->stops++; return 0; }
+static int fm_play(void *ctx, int id, bool on) { fake_motor *m = ctx; (void)id; if (on && m->fail_play) return -EINVAL; if (on) m->plays++; else m->stops++; return 0; }
 static int fm_gain(void *ctx, unsigned gain) { ((fake_motor *)ctx)->gain = gain; return 0; }
 static const br_haptic_backend fake_motor_backend = { .upload = fm_upload, .play = fm_play, .gain = fm_gain };
 
@@ -297,6 +298,33 @@ static void test_haptic(void)
   br_haptic_stats_get(sim, &st);
   CHECK(st.vib == 20 && st.played == 20 && st.stop == 1 && st.stopped == 1 && st.failed == 0 && st.replaced == 0);
   br_haptic_close(sim);
+
+  // S26 Ultra's first physical evdev test yielded EINVAL and the old CLI
+  // returned "ok" even when 0 effects played. Model both possible failure
+  // stages, making sure the asynchronous worker exposes the actual failure.
+  fake_motor rejected_upload = { .next_id = 0, .fail_upload = 1 };
+  br_haptic *bad = br_haptic_open_backend(&fake_motor_backend, &rejected_upload);
+  CHECK(bad != NULL);
+  if (bad) {
+    br_haptic_vib(bad, 80, 150, 0);
+    br_haptic_flush(bad);
+    br_haptic_stats_get(bad, &st);
+    CHECK(st.vib == 1 && st.played == 0 && st.failed == 1 && rejected_upload.uploads == 1 && rejected_upload.plays == 0);
+    CHECK(rejected_upload.last_length == 80 && rejected_upload.last_period == 6 &&
+          rejected_upload.last_magnitude == 72);
+    br_haptic_close(bad);
+  }
+
+  fake_motor rejected_play = { .next_id = 0, .fail_play = 1 };
+  bad = br_haptic_open_backend(&fake_motor_backend, &rejected_play);
+  CHECK(bad != NULL);
+  if (bad) {
+    br_haptic_vib(bad, 80, 150, 0);
+    br_haptic_flush(bad);
+    br_haptic_stats_get(bad, &st);
+    CHECK(st.vib == 1 && st.played == 0 && st.failed == 1 && rejected_play.uploads == 1 && rejected_play.plays == 0);
+    br_haptic_close(bad);
+  }
 }
 
 // ---- network -------------------------------------------------------------------------------------
