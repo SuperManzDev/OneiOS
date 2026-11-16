@@ -1,0 +1,28 @@
+name: SM8850 port CI
+on:
+  push:
+    branches: ['feat/oneios-sm8850-m3q']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sm8850-oneios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bridges:
+    name: Host bridge regression tests (SM8850)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate changes
+        run: |
+          git diff --check
+          bash -n runtime/bridges/tests/host.sh
+      - name: Compile and test host bridges
+        run: make -C runtime/bridges test
