@@ -1277,27 +1277,25 @@ static void test_pen(void)
   SETBIT(abs, 0x1a); SETBIT(keys, 0x14b);
   int full = xh_pen_rank("sec_e-pen", keys, sizeof keys, abs, sizeof abs, &why);
   CHECK(full > plain && full == 1 + 2 + 4);                                     // tilt, the side button, a pen's name
-  // S26 Ultra (SM-S948B/m3q): sec_e-pen exposes BTN_TOUCH, BTN_STYLUS,
-  // ABS_X/Y, PRESSURE, DISTANCE and TILT_X/Y, but not BTN_TOOL_PEN.
+  // Samsung SM-S948B getevent calls key 0x140 "BTN_DIGI".
+  // linux/input-event-codes.h calls that same code BTN_TOOL_PEN: no
+  // tool-less Samsung exception is needed or desirable.
   uint8_t s26keys[96] = { 0 }, s26abs[8] = { 0 };
-  SETBIT(s26keys, 0x14a); SETBIT(s26keys, 0x14b);      // tip and side button
-  SETBIT(s26abs, 0); SETBIT(s26abs, 1);               // absolute X/Y
-  SETBIT(s26abs, 0x18); SETBIT(s26abs, 0x19);         // pressure and distance
-  SETBIT(s26abs, 0x1a); SETBIT(s26abs, 0x1b);         // tilt in both directions
-  CHECK(xh_pen_rank("sec_e-pen", s26keys, sizeof s26keys, s26abs, sizeof s26abs, &why) > 0 && why == NULL);
-  CHECK(xh_pen_rank("another-digitizer", s26keys, sizeof s26keys, s26abs, sizeof s26abs, &why) == 0 &&
+  SETBIT(s26keys, 0x140);                              // BTN_DIGI / BTN_TOOL_PEN
+  SETBIT(s26keys, 0x14a); SETBIT(s26keys, 0x14b);      // tip and side button capability
+  SETBIT(s26abs, 0); SETBIT(s26abs, 1);               // X / Y
+  SETBIT(s26abs, 0x18); SETBIT(s26abs, 0x19);         // pressure / distance
+  SETBIT(s26abs, 0x1a); SETBIT(s26abs, 0x1b);         // tilt X / Y
+  CHECK(xh_pen_rank("sec_e-pen", s26keys, sizeof s26keys, s26abs, sizeof s26abs, &why) == 1 + 3 + 4 && why == NULL);
+  s26keys[0x140 / 8] &= (uint8_t)~(1u << (0x140 % 8));
+  CHECK(xh_pen_rank("sec_e-pen", s26keys, sizeof s26keys, s26abs, sizeof s26abs, &why) == 0 &&
         why && strstr(why, "BTN_TOOL_PEN"));
-  s26abs[0x19 / 8] &= (uint8_t)~(1u << (0x19 % 8));
-  CHECK(xh_pen_rank("sec_e-pen", s26keys, sizeof s26keys, s26abs, sizeof s26abs, &why) == 0);
-  SETBIT(s26abs, 0x19);
-  s26keys[0x14b / 8] &= (uint8_t)~(1u << (0x14b % 8));
-  CHECK(xh_pen_rank("sec_e-pen", s26keys, sizeof s26keys, s26abs, sizeof s26abs, &why) == 0);
-  SETBIT(s26keys, 0x14b);
-  SETBIT(s26abs, 0x35);                              // no multitouch device is a pen
+  SETBIT(s26keys, 0x140);
+  SETBIT(s26abs, 0x35);                              // never take a multitouch source
   CHECK(xh_pen_rank("sec_e-pen", s26keys, sizeof s26keys, s26abs, sizeof s26abs, &why) == 0 &&
         why && strstr(why, "multitouch"));
   s26abs[0x35 / 8] &= (uint8_t)~(1u << (0x35 % 8));
-  SETBIT(s26keys, 115);                              // physical volume keys are never pen input
+  SETBIT(s26keys, 115);                              // never take a physical volume-key device
   CHECK(xh_pen_rank("sec_e-pen", s26keys, sizeof s26keys, s26abs, sizeof s26abs, &why) == 0 &&
         why && strstr(why, "side keys"));
 
@@ -1309,6 +1307,42 @@ static void test_pen(void)
   CHECK(xh_pen_rank("sec_e-pen", keys, sizeof keys, abs, sizeof abs, &why) == 0 && strstr(why, "side keys"));
 #undef SETBIT
   CHECK(xh_pen_lookup == xh_pen_lookup_evdev);                                  // the default lookup, replaceable
+
+  // A captured SM8850 event sequence: BTN_DIGI(0x140) DOWN while hovering,
+  // BTN_TOUCH(0x14a) DOWN/UP for contact, then BTN_DIGI UP out of range.
+  // Its coordinates/pressure/distance are in the evdev units measured on phone.
+  xh_pen_device m3q = { .fd = -1, .stylus = true };
+  m3q.axis[XH_PEN_X] = (xh_pen_axis){ 0, 7330, 0, true };
+  m3q.axis[XH_PEN_Y] = (xh_pen_axis){ 0, 15881, 0, true };
+  m3q.axis[XH_PEN_PRESSURE] = (xh_pen_axis){ 0, 4095, 0, true };
+  m3q.axis[XH_PEN_DISTANCE] = (xh_pen_axis){ 0, 255, 0, true };
+  m3q.axis[XH_PEN_TILT_X] = (xh_pen_axis){ -63, 63, 0, true };
+  m3q.axis[XH_PEN_TILT_Y] = (xh_pen_axis){ -63, 63, 0, true };
+  xh_pen_state m3q_hover = { .tool = true };
+  m3q_hover.value[XH_PEN_X] = 5924;
+  m3q_hover.value[XH_PEN_Y] = 10584;
+  m3q_hover.value[XH_PEN_DISTANCE] = 77;
+  m3q_hover.value[XH_PEN_TILT_X] = -1;
+  m3q_hover.value[XH_PEN_TILT_Y] = 13;
+  xh_pen_sample m3q_sample;
+  xh_pen_sample_of(&m3q, 0, false, &m3q_hover, &m3q_sample);
+  CHECK(m3q_sample.in_range && !m3q_sample.touch && m3q_sample.distance == 77 &&
+        m3q_sample.pressure == 0 && m3q_sample.x == 5924 * 32767 / 7330 &&
+        m3q_sample.y == 10584 * 32767 / 15881);
+  m3q_hover.touch = true;
+  m3q_hover.value[XH_PEN_PRESSURE] = 156;            // observed max in first stroke
+  m3q_hover.value[XH_PEN_DISTANCE] = 0;
+  xh_pen_sample_of(&m3q, 0, false, &m3q_hover, &m3q_sample);
+  CHECK(m3q_sample.in_range && m3q_sample.touch && m3q_sample.pressure == 156 &&
+        m3q_sample.distance == 0);
+  m3q_hover.touch = false;
+  m3q_hover.value[XH_PEN_PRESSURE] = 0;
+  m3q_hover.value[XH_PEN_DISTANCE] = 28;
+  xh_pen_sample_of(&m3q, 0, false, &m3q_hover, &m3q_sample);
+  CHECK(m3q_sample.in_range && !m3q_sample.touch && m3q_sample.distance == 28);
+  m3q_hover.tool = false;
+  xh_pen_sample_of(&m3q, 0, false, &m3q_hover, &m3q_sample);
+  CHECK(!m3q_sample.in_range && !m3q_sample.touch && m3q_sample.distance == 0);
 
   // The sample: a digitizer of 0..16000 x 0..34000, pressure 0..8191, height 0..255, tilt +-63 without a resolution.
   xh_pen_device d = { .fd = -1, .stylus = true };
