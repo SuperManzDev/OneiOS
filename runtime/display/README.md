@@ -93,7 +93,7 @@ NDK's `ANativeWindow` on that `Surface`, from the mapped memfd straight into the
   and the panel was black until iOS's Apple logo (phone, main 3233fed, 2026-11-15). Lines: `the first frame waits
   for DIR/ready (xnuhost's first frame of the guest's own with content); the boot screen stays`, then `first frame
   posted (...; held T s for session/ready, N wakes for flushes not shown)`. A helper started again in a session that is ready
-  (`oneios-tool phone display-restart`) posts at once. `--socket PATH` (and `displayctl`) never waits. Not run on
+  (`oneios-tool phone display-restart`) posts at once. `--socket PATH` (and `displayctl` after the SM8850 diagnostic fix) never waits. Tested on
   the phone yet; the host test is `test_hold_first`. The bars' black background layer (only for a frame that is not
   the panel's size) is still drawn before the hold: in a session the frame is the panel's size, so there is none.
 - **Colour.** The buffers are tagged with a dataspace (`ANativeWindow_setBuffersDataSpace`, libnativewindow's: the
@@ -162,9 +162,9 @@ or HD+ the test, which changes nothing of the display, shows the frame scaled to
 order from the left: white, yellow, cyan, green, magenta, red, blue, dark grey. Red and blue swapped means the
 buffer format is not what the copy assumed.
 
-What to send back: the command's whole output. It ends with `displayctl: ok` when the helper connected, took
-the frames and exited 0 after the socket closed. The helper's own lines (`oneios-display: ...`) say the guest
-frame, the panel, the placement, the buffer it got and the number of frames.
+**SM8850 first physical diagnostic and fix (2026-11-16):** The initial `displayctl test --seconds 5` connected and detected the S26 Ultra panel (1440x3120/120 Hz) and SurfaceControl layer, but the helper logged `the first frame waits for .../displayctl.*/ready` and `the socket closed after 0 frames`, despite the test sending 482 flushes. Root cause: `displayctl` launched the helper with `--session DIR`, so the helper awaited the **real XNU boot's** `session/ready` marker, which a standalone display test never creates. The test now launches with `--socket DIR/display.sock`: the helper's existing diagnostic mode has **no ready hold**. This does not change how an actual XNU session uses `--session`, and does not allow `--takeover`. The CLI now allowlists forwarded diagnostic-only options, preventing `--session` and `--socket` from overriding the safe endpoint.
+
+What to send back: the command's whole output **and** a visual confirmation that the bars/square actually appeared. `displayctl: ok` only means the command connected and the helper exited cleanly: **it is not alone proof that any frame reached the display**. The acceptance log must include `oneios-display: first frame posted` and a subsequent `oneios-display: the socket closed after N frames` with `N > 0`. The helper's lines also report the panel resolution, buffer format and actual layer geometry.
 
 Variants:
 
