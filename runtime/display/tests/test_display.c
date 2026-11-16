@@ -374,6 +374,13 @@ static void test_displayctl(const char *displayctl, const char *dir)
   CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
   snprintf(command, sizeof command, "grep -q 'pattern in R,G,B,A half float' %s/out && grep -q '^displayctl: ok' %s/out && rm -f %s/out", dir, dir, dir);
   CHECK(system(command) == 0);
+  // A live One UI diagnostic must reject the destructive helper mode before
+  // spawning a helper or creating the test session.
+  snprintf(command, sizeof command, "TMPDIR=%s %s test --seconds 1 --size 64x48 --helper %s -- --takeover > %s/out 2>&1", dir, displayctl, self_path, dir);
+  status = system(command);
+  CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 2);
+  snprintf(command, sizeof command, "grep -q 'refusing --takeover' %s/out && ! ls -d %s/displayctl.* 2>/dev/null && rm -f %s/out", dir, dir, dir);
+  CHECK(system(command) == 0);
   snprintf(command, sizeof command, "%s test --format rgb565 > /dev/null 2>&1", displayctl);
   status = system(command);
   CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 2);                  // a format it does not make: usage
