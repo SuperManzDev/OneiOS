@@ -129,6 +129,36 @@ static int incoming(void *ctx, uint64_t object, uint32_t code, uint32_t flags, a
       ab_put_i32(reply, caps);
       return 0;
     }
+    // Read-only AIDL capability/primitive queries. Do NOT call note() for
+    // these methods: the phone-test asserts they never request actuation.
+    case HAL_VIB_SUPPORTED_EFFECTS:
+      ab_put_ok(reply);
+      ab_put_i32(reply, 3);
+      ab_put_i32(reply, 0); // CLICK
+      ab_put_i32(reply, 2); // TICK
+      ab_put_i32(reply, 5); // HEAVY_CLICK
+      return 0;
+    case HAL_VIB_COMPOSE_DELAY_MAX:
+      ab_put_ok(reply); ab_put_i32(reply, 500); return 0;
+    case HAL_VIB_COMPOSE_SIZE_MAX:
+      ab_put_ok(reply); ab_put_i32(reply, 16); return 0;
+    case HAL_VIB_SUPPORTED_PRIMITIVES:
+      ab_put_ok(reply);
+      ab_put_i32(reply, 3);
+      ab_put_i32(reply, 0); // NOOP
+      ab_put_i32(reply, 1); // CLICK
+      ab_put_i32(reply, 7); // LIGHT_TICK
+      return 0;
+    case HAL_VIB_PRIMITIVE_DURATION: {
+      int32_t primitive = ab_get_i32(r);
+      if (r->bad || (primitive != 0 && primitive != 1 && primitive != 7)) {
+        ab_put_service_error(reply, 1);
+        return 0;
+      }
+      ab_put_ok(reply);
+      ab_put_i32(reply, primitive == 0 ? 0 : primitive == 1 ? 20 : 9);
+      return 0;
+    }
     case HAL_VIB_OFF: note("off"); ab_put_ok(reply); return 0;
     case HAL_VIB_ON: {
       int32_t ms = ab_get_i32(r);
