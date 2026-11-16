@@ -39,7 +39,7 @@ The host shell was Bash on CachyOS. An initial `getevent -lp | Select-String ...
 - A **connected HUAWEI Band 11-F88** on `/dev/input/event14` exposes `INPUT_PROP_DIRECT` and MT X/Y 0..1079 / 0..2399 (8 slots). Its virtual touchscreen must not be selected instead of Samsung's internal panel if event numbers reorder. The input scanner now first looks for an eligible `sec_touchscreen` and prefers it over other direct touch devices. Without a native Samsung panel, generic direct touch selection is unchanged.
 - Physical keys are split across `gpio-keys` event0 (Volume Up), `pmic_resin` event5 (Volume Down), and `pmic_pwrkey` event4 (Power). A paired HUAWEI Band consumer-control device (event13) also advertises volume keys.
 - S Pen: `/dev/input/event12` `sec_e-pen` advertises BTN_TOUCH and BTN_STYLUS, ABS_X 0..7330, ABS_Y 0..15881, pressure 0..4095, distance 0..255, and tilt X/Y -63..63. **Correction:** the earlier claim that BTN_TOOL_PEN was absent was incorrect: `getevent` prints `BTN_DIGI` for evdev key code `0x140`, exactly the same numeric value as Linux `BTN_TOOL_PEN`. A full evdev capture confirms `BTN_DIGI DOWN/UP` at the start/end of hover. OneiOS's original strict detection and hover logic is compatible; an unnecessary tool-less Samsung detection exception was reverted.
-- Backlight: `/sys/class/backlight/panel` reports max 0, while `panel0-backlight` reports max 12750 and brightness/actual_brightness both 0 at capture. The Samsung backend's lookup skips zero maxima, so it would choose `panel0-backlight`. Do **not** interpret sysfs zero as proof that the display is off; Android reported display ON.
+- Backlight: `/sys/class/backlight/panel` reports max 0, while `panel0-backlight` reports max 12750. The Samsung backend's lookup skips zero maxima and chooses `panel0-backlight`. An earlier reading had brightness/actual_brightness 0 even when Android reported display ON; a later user-controlled slider sweep establishes that the node's **brightness** responds to One UI. `actual_brightness` still reads 0 at all tested levels (not a usable luminance sensor). `bl_power=0` in these observations while the screen is lit (normally Linux unblank).
 - **Important brightness side effect:** existing `brightctl info` calls `br_bright_open`, which can write a midrange value if the initial brightness reads 0 (and may enable ALS and touch IC power changes). **Do not run `info`, `levels`, or `als` on SM8850 during discovery.** The SM8850 branch now adds **`brightctl inspect`**, a separate `O_RDONLY`-only path that reports named backlight sysfs values without opening the active bridge, touching ALS or changing the touch IC. The fixture test `runtime/bridges/brightness/test_inspect.sh` covers the exact S26 observation (`panel` max 0, `panel0-backlight` max 12750, both current values 0) and no file content changes. Probe must still be built and tested on the phone before the active brightness route can be evaluated.
 - The first multi-line `adb shell su -c '...'` backlight attempt printed KernelSU's `Argument to option 'c' missing` and then output from the remaining shell loop. Treat the displayed sysfs values as a passive shell reading, not a successful root-only command; no writes were made.
 
@@ -50,6 +50,20 @@ adb shell getevent -pl | grep -E 'add device|name:|ABS_MT_(POSITION_X|POSITION_Y
 ```
 
 Keep any `displayctl` test separate from input inventory: it intentionally creates a transient SurfaceFlinger layer above One UI. No `--takeover`, mode change, hot-switch or kernel patch is justified by the passive display dump.
+
+### One UI manual brightness sweep (read-only, 2026-11-16)
+
+Adaptive brightness was intended to be disabled for repeatability; the user manually selected roughly three different positions on the One UI slider. The percentages label the approximate slider positions, **not calibrated luminance percentages**. No sysfs writes or root-only commands were used for this sweep.
+
+| Slider position | `settings get system screen_brightness` | `panel0-backlight/brightness` | `actual_brightness` | `bl_power` |
+| --- | ---: | ---: | ---: | ---: |
+| Low (~20%) | 49 | 512 | 0 | 0 |
+| Middle (~50%) | 115 | 1228 | 0 | 0 |
+| High (~90%) | 222 | 2300 | 0 | 0 |
+
+`settings get system screen_brightness_float` returned `null` at every position. `panel` remained max/brightness/actual=0 and `bl_power=0`; `panel0-backlight/max_brightness` stayed 12750.
+
+**Key safety finding:** The active brightness bridge currently sets its ceiling to `br_bright_ceiling(12750) = 12750` by default; it only halves special max values 510/51000. The measured `panel0-backlight/brightness` at a near-high manual slider setting was **2300**, far lower than 12750. The upper region could be reserved for high-brightness/HDR handling or another extended hardware mode; there is not enough evidence yet to infer its purpose or safe maximum. **Do not run active `brightctl info/levels` or an SM8850 iOS brightness session using the unbounded default ceiling.** Need a passive reading at the slider's normal maximum (without extra-brightness/HBM toggles) and a validated ceiling policy before enabling active writes.
 
 ## Captured S Pen evdev trace (2026-11-16)
 
