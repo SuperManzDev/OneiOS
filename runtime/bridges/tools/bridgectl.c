@@ -4,6 +4,7 @@
 //   bridgectl haptic-inspect              O_RDONLY evdev queries only: name, sine/periodic/gain bits, max effects
 //   bridgectl haptic-hal-inspect          read-only AIDL getCapabilities/version: never on, off or amplitude
 //   bridgectl haptic-hal-primitives       read-only AIDL composition/effect support and primitive durations
+//   bridgectl haptic-native-inspect       passive, opt-in production Treble impact preflight; never actuate
 //   bridgectl haptic-hal-click            ACTIVE one-shot IVibrator.perform(CLICK, MEDIUM); explicit opt-in required
 //   bridgectl haptic-hal-heavy-click      ACTIVE one-shot IVibrator.perform(HEAVY_CLICK, STRONG); explicit opt-in required
 //   bridgectl haptic [MS [INTENSITY [HZ]]]   one vibration (default 200 ms, 1000, resonance)
@@ -237,6 +238,37 @@ static int haptic_hal_primitives(void)
   }
   br_hal_close(hal);
   puts("haptic-hal-primitives: ok (read-only AIDL getters; no on, off, compose, perform, amplitude or FF)");
+  return 0;
+}
+
+// Passive physical integration probe for the REAL production haptic bridge.
+// The native opt-in causes HAL getCapabilities/getSupportedEffects only, and
+// the bridge is closed unused. No off()/perform()/on()/setAmplitude(), even
+// when the required preset set is unavailable. Missing HAL is fail-closed.
+static int haptic_native_inspect(int argc)
+{
+  if (argc != 2) return 2;
+  const char *enabled = getenv("ONEIOS_HAPTIC_NATIVE_IMPACTS");
+  if (!enabled || strcmp(enabled, "1")) {
+    puts("haptic-native-inspect: blocked; set ONEIOS_HAPTIC_NATIVE_IMPACTS=1 to permit read-only native preflight");
+    return 1;
+  }
+  if (br_hw_fallback_allowed(br_hw_current())) {
+    puts("haptic-native-inspect: blocked; disable ONEIOS_HW_FALLBACK to prevent evdev fallback");
+    return 1;
+  }
+  br_haptic *h = br_haptic_open_as(NULL, BR_HW_TREBLE, NULL);
+  if (!h) {
+    puts("haptic-native-inspect: Treble bridge unavailable; no evdev fallback");
+    return 1;
+  }
+  bool supported = br_haptic_impacts_available(h);
+  br_haptic_close(h);                   // no on/off/gain/perform when native was requested
+  if (!supported) {
+    puts("haptic-native-inspect: native preset preflight FAILED (no actuation)");
+    return 1;
+  }
+  puts("haptic-native-inspect: ready (native impact preflight PASS; no on, off, gain, perform or evdev)");
   return 0;
 }
 
@@ -573,11 +605,12 @@ int main(int argc, char **argv)
   br_hw_settings_init(&hw);
   if (br_hw_settings_env(&hw, &bad)) { fprintf(stderr, "bridgectl: bad %s (samsung or treble; ONEIOS_HW_FALLBACK 0 or 1)\n", bad); return 2; }
   br_hw_configure(&hw);
-  if (argc < 2) { fprintf(stderr, "usage: bridgectl cpu|haptic-inspect|haptic-hal-inspect|haptic-hal-primitives|haptic-hal-click|haptic-hal-heavy-click|haptic|haptic-pattern|bt|net|audio|audio-loop ... (see tools/bridgectl.c)\n"); return 2; }
+  if (argc < 2) { fprintf(stderr, "usage: bridgectl cpu|haptic-inspect|haptic-hal-inspect|haptic-hal-primitives|haptic-native-inspect|haptic-hal-click|haptic-hal-heavy-click|haptic|haptic-pattern|bt|net|audio|audio-loop ... (see tools/bridgectl.c)\n"); return 2; }
   if (!strcmp(argv[1], "cpu")) rc = cpu(argc, argv);
   else if (!strcmp(argv[1], "haptic-inspect")) rc = haptic_inspect();
   else if (!strcmp(argv[1], "haptic-hal-inspect")) rc = haptic_hal_inspect();
   else if (!strcmp(argv[1], "haptic-hal-primitives")) rc = haptic_hal_primitives();
+  else if (!strcmp(argv[1], "haptic-native-inspect")) rc = haptic_native_inspect(argc);
   else if (!strcmp(argv[1], "haptic-hal-click")) rc = haptic_hal_preset(argc, false);
   else if (!strcmp(argv[1], "haptic-hal-heavy-click")) rc = haptic_hal_preset(argc, true);
   else if (!strcmp(argv[1], "haptic")) rc = haptic(argc, argv, false);

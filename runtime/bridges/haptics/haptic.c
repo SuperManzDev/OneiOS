@@ -400,7 +400,7 @@ typedef struct {
   int32_t caps;
   unsigned length_ms, magnitude, gain;
   uint32_t preset_mask;            // validated at open, only with explicit opt-in
-  bool native_enabled, continuous; // no unconditional off after a completed preset
+  bool native_requested, native_enabled, continuous; // opt-in inspection must never emit an unused off()
 } vib_ctx;
 
 static int vib_simple(vib_ctx *v, uint32_t code)
@@ -488,9 +488,11 @@ static int vib_gain(void *ctx, unsigned gain) { ((vib_ctx *)ctx)->gain = gain > 
 static void vib_close(void *ctx)
 {
   vib_ctx *v = ctx;
-  // Legacy non-native behavior is preserved; a native preset must not send
-  // an off() after it naturally completed (One UI may be vibrating by then).
-  if (!v->native_enabled || v->continuous) (void)vib_simple(v, HAL_VIB_OFF);
+  // Keep legacy shutdown behavior when native mode was not requested.
+  // During explicit native opt-in, closing an unused or completed bridge
+  // must NOT send off(): One UI could currently own the same actuator.
+  // A continuous on(ms) started by this bridge still needs to be stopped.
+  if (!v->native_requested || v->continuous) (void)vib_simple(v, HAL_VIB_OFF);
   br_hal_close(v->hal);
   free(v);
 }
@@ -514,7 +516,8 @@ static br_haptic *open_hal(const char *binder, char *why, size_t size)
   if (rc) { snprintf(why, size, "%s: getCapabilities: %s", HAL_VIBRATOR_INSTANCE, br_hal_error(rc)); br_hal_close(v->hal); free(v); return NULL; }
   int32_t version = br_hal_version(v->hal);
   const char *opt = getenv("ONEIOS_HAPTIC_NATIVE_IMPACTS");
-  if (opt && !strcmp(opt, "1")) {
+  v->native_requested = opt && !strcmp(opt, "1");
+  if (v->native_requested) {
     uint32_t mask = 0;
     br_hal_parcel(&p, HAL_VIBRATOR);
     rc = br_hal_call(v->hal, HAL_VIB_SUPPORTED_EFFECTS, &p, vib_take_effects, &mask);

@@ -329,6 +329,20 @@ There is no evidence of an AIDL/Binder invocation failure or motor failure in th
 
 **Validation gates:** host fake motor + fake AIDL/virtuo bridge tests cover opt-in rejection, extended/legacy HELLO compatibility, supported-effects preflight, invalid impact packets, one effect per tap, long-run VIB/STOP unchanged, immediate cancellation and no late off. Source-level/CI success is needed; real guest playback, onset latency, light/medium quality, App-level iOS haptic fidelity and shutdown behavior remain **UNVERIFIED** until a separately authorized guest session. No XNU boot, display takeover, Wi-Fi takeover or thermal stress has been performed for this change.
 
+## Safe production Haptics preflight before guest boot (2026-11-16)
+
+The new native-impact code has passed SM8850 host regression **4/4 jobs** (run 43838772950), and Android ARM64 runtime packaging **SUCCESS** with artifact `oneios-runtime` (run 43838772788). The host CI environment has **no binderfs**: its `test_hal_binder` **compiled but skipped**; pure host fake-motor/VirtIO queue tests passed (346 checks). No native-impact guest session has been booted.
+
+To close the hardware integration gap **without vibrating the phone**, `bridgectl haptic-native-inspect` opens the actual production Treble `br_haptic_open_as` backend, queries the AIDL `getCapabilities()` and `getSupportedEffects()` presets, checks TICK/CLICK/HEAVY_CLICK, and closes unused. It is opt-in (`ONEIOS_HAPTIC_NATIVE_IMPACTS=1`), refuses `ONEIOS_HW_FALLBACK=1`, and never emits HAL `on`, `off`, `setAmplitude`, `perform`, external control or any evdev writes. A related close fix suppresses **late off()** when native mode was requested but the HAL did not advertise all presets and no continuous haptic was started; legacy non-native mode still stops its motor on close. Fake-HAL phone tests assert no state-changing HAL calls for enabled, blocked and failed-preflight cases.
+
+On real S26, after the **latest matching** checksum-verified ARM64 runtime was staged (not an older `bridgectl`):
+
+```sh
+adb shell su -c 'ONEIOS_HAPTIC_NATIVE_IMPACTS=1 ONEIOS_HW_FALLBACK=0 /data/local/tmp/oneios-m3q-diag/bin/bridgectl haptic-native-inspect'
+```
+
+Expected: `haptics: native impacts enabled ...`, followed by `haptic-native-inspect: ready (native impact preflight PASS; no on, off, gain, perform or evdev)`, `ok`, ADB exit 0. **No physical actuation is required for this acceptance**. It will verify the production HAL open/preflight, but not a guest-produced impact, stream waveform fidelity, reset under real guest or audio-to-tick latency. Do not enable XNU boot/hot-switch, display takeover or Wi-Fi takeover for this test.
+
 ## Captured S Pen evdev trace (2026-11-16)
 
 The user provided 11,126 `getevent -lt /dev/input/event12` log lines across 17.82 s, containing 3,507 SYN_REPORT frames, 2 complete hover/contact/out-of-range cycles and a third, still-in-hover cycle truncated by the recording timeout. No `BTN_STYLUS` press/release appeared in this capture (the side button capability exists but remains untested dynamically).
