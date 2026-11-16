@@ -122,7 +122,7 @@ oneios_haptic_vib(uint32_t ms, uint32_t intensity, uint32_t frequency_hz)
 int
 oneios_haptic_impact(uint32_t kind)
 {
-	if (!oh_ready || !(oneios_bridge_features() & OB_FEAT_HAPTIC_IMPACT) ||
+	if (!oh_ready || !oh_native_impacts || !(oneios_bridge_features() & OB_FEAT_HAPTIC_IMPACT) ||
 	    kind < OB_IMPACT_LIGHT || kind > OB_IMPACT_HEAVY) {
 		return -1;
 	}

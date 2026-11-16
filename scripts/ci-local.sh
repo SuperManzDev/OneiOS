@@ -48,6 +48,13 @@ test -f external/virglrenderer/src/drm/drm2kgsl/drm2kgsl_renderer.c
 
 runtime/host-tests.sh
 kernel/tests/host.sh
+# Also exercise driver-side PCM haptics, camera and userland host tests.
+# The runtime suite already covers runtime/; do not run its tests twice.
+while IFS= read -r test_script; do
+  case "$test_script" in runtime/*|kernel/*) continue ;; esac
+  echo "ci-local: $test_script"
+  "$test_script"
+done < <(git ls-files '*/tests/host.sh')
 
 if [ "$mode" = all ]; then
   runtime/package.sh "$version"

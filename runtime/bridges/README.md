@@ -122,6 +122,16 @@ while still reporting discrete impacts separately. Guest-side counters include
 impacts sent and the first 24 successfully sent impact kinds are logged.
 This is an observability fix and test hardening, **not** guest E2E validation.
 Physical guest playback still requires a separately authorized phone session.
+**PCM-to-VirtIO host regression (2026-11-16).** The bridge tests now feed a
+stand-in guest's Actuator PCM periods through the *production* `oa_period`
+classifier, send the resulting impact or duration events over the real
+`xh_virtio` guest/host queues, and verify the fake HAL's callbacks.
+Cases cover isolated heavy/light/medium bursts, legacy operation without
+guest opt-in, sustained VIB/STOP, malformed impact frames, and active-impact
+cancellation on guest reset. The guest's `oneios_haptic_impact()` also
+requires `oh_native_impacts`, so the host's advertised feature alone
+cannot bypass the guest boot opt-in. These are deterministic host tests;
+they neither access a phone nor prove live iOS/Android actuation.
 **Wi-Fi** (`build/android/wifictl`, `bin/wifictl` in the runtime package):
 
 ```sh

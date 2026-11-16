@@ -2818,3 +2818,19 @@ fallback and shutdown semantics remain unchanged. Host regression tests
 exercise impact dispatch and counters. SM8850 builds on the owner's
 CachyOS self-hosted runner (see `docs/building.md`); automatic CI
 does not touch ADB or root, nor prove physical guest behavior.
+
+### SM8850 PCM-to-native-impact regression (2026-11-16)
+
+`runtime/bridges/tests/test_bridges.c` now drives the same `oa_period`
+Actuator classifier used by the guest through the real host VirtIO device
+model into a fake vibrator backend. The regression exercises isolated
+heavy, medium and light taps; a guest with native opt-in disabled;
+sustained VIB/STOP; malformed impact requests; and reset cancellation.
+`oneios_haptic_impact` additionally refuses an impact unless the guest's
+`oneios_native_impacts=1` opt-in was accepted during boot.
+
+The standalone `scripts/ci-local.sh` now calls driver/userland host suites
+as well as runtime and kernel tests. That includes the standalone native
+PCM classifier test (`drivers/haptics/test_actuator.c`) that had been
+omitted from local CI. These tests use fake devices on Linux; a live
+S26 Ultra guest boot remains necessary to prove actual iOS haptics.

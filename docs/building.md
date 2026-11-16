@@ -33,7 +33,7 @@ The timer polls for a new commit approximately one minute after the
 previous CI run finishes. It runs `scripts/ci-local.sh all 0.0.0-ci`, which
 requires NDK 28.2.13676358, SDK build-tools `d8`, Java, Rust's Android target
 and `qemu-aarch64`. The script fetches the pinned `virglrenderer`, runs the
-host runtime and kernel regressions, builds the ARM64 runtime, then verifies
+host runtime and kernel regressions, the driver's and userland's portable host tests (including PCM native-impact classification), builds the ARM64 runtime, then verifies
 its ELF dependencies and SHA-256. No device access, ADB, root or OneOS
 session switch is performed automatically. A binderfs-unavailable test can
 still be skipped; that skip must not be reported as a hardware PASS.
