@@ -356,8 +356,8 @@ static void test_displayctl(const char *displayctl, const char *dir)
   snprintf(command, sizeof command, "TMPDIR=%s %s test --seconds 1 --size 64x48 --helper %s -- --hz 60 > %s/out 2>&1", dir, displayctl, helper, dir);
   int status = system(command);
   CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 1);                  // a helper that never connects is a failure
-  snprintf(command, sizeof command, "grep -q 'session .*displayctl\\..* --wait 5 --hz 60' %s/helper.args", dir);
-  CHECK(system(command) == 0);                                          // it was started on the session, options passed on
+  snprintf(command, sizeof command, "grep -q 'socket .*displayctl\\..*/display.sock --wait 5 --hz 60' %s/helper.args", dir);
+  CHECK(system(command) == 0);                                          // direct diagnostic socket; never an XNU session
   snprintf(command, sizeof command, "grep -q 'ended before it connected' %s/out && ! ls -d %s/displayctl.* 2>/dev/null", dir, dir);
   CHECK(system(command) == 0);                                          // and its folder is gone
   snprintf(command, sizeof command, "rm -f %s/helper.sh %s/helper.args %s/out", dir, dir, dir);
@@ -374,25 +374,30 @@ static void test_displayctl(const char *displayctl, const char *dir)
   CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
   snprintf(command, sizeof command, "grep -q 'pattern in R,G,B,A half float' %s/out && grep -q '^displayctl: ok' %s/out && rm -f %s/out", dir, dir, dir);
   CHECK(system(command) == 0);
-  // A live One UI diagnostic must reject the destructive helper mode before
-  // spawning a helper or creating the test session.
-  snprintf(command, sizeof command, "TMPDIR=%s %s test --seconds 1 --size 64x48 --helper %s -- --takeover > %s/out 2>&1", dir, displayctl, self_path, dir);
-  status = system(command);
-  CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 2);
-  snprintf(command, sizeof command, "grep -q 'refusing --takeover' %s/out && ! ls -d %s/displayctl.* 2>/dev/null && rm -f %s/out", dir, dir, dir);
-  CHECK(system(command) == 0);
+  // A live One UI diagnostic must reject destructive or endpoint-overriding
+  // helper flags before spawning a helper or creating a test session.
+  static const char * const denied[] = { "--takeover", "--session", "--socket", "--lib", "--wait", "--logical" };
+  for (unsigned n = 0; n < sizeof denied / sizeof *denied; n++) {
+    snprintf(command, sizeof command, "TMPDIR=%s %s test --seconds 1 --size 64x48 --helper %s -- %s ignored > %s/out 2>&1",
+             dir, displayctl, self_path, denied[n], dir);
+    status = system(command);
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 2);
+    snprintf(command, sizeof command, "grep -q 'refusing %s' %s/out && ! ls -d %s/displayctl.* 2>/dev/null && rm -f %s/out",
+             denied[n], dir, dir, dir);
+    CHECK(system(command) == 0);
+  }
   snprintf(command, sizeof command, "%s test --format rgb565 > /dev/null 2>&1", displayctl);
   status = system(command);
   CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 2);                  // a format it does not make: usage
 }
 
-// This program as the helper displayctl starts (--session DIR --wait N): connects, takes the hello,
+// This program as the helper displayctl starts (--socket PATH --wait N): connects, takes the hello,
 // reads flushes until the socket closes, and checks it saw the moving square's damage.
-static int as_helper(const char *session)
+static int as_helper(const char *socket_path)
 {
-  char path[300];
-  snprintf(path, sizeof path, "%s/display.sock", session);
-  int fd = xhd_connect(path, 5000, NULL);
+  // Diagnostics must be free of the real guest's session/ready requirement.
+  if (xhd_hold_first(NULL)) return 9;
+  int fd = xhd_connect(socket_path, 5000, NULL);
   struct xhd_frame frame;
   if (fd < 0 || xhd_recv_hello(fd, &frame, 5000)) return 9;
   struct xhd_rect damage = { 0, 0, 0, 0 };
@@ -423,7 +428,7 @@ static int as_helper(const char *session)
 
 int main(int argc, char **argv)
 {
-  if (argc > 2 && !strcmp(argv[1], "--session")) return as_helper(argv[2]);
+  if (argc > 2 && !strcmp(argv[1], "--socket")) return as_helper(argv[2]);
   self_path = argv[0];
   char dir[] = "/tmp/oneios-display-test.XXXXXX";
   if (!mkdtemp(dir)) { perror("mkdtemp"); return 1; }
