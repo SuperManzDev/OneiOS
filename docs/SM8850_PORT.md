@@ -24,6 +24,24 @@ Verified SHA-256 of the public OneiOS v0.1.9 release before running diagnostics,
 
 These results show basic host GPU execution, **not** guest Metal or graphics output, sustained FPS or reliability.
 
+## Display and input inventory (2026-11-16, non-invasive)
+
+The host shell was Bash on CachyOS. An initial `getevent -lp | Select-String ...` command failed because `Select-String` is PowerShell-only; **no input-device capabilities were collected** in that run. Do not infer touchscreen/S Pen compatibility from it.
+
+- Android display reports an internal 1440 x 3120 panel at 600 dpi and portrait orientation 0, with 120 Hz modes for native (1440 x 3120), FHD+ (1080 x 2340) and HD+ (720 x 1560) resolutions.
+- SurfaceFlinger's active panel mode reports 1440 x 3120, peakRefreshRate about 120 Hz and vsyncRate about 240 Hz; Android's 48 Hz `renderFrameRate` is a per-render-rate observation, **not** evidence that the panel's native refresh is 48 Hz.
+- The display reports ARR support and intermediate render rates; do not conflate app render-frame pacing with the selected display mode.
+- `/dev/dri/card0` and `/dev/dri/renderD128` exist (crw-rw-rw-); `/sys/class/backlight/panel` and `/sys/class/backlight/panel0-backlight` exist. `/sys/class/graphics` is absent on this host; this alone is not a fault.
+- `panel0-backlight` resolves through the Qualcomm MDSS MDP backlight class. No brightness values or writable interface were exercised.
+- `dumpsys display` exposes the internal cutout and rounded corners; no display bridge has been launched or validated on this phone.
+
+**Next safe read-only command from the Linux host:**
+
+```sh
+adb shell getevent -pl | grep -E 'add device|name:|ABS_MT_(POSITION_X|POSITION_Y|SLOT|TRACKING_ID)|ABS_(X|Y|PRESSURE|DISTANCE|TILT_X|TILT_Y)|BTN_(TOOL_PEN|TOUCH|STYLUS|STYLUS2)|KEY_(POWER|VOLUMEUP|VOLUMEDOWN)'
+```
+
+Keep any `displayctl` test separate from input inventory: it intentionally creates a transient SurfaceFlinger layer above One UI. No `--takeover`, mode change, hot-switch or kernel patch is justified by the passive display dump.
 ## Scope of first commit series
 
 Only a regression fixture for SM8850 CPU topology and the companion OneOS submodule URL/branch were added. No changes to xnuhost, kernel, Metal or GPU driver behavior are justified solely by these measurements. OneOS still blocks hot-switch on SM8850 until independent recovery verification.
