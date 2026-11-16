@@ -112,6 +112,22 @@ The user ran the already-staged no-takeover command `/data/local/tmp/oneios-m3q-
 
 **Next stage:** Passive read-only checks of SM8850 battery and thermal sensors using `batteryctl` and `thermalctl` from the same verified runtime; record which readings are valid and which are missing. Defer haptic playback, audio routing, Bluetooth controller takeover, camera acquisition, brightness writes and especially XNU hot-switch until independently validated, individually reversible tests and recovery checks. This successful FP16 host overlay does **not** establish guest Metal rendering, S Pen routed into iOS, XNU boot or safe recovery.
 
+## On-device battery and thermal bridge inventory (2026-11-16)
+
+The owner staged checksum-verified ARM64 `batteryctl` (448 KiB) and `thermalctl` (485 KiB) from the existing CI runtime under `/data/local/tmp/oneios-m3q-diag/bin/` and ran each **once**, read-only, with One UI running and no XNU session.
+
+### Battery Samsung backend — PASS
+
+`batteryctl` reported `bridges: hw: battery: backend samsung (the default)`, `status "Discharging"` and `batteryctl: ok`. The sample was **90%**, `present=1`, `plugged=0`, `charging=0`, `full=0`, **30.1 C** (`temp=301` tenths), **4327 mV**, **-270 mA**, **5000 mAh** reported both full and design, **28 cycles**, and `minutes=1000` (an instantaneous approximate runtime estimate, not a measured discharge duration). The Samsung default sysfs backend appears functionally compatible; this is a single snapshot rather than longitudinal power validation.
+
+### Thermal Samsung backend — false `trapping` from non-live trip zones
+
+The original `thermalctl` listed **30 thermal zones of interest**, including **`cpu-hw-trip-0` = 105000** and **`cpu-hw-trip-1` = 105000** millidegrees. Other readings at the same moment were real CPU max **37.4 C** (`cpu-0-5-1`), GPU max **35.9 C**, DDR **35.5 C**, AP board **32.2 C**, battery **30.1 C**, `lrp`/case **32.1 C**. `xo-therm` was absent/unknown. The old thermal reader used broad `cpu-*` matching, accidentally included the two `cpu-hw-trip-*` zones and reported **`cpu 105.0 soc 105.0 (cpu-hw-trip-0)`**, **`level trapping (40)`**, despite the hardware being cool. `xnuhost step 0` was unaffected, but the virtual thermal notification to iOS would have been incorrect.
+
+**Fix:** `runtime/bridges/thermal/thermal.c` now narrowly excludes `cpu-hw-trip-*` before treating `cpu-*` as a genuine live CPU sensor. Their value/name strongly suggests a hardware trip threshold pseudo-zone, though the precise Samsung driver implementation is not verified. The regression test adds both 105 C pseudo-zones and checks they do not cause a false critical pressure, while verifying a **genuine** CPU zone at 105.5 C still triggers `TRAPPING`. A second fixture mirrors the user's cool readings and expects nominal pressure and cap 0. No generic temperature ceiling was lowered, no thermal safety mechanisms were disabled, no S24 behavior changed.
+
+**Expected post-fix:** about **28** relevant zones, real CPU max **37.4 C**, `soc` around **37.4 C**, pressure **nominal (0)** at similar physical temperatures, cap **0**. This is **pending on-phone retest** with a *new* `thermalctl` binary; snapshot values vary with load. The source and host regression fix alone are not yet a physical PASS for thermal.
+
 ## Captured S Pen evdev trace (2026-11-16)
 
 The user provided 11,126 `getevent -lt /dev/input/event12` log lines across 17.82 s, containing 3,507 SYN_REPORT frames, 2 complete hover/contact/out-of-range cycles and a third, still-in-hover cycle truncated by the recording timeout. No `BTN_STYLUS` press/release appeared in this capture (the side button capability exists but remains untested dynamically).
