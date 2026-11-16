@@ -2,11 +2,11 @@
 # APK/OneOS app builds were intentionally removed to avoid spending Actions
 # minutes on Gradle, macOS and Android SDK jobs during hardware-port work.
 # The optional app/ submodule is never checked out by this workflow.
-# A PR or main push builds a runtime artifact; a main tag or manual dispatch
+# Self-hosted CachyOS only; do not schedule this public repo's PR code on a personal runner.
+# A main push builds a runtime artifact; a main tag or manual dispatch
 # also publishes its verified runtime archive and checksum as a release.
 name: build and release
 on:
-  pull_request:
   push:
     branches: [main]
     tags: ['v*']
@@ -20,10 +20,10 @@ permissions:
   contents: read
 concurrency:
   group: build-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' && github.event_name == 'push' }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
 jobs:
   plan:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, linux, x64, oneios-cachyos]
     timeout-minutes: 5
     outputs:
       release: ${{ steps.plan.outputs.release }}
@@ -56,13 +56,15 @@ jobs:
 
   runtime:
     needs: plan
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, linux, x64, oneios-cachyos]
     timeout-minutes: 30
     env:
       GH_TOKEN: ${{ github.token }}
       VERSION: ${{ needs.plan.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: The fork's tree is not in this checkout (app/ stays an empty submodule folder)
         run: |
           set -euo pipefail
@@ -76,25 +78,8 @@ jobs:
           git ls-files -z '*.sh' | xargs -0 -n1 bash -n
           git ls-files -z '*.py' | xargs -0 python3 -m py_compile
           shellcheck -S error $(git ls-files 'kernel/*.sh' 'runtime/*.sh' '.github/*.sh')
-      - name: NDK 28.2.13676358, the Rust target and oneios-tool
-        run: .github/scripts/setup-build.sh
-      - name: Sources the runtime links (Droid-VM's virglrenderer for drm2kgsl, the 3D GPU)
-        # Without this checkout xnuhost and gpuctl build 2D-only and say so at run time (runtime 0.1.1's GPU check
-        # failed on the phone with "this build has no drm2kgsl"). A release must have it; every build gets it, so a
-        # pull request builds what a release builds. Fetched before the host tests (docs/releases.md).
-        run: |
-          set -euo pipefail
-          scripts/setup/get-references.sh virglrenderer
-          test -f external/virglrenderer/src/drm/drm2kgsl/drm2kgsl_renderer.c || { echo "virglrenderer checkout has no drm2kgsl"; exit 1; }
-      - name: Host tests
-        run: |
-          set -euo pipefail
-          runtime/package/elf-check-test.sh
-          runtime/package/test.sh
-          kernel/tests/host.sh
-          # Other areas: any executable tests/host.sh below the repository runs here (git ls-files does not
-          # enter the submodule app/).
-          for t in $(git ls-files '*/tests/host.sh' | grep -v '^kernel/'); do echo "== $t"; "$t"; done
+      - name: Local CI prerequisites, GPU inputs and host regressions
+        run: scripts/ci-local.sh test
       - name: Kernel from the kernel release, when one is pinned
         # kernel/release-kernel.txt (optional): "KERNEL_TAG SHA256" of an xnu-<build id>.tar.zst that
         # kernel/publish.sh uploaded from a build machine. The package step checks its build record again.
@@ -146,7 +131,7 @@ jobs:
   release:
     needs: [plan, runtime]
     if: needs.plan.outputs.release == 'true' && needs.runtime.result == 'success'
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, linux, x64, oneios-cachyos]
     timeout-minutes: 15
     permissions:
       contents: write

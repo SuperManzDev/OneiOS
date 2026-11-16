@@ -328,13 +328,16 @@ static void test_haptic(void)
   br_haptic_flush(native);
   br_haptic_stats_get(native, &st);
   CHECK(impact_motor.impacts == 1 && impact_motor.last_kind == BR_HAPTIC_IMPACT_HEAVY &&
-        impact_motor.plays == 0 && st.impacts == 1 && st.played == 1 && st.failed == 0);
+        impact_motor.plays == 0 && st.vib == 0 && st.stop == 0 &&
+         st.impacts == 1 && st.played == 1 && st.failed == 0);
   br_haptic_stop(native);
   br_haptic_flush(native);
   CHECK(impact_motor.stops == 1);            // immediate stop cancels in-flight preset
   CHECK(br_haptic_impact(native, BR_HAPTIC_IMPACT_LIGHT) == 0);
   br_haptic_flush(native);
-  CHECK(impact_motor.impacts == 2 && impact_motor.last_kind == BR_HAPTIC_IMPACT_LIGHT);
+  br_haptic_stats_get(native, &st);
+  CHECK(impact_motor.impacts == 2 && impact_motor.last_kind == BR_HAPTIC_IMPACT_LIGHT &&
+        st.impacts == 2 && st.played == 2 && st.failed == 0);
   usleep(450000);
   br_haptic_stop(native);
   br_haptic_flush(native);

@@ -79,7 +79,8 @@ static uint32_t oh_said, oh_vibs;
 static bool oh_node_made, oh_opened, oh_wrote;
 
 /* The counter line's figures for the bridge (every layer has its own: see oh_report_thread). */
-static volatile uint64_t oh_sent_vib, oh_sent_stop, oh_send_failed, oh_send_no_host;
+static volatile uint64_t oh_sent_vib, oh_sent_stop, oh_sent_impact, oh_send_failed, oh_send_no_host;
+static uint32_t oh_impacts_logged;
 
 int
 oneios_haptic_vib(uint32_t ms, uint32_t intensity, uint32_t frequency_hz)
@@ -127,7 +128,15 @@ oneios_haptic_impact(uint32_t kind)
 	}
 	struct ob_haptic_impact impact = { .kind = kind };
 	int rc = oneios_bridge_send(OB_CH_HAPTIC, OB_HAPTIC_IMPACT, &impact, sizeof impact);
-	if (rc != 0) oh_send_failed++;
+	if (rc == 0) {
+		oh_sent_impact++;
+		if (oh_impacts_logged < OH_LOG) {
+			oh_impacts_logged++;
+			printf("ONEIOS HAPTIC: native impact %u: kind %u sent to the host\n", oh_impacts_logged, kind);
+		}
+	} else {
+		oh_send_failed++;
+	}
 	return rc;
 }
 
@@ -291,19 +300,19 @@ oh_report_thread(__unused void *arg, __unused wait_result_t wr)
 	for (;;) {
 		delay_for_interval(OH_REPORT_S, NSEC_PER_SEC);
 		uint64_t now = oh_act_opens + oh_act_closes + oh_act_selectors + oh_act_maps + oh_act_periods + oh_sent_vib + oh_sent_stop +
-		    oh_send_failed + oh_send_no_host + oneios_vibrator_requests + oh_frames;
+		    oh_send_failed + oh_send_no_host + oh_sent_impact + oneios_vibrator_requests + oh_frames;
 		if (now == last) {
 			continue;
 		}
 		last = now;
 		printf("ONEIOS HAPTIC: counters: Actuator %u opens (%u closed, last by %s), %llu selectors (%u StartIO, %u StopIO, "
 		    "%u refused, %u formats asked, last %d), %u maps; %llu periods (%llu ms), %llu with samples, %llu loud, peak %u of 32768; "
-		    "%llu requests to the motor | vibrator service %u requests | /dev/oneios-haptic %llu frames | bridge %llu vib + %llu stop sent, "
+		    "%llu requests to the motor | vibrator service %u requests | /dev/oneios-haptic %llu frames | bridge %llu vib + %llu stop + %llu impacts sent, "
 		    "%llu failed, %llu with no host actuator\n",
 		    oh_act_opens, oh_act_closes, oh_act_opener[0] ? oh_act_opener : "-", oh_act_selectors, oh_act_starts, oh_act_stops,
 		    oh_act_refused, oh_act_formats, (int)oh_act_last_selector, oh_act_maps, oh_act_periods, oh_act_frames / 48u,
 		    oh_act_sounding, oh_act_loud, oh_act_peak, oh_act_requests, oneios_vibrator_requests, oh_frames, oh_sent_vib,
-		    oh_sent_stop, oh_send_failed, oh_send_no_host);
+		    oh_sent_stop, oh_sent_impact, oh_send_failed, oh_send_no_host);
 	}
 }
 

@@ -1,62 +1,36 @@
-name: SM8850 port CI
+# Trusted pushes only: this public repository must not run untrusted pull_request code on a personal PC.
+# Register a Linux x64 self-hosted runner with the label oneios-cachyos.
+# The job never invokes adb, su, or phone-switch commands.
+name: SM8850 local CI
 on:
   push:
     branches: ['feat/oneios-sm8850-m3q']
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: sm8850-oneios-${{ github.ref }}
+  group: sm8850-local-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  bridges:
-    name: Host bridge regression tests (SM8850)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
+  runtime:
+    name: CachyOS host regression and ARM64 package
+    runs-on: [self-hosted, linux, x64, oneios-cachyos]
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-      - name: Validate changes
-        run: |
-          git diff --check
-          bash -n runtime/bridges/tests/host.sh
-      - name: Compile and test host bridges
-        run: make -C runtime/bridges test
-
-  xnuhost-input:
-    name: SM8850 touch and S Pen host regression tests
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build xnuhost unit tests with ASan and UBSan
-        run: make -C runtime/xnuhost build/host/test_xnuhost
-      - name: Test internal touch priority and S Pen hover event alias
-        working-directory: runtime/xnuhost
-        run: ASAN_OPTIONS=detect_leaks=0 build/host/test_xnuhost
-
-  brightness-passive:
-    name: Passive backlight probe (fake SM8850 sysfs)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - name: Test brightness bridge and strictly read-only inspect
-        run: make -C runtime/bridges/brightness test
-
-  display-safety:
-    name: Display helper protocol and no-takeover guard
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          distribution: temurin
-          java-version: '21'
-      - name: Test display helper and refuse --takeover in displayctl
-        run: make -C runtime/display test
+          persist-credentials: false
+      - name: Local CI (no adb or root)
+        run: scripts/ci-local.sh all
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: oneios-runtime
+          path: |
+            out/release/*.tar.zst
+            out/release/*.sha256
+            out/release/*.runtime.json
+          if-no-files-found: error
+          retention-days: 14

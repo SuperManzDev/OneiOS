@@ -9,6 +9,40 @@ inside the command (`scripts/bg.sh x env VAR=1 cmd`).
 Nothing of Apple's is ever committed or released: the IPSW parts, the image set and `kernel.kc` stay in `inputs/`
 and `out/`.
 
+## CachyOS local-first CI (SM8850, 2026-11-16)
+
+The SM8850 branch uses a **self-hosted Linux x64 runner** labelled `oneios-cachyos`,
+not a GitHub-hosted Ubuntu VM. Only trusted branch pushes or manual runs trigger it.
+Pull requests cannot run code on the personal PC. The runner performs no ADB, root
+or phone-switch operations.
+
+On the CachyOS build machine:
+
+```sh
+sudo pacman -S --needed qemu-user shellcheck binutils
+rustup target add aarch64-linux-android
+cd ~/projects/OneiOS
+scripts/ci-local.sh test
+scripts/ci-local.sh all 0.0.0-ci
+```
+
+The script requires NDK 28.2.13676358, Java, SDK build-tools `d8`, QEMU user
+emulation, shellcheck and Rust's Android target. It fetches the pinned
+`virglrenderer` reference, runs host and kernel tests, and optionally creates
+the ARM64 runtime archive and verifies its checksum, contents and ELF links.
+Missing QEMU is an error. Binder tests may still report a skip when binderfs
+is unavailable; a skip is not evidence that binder behavior passed.
+
+Runner installation is a one-time setup: open repository **Settings → Actions →
+Runners → New self-hosted runner**, select Linux x64 and follow the current
+GitHub-supplied download, checksum and registration commands. Add the custom
+label `oneios-cachyos` (default labels are `self-hosted`, `Linux`, `X64`).
+Prefer a separate least-privileged OS account for CI and keep it patched.
+That account needs its own tools, Android SDK/NDK and Rust target. Do not put
+the short-lived runner registration token in source, logs or a chat.
+Optionally install the runner as a systemd service using GitHub's instructions.
+Jobs remain queued until it comes online. GitHub stores logs/artifacts and
+queues jobs, but only the CachyOS PC builds/tests the code.
 ## 0. Prerequisites
 
 | Tool | For | Notes |

@@ -222,7 +222,7 @@ void br_haptic_report(br_haptic *h)
   if (!h) return;
   br_haptic_stats_get(h, &s);
   br_log(1, "haptics: counters: %llu requests from the guest (%llu vibrate, %llu stop; %llu replaced before they started), "
-         "%llu effects played, %llu stopped, %llu failed on %s (%llu discrete impacts)", (unsigned long long)(s.vib + s.stop), (unsigned long long)s.vib,
+         "%llu effects played, %llu stopped, %llu failed on %s (%llu discrete impacts)", (unsigned long long)(s.vib + s.stop + s.impacts), (unsigned long long)s.vib,
          (unsigned long long)s.stop, (unsigned long long)s.replaced, (unsigned long long)s.played, (unsigned long long)s.stopped,
          (unsigned long long)s.failed, h->name, (unsigned long long)s.impacts);
 }

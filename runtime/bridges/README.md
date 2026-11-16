@@ -116,6 +116,12 @@ The new **`bridgectl haptic-hal-primitives`** queries `getCapabilities`, composi
 
 **Production AIDL native-impact preflight (strictly passive).** The SM8850 CI host lacks binderfs, so fake Binder tests compile but skip on GitHub's runner. The on-phone `bridgectl haptic-native-inspect` is an explicit read-only verification of the *production* `br_haptic_open_as(..., treble, ...)` path, not the standalone HAL getter helper. Run with `ONEIOS_HAPTIC_NATIVE_IMPACTS=1 ONEIOS_HW_FALLBACK=0`. It reports whether the live AIDL HAL supports TICK/CLICK/HEAVY_CLICK, starts no effects, never uses evdev and closes without `off()` when native opt-in was requested and no continuous effect played. It refuses fallback=1. The default non-native close still stops legacy continuous vibration. This validates native feature negotiation before any separately authorized guest integration trial.
 
+**Native impact telemetry correction (2026-11-16).** The host's `haptics: counters`
+now counts native impacts in total guest requests (`vib + stop + impacts`),
+while still reporting discrete impacts separately. Guest-side counters include
+impacts sent and the first 24 successfully sent impact kinds are logged.
+This is an observability fix and test hardening, **not** guest E2E validation.
+Physical guest playback still requires a separately authorized phone session.
 **Wi-Fi** (`build/android/wifictl`, `bin/wifictl` in the runtime package):
 
 ```sh

@@ -2807,3 +2807,14 @@ kernel without it is unchanged.
 
 Only single files were fetched from the kernel and device repositories (raw downloads at the pinned commit) and one
 shallow clone of the 748 KiB devicetrees repository; nothing of them is in this repository.
+
+### SM8850 native-impact telemetry and local CI (2026-11-16)
+
+The standalone S26 Ultra HAL heavy-click was felt and the production native
+preflight passed. Guest-to-host impact delivery is **not yet physically
+verified**. The host now counts native impacts in total guest haptic requests;
+the guest counts and logs successful impact transmissions. Native opt-ins,
+fallback and shutdown semantics remain unchanged. Host regression tests
+exercise impact dispatch and counters. SM8850 builds on the owner's
+CachyOS self-hosted runner (see `docs/building.md`); automatic CI
+does not touch ADB or root, nor prove physical guest behavior.
