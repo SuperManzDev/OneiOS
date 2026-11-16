@@ -90,7 +90,14 @@ The diagnostic's original animation loop called `xhd_send_flush` **twice** per l
 
 **Flicker mitigation implemented in the diagnostic only:** Compose the restored background and new square first, form the union of old and new rectangles using `xhd_rect_union`, then send **one** `XHDF` damage message for each movement. CI's stand-in display helper counts actual received packets and asserts the initial full-frame message plus exactly one partial update per completed movement for both 8-bit BGRX and RGBA16F. No change to real guest XNU frame transport, graphics drivers, brightness controls, root/model gate or return flow.
 
-**Pending on-device acceptance:** Build and run a new CI `displayctl` binary containing this change without the temporary `socket-helper.sh` wrapper; confirm the white square no longer flickers, animations remain smooth, first frame is posted, and the helper exits cleanly. If flicker persists, investigate shared memfd producer/consumer synchronization and SurfaceFlinger queue timing before attempting guest rendering or color-space testing.
+**On-device acceptance: PASS (2026-11-16).** The user downloaded the **new ARM64 runtime artifact** from GitHub Actions run `43799119719`, verified `oneios-runtime-0.0.0-ci-arm64.tar.zst: OK` with SHA256, and pushed only the newly built `displayctl` to `/data/local/tmp/oneios-m3q-diag/bin/displayctl`. The test ran **without the temporary `socket-helper.sh` wrapper** and completed:
+- Panel: 1440x3120, 120 Hz active/native, 1:1 display; SurfaceFlinger layer and 8-bit sRGB/BGRA_8888 buffers created normally.
+- `oneios-display: first frame posted (...)`, `the socket closed after 369 frames`, `layer removed`; `displayctl: 377 frames in 5.01 s`, `the helper removed its layer and exited 0`, `displayctl: ok`.
+- User visually confirms: **"hết flicker rồi"** (white square no longer flickers), smooth motion, real on-panel display works. The layer and One UI are restored normally as reported by the helper.
+- This result validates the **diagnostic's one-union-flush-per-step flicker mitigation on real SM8850 hardware**. Helper posts and diagnostic steps count different things; `377/5.01` steps per second is not a verified sustained 120 application FPS merely because the panel advertises 120 Hz.
+- `Connection reset by peer` is logged when the diagnostic client closes its socket on completion; no failure status followed, and teardown succeeded.
+
+**Next stage:** Test the same no-takeover diagnostic using `displayctl test --seconds 5 --format rgba16f` to inspect Android 17's native RGBA_FP16 / scRGB-linear route (or a logged fallback), then inspect remaining host bridges and a separately verified recovery plan. This 8-bit overlay PASS does **not** demonstrate XNU boot, guest Metal rendering, S Pen routed into iOS, active brightness writes, or safe hot-switch.
 
 ## Captured S Pen evdev trace (2026-11-16)
 
