@@ -82,7 +82,8 @@ br_virtio_snd_create(base2, spi2, audio, audio_ctx);    // /arm-io/virtio-snd
 ```sh
 adb push build/android/bridgectl build/android/oneios-audio /data/local/tmp/
 adb shell su -c '/data/local/tmp/bridgectl cpu'
-adb shell su -c '/data/local/tmp/bridgectl haptic-inspect'  # O_RDONLY only, no FF gain or uploads
+adb shell su -c '/data/local/tmp/bridgectl haptic-inspect'      # O_RDONLY: input capabilities
+adb shell su -c '/data/local/tmp/bridgectl haptic-hal-inspect'  # AIDL getCapabilities only; no on/off/amplitude
 adb shell su -c '/data/local/tmp/bridgectl haptic 200 1000' # ACTIVE: only after device-specific validation
 adb shell su -c '/data/local/tmp/bridgectl haptic-pattern'
 adb shell su -c '/data/local/tmp/bridgectl bt'            # with Bluetooth off in One UI's settings (see below)
@@ -100,6 +101,10 @@ refused, or no `initializationComplete` in 15 s (then look for `avc: denied` lin
 and `audio` are harmless beside One UI.
 
 **SM8850 haptic warning (2026-11-16).** The S26 Ultra reports `sec_vibrator_inputff` at `/dev/input/event7` with `FF_PERIODIC`, `FF_SINE`, `FF_CUSTOM`, `FF_GAIN`. The first actual `bridgectl haptic 80 150` trial selected the correct device, but the worker reported **`EINVAL`**, **0 effects played** and **1 failed**. The old `bridgectl` incorrectly returned `ok` despite failure. **Do not retry stronger vibrations or pattern mode.** A new `haptic-inspect` subcommand opens the input devices `O_RDONLY`, queries the name, supported waveform flags and maximum effect slots, and exits without issuing `FF_GAIN`, `EVIOCSFF` or play events. Worker error logging now distinguishes upload and playback, includes parameters (80 ms/150 maps to period 6 ms, level 72); the CLI waits for the worker and returns failure on any rejected effect. This is **diagnostic hardening, not a hardware haptics fix**. Active S26 haptic waveform support remains blocked pending verified driver behavior. In contrast, the S24 `haptic` commands above are historical references for a previously tested device.
+
+**SM8850 haptics root-cause stage and HAL diagnostic (2026-11-16).** A second physical trial with the instrumented `bridgectl` **definitively** returned `haptics: effect upload failed: Invalid argument (80 ms, intensity 150, period 6 ms, level 72, effect id -1)`, `0 effects played, 1 failed`, and shell exit code **1**. The failing operation is **`EVIOCSFF` for `FF_PERIODIC/FF_SINE`**, before any play event was submitted. Samsung's Android path in a nearby kernel `dmesg` capture uploaded `FF_CUSTOM` with `custom_len=2` and played effect ID 0 successfully; this is evidence of a working vendor haptic path, **not** a validated `FF_CUSTOM` payload for OneiOS. Do not replay the logged internal firmware trigger indices or make an automatic waveform fallback. The S26 vendor's SINE contract remains unverified.
+
+The new **`haptic-hal-inspect`** checks the alternative stock **`android.hardware.vibrator.IVibrator/default`** AIDL path using `br_hal_open()`, interface version and `getCapabilities()` only, then closes the binder handle **without `off()`**. It issues no vibration, gain, stop, or evdev calls, and returns failure if the service is absent or inaccessible. It does **not** establish that the HAL can safely play guest vibrations while One UI still owns it. Stand-in binder tests verify no `on/off/setAmplitude` calls. Avoid running the active `treble` backend until separately validated.
 
 **Wi-Fi** (`build/android/wifictl`, `bin/wifictl` in the runtime package):
 
