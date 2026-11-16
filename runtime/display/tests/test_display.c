@@ -412,7 +412,6 @@ static int as_helper(const char *socket_path)
   int fd = xhd_connect(socket_path, 5000, NULL);
   struct xhd_frame frame;
   if (fd < 0 || xhd_recv_hello(fd, &frame, 5000)) return 9;
-  struct xhd_rect damage = { 0, 0, 0, 0 };
   int full = 0, partial = 0, flushes = 0;
   for (int i = 0; i < 2000; i++) {
     // Count wire packets, not helper presentations: a double-flush per
@@ -433,7 +432,8 @@ static int as_helper(const char *socket_path)
     }
     // Peer closed: one initial full flush plus ONE union flush per
     // completed animation step. These counts must agree with displayctl.
-    printf("test-helper: %d flush messages\n", flushes);
+    if (n == 0) {
+      printf("test-helper: %d flush messages\n", flushes);
     fflush(stdout);
     if (frame.format == XHD_FORMAT_BGRX) return full && partial && frame.pixels[3] == 255 ? 0 : 8;
       // half floats: the white edge at 1.0, and the wide band's P3 red (second eighth, lowest quarter) above sRGB's 1.0
