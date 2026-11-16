@@ -1269,6 +1269,30 @@ static void test_pen(void)
   SETBIT(abs, 0x1a); SETBIT(keys, 0x14b);
   int full = xh_pen_rank("sec_e-pen", keys, sizeof keys, abs, sizeof abs, &why);
   CHECK(full > plain && full == 1 + 2 + 4);                                     // tilt, the side button, a pen's name
+  // S26 Ultra (SM-S948B/m3q): sec_e-pen exposes BTN_TOUCH, BTN_STYLUS,
+  // ABS_X/Y, PRESSURE, DISTANCE and TILT_X/Y, but not BTN_TOOL_PEN.
+  uint8_t s26keys[96] = { 0 }, s26abs[8] = { 0 };
+  SETBIT(s26keys, 0x14a); SETBIT(s26keys, 0x14b);      // tip and side button
+  SETBIT(s26abs, 0); SETBIT(s26abs, 1);               // absolute X/Y
+  SETBIT(s26abs, 0x18); SETBIT(s26abs, 0x19);         // pressure and distance
+  SETBIT(s26abs, 0x1a); SETBIT(s26abs, 0x1b);         // tilt in both directions
+  CHECK(xh_pen_rank("sec_e-pen", s26keys, sizeof s26keys, s26abs, sizeof s26abs, &why) > 0 && why == NULL);
+  CHECK(xh_pen_rank("another-digitizer", s26keys, sizeof s26keys, s26abs, sizeof s26abs, &why) == 0 &&
+        why && strstr(why, "BTN_TOOL_PEN"));
+  s26abs[0x19 / 8] &= (uint8_t)~(1u << (0x19 % 8));
+  CHECK(xh_pen_rank("sec_e-pen", s26keys, sizeof s26keys, s26abs, sizeof s26abs, &why) == 0);
+  SETBIT(s26abs, 0x19);
+  s26keys[0x14b / 8] &= (uint8_t)~(1u << (0x14b % 8));
+  CHECK(xh_pen_rank("sec_e-pen", s26keys, sizeof s26keys, s26abs, sizeof s26abs, &why) == 0);
+  SETBIT(s26keys, 0x14b);
+  SETBIT(s26abs, 0x35);                              // no multitouch device is a pen
+  CHECK(xh_pen_rank("sec_e-pen", s26keys, sizeof s26keys, s26abs, sizeof s26abs, &why) == 0 &&
+        why && strstr(why, "multitouch"));
+  s26abs[0x35 / 8] &= (uint8_t)~(1u << (0x35 % 8));
+  SETBIT(s26keys, 115);                              // physical volume keys are never pen input
+  CHECK(xh_pen_rank("sec_e-pen", s26keys, sizeof s26keys, s26abs, sizeof s26abs, &why) == 0 &&
+        why && strstr(why, "side keys"));
+
   uint8_t mt[8];
   memcpy(mt, abs, sizeof mt);
   SETBIT(mt, 0x35);
