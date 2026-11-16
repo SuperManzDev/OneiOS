@@ -170,6 +170,21 @@ hw_backend_checks() {
     else
       bad "hw-backend: passive vibrator HAL probe" "status $st: $(printf '%s' "$out" | tr '\n' '|'); HAL: $(cat "$VL" 2>/dev/null)"
     fi
+    # A composition-capable AIDL HAL returns primitives and preset effects
+    # to getters, without any on/off/setAmplitude/compose/perform calls.
+    echo 36 > "$S24/.fake/hal/vibrator"   # CAP_COMPOSE_EFFECTS | CAP_AMPLITUDE_CONTROL
+    out=$(with_hal "$S24" env ASAN_OPTIONS=detect_leaks=0 "$BCTL" haptic-hal-primitives 2>&1); st=$?
+    if [ "$st" = 0 ] && printf '%s\n' "$out" | grep -Fq 'max delay 500 ms, max composition entries 16' \
+      && printf '%s\n' "$out" | grep -Fq '3 supported primitive(s)' \
+      && printf '%s\n' "$out" | grep -Fq 'primitive 1 CLICK' \
+      && printf '%s\n' "$out" | grep -Fq 'duration 20 ms' \
+      && printf '%s\n' "$out" | grep -Fq '3 supported preset effect(s): 0 2 5' \
+      && [ ! -e "$VL" ]; then
+      ok "hw-backend: passive AIDL primitive inventory, duration and presets without any vibration"
+    else
+      bad "hw-backend: passive AIDL primitive inventory" "status $st: $(printf '%s' "$out" | tr '\n' '|'); HAL: $(cat "$VL" 2>/dev/null)"
+    fi
+    echo 4 > "$S24/.fake/hal/vibrator"
     out=$(with_hal "$S24" env ASAN_OPTIONS=detect_leaks=0 ONEIOS_INPUT_DIR="$S24/dev/input" "$BCTL" haptic 40 2>&1); st=$?
     [ $st = 1 ] && printf '%s\n' "$out" | grep -q 'hw: haptics: backend samsung (the default)' && printf '%s\n' "$out" | grep -q 'haptics: off: no force-feedback device with FF_PERIODIC + FF_SINE under' \
       && [ ! -e "$VL" ] && ok "hw-backend: haptics samsung (the default): the evdev search, the vibrator HAL never called" || bad "hw-backend: haptics samsung" "status $st: $(printf '%s' "$out" | tr '\n' '|')"
