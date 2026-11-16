@@ -48,19 +48,12 @@ static bool byte_bit(const uint8_t *bits, size_t size, unsigned n) { return n / 
 int xh_pen_rank(const char *name, const uint8_t *keys, size_t nkeys, const uint8_t *abs, size_t nabs, const char **why)
 {
   const char *no = NULL;
-  // Samsung SM8850 reports its sec_e-pen with tip/side keys and distance/tilt axes,
-  // but without BTN_TOOL_PEN. Accept only this exact, well-identified digitizer
-  // signature; do not treat arbitrary touch devices as pens. Hover needs a real
-  // event trace before we infer tool-in-range from any vendor-specific event.
-  bool samsung_no_tool =
-    name && strcmp(name, "sec_e-pen") == 0 &&
-    byte_bit(keys, nkeys, BTN_TOUCH_) && byte_bit(keys, nkeys, BTN_STYLUS_) &&
-    byte_bit(abs, nabs, ABS_DISTANCE_) && byte_bit(abs, nabs, ABS_TILT_X_) &&
-    byte_bit(abs, nabs, ABS_TILT_Y_);
+  // Android getevent prints EV_KEY 0x140 as BTN_DIGI; Linux's BTN_TOOL_PEN
+  // is an alias for the same numeric code. SM8850 hover supplies it normally.
   if (byte_bit(keys, nkeys, KEY_POWER_) || byte_bit(keys, nkeys, KEY_VOLUMEUP_) || byte_bit(keys, nkeys, KEY_VOLUMEDOWN_))
     no = "it has side keys (never taken)";
   else if (byte_bit(abs, nabs, ABS_MT_POSITION_X_)) no = "a multitouch device";
-  else if (!byte_bit(keys, nkeys, BTN_TOOL_PEN_) && !samsung_no_tool) no = "no BTN_TOOL_PEN";
+  else if (!byte_bit(keys, nkeys, BTN_TOOL_PEN_)) no = "no BTN_TOOL_PEN";
   else if (!byte_bit(abs, nabs, ABS_X_) || !byte_bit(abs, nabs, ABS_Y_)) no = "no ABS_X/ABS_Y";
   else if (!byte_bit(abs, nabs, ABS_PRESSURE_)) no = "no ABS_PRESSURE";
   if (why) *why = no;
