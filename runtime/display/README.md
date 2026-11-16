@@ -187,6 +187,8 @@ adb shell su -c 'rm -rf /data/local/tmp/oneios-display-test'
 If the helper hangs, `displayctl` ends it 3 s after the test; if `displayctl` itself is killed,
 `adb shell su -c 'pkill -f OneiOSDisplay'` removes the layer.
 
+**SM8850 physical result, 2026-11-16:** The owner confirmed the BGRX moving-square flicker was eliminated by one union damage flush per animation step in the new `displayctl`. A second on-phone test with `displayctl test --seconds 5 --format rgba16f` verified native Android `format 22 RGBA_FP16` buffer posting (actual stride 1472 pixels), `scrgb-linear` dataspace `0x18410000`, **459 posted buffers** and **496 diagnostic animation steps in 5.00s**, with clean layer removal and `displayctl: ok`. No fallback was logged. The result proves the **format and SurfaceFlinger presentation path**, not observable P3 gamut differences, HDR headroom, a stable 120 application FPS, or absence of FP16 flicker: the user has not yet described those visual aspects.
+
 **Wide colour (`--format rgba16f`).** The same bars in half floats, and in the lowest quarter of the screen eight
 patches from the left: sRGB's red, Display P3's red, sRGB's green, P3's green, sRGB's blue, P3's blue (P3's as linear
 extended sRGB: components below 0 and above 1), white at 1.0, white at 2.0. What to look for:
