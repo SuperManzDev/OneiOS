@@ -3,13 +3,10 @@
 # minutes on Gradle, macOS and Android SDK jobs during hardware-port work.
 # The optional app/ submodule is never checked out by this workflow.
 # Self-hosted CachyOS only; do not schedule this public repo's PR code on a personal runner.
-# A main push builds a runtime artifact; a main tag or manual dispatch
-# also publishes its verified runtime archive and checksum as a release.
+# Legacy manual-only release flow. Normal CI runs locally on CachyOS
+# without GitHub Actions; see scripts/ci-watch.sh and docs/building.md.
 name: build and release
 on:
-  push:
-    branches: [main]
-    tags: ['v*']
   workflow_dispatch:
     inputs:
       version:

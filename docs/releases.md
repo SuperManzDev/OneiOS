@@ -169,23 +169,31 @@ runtime/package.sh 0.1.7-dev                           # -> out/release/oneios-r
 
 ## CI and releases
 
-**Current SM8850 local-first setup (2026-11-16):**
-`.github/workflows/sm8850-ci.yml` runs on trusted SM8850 branch pushes
-or manual dispatch. A single job on `[self-hosted, linux, x64, oneios-cachyos]`
-runs `scripts/ci-local.sh all` and uploads the runtime archive and checksum.
-`.github/workflows/release.yml` uses the same self-hosted runner for the
-`plan`, `runtime`, and `release` jobs on main pushes, tags or manual dispatch.
-It runs `scripts/ci-local.sh test` before packaging. No GitHub-hosted VM
-executes project CI. Pull-request triggers are disabled to prevent arbitrary
-fork code from executing on a personal PC. The runner must be registered
-with label `oneios-cachyos` as documented in `docs/building.md`.
+**Current SM8850 build validation (2026-11-16):** standalone local CI on
+the owner's CachyOS PC. `scripts/ci-watch.sh` polls the trusted branch with
+`git fetch`, creates an isolated Git worktree, invokes
+`scripts/ci-local.sh all`, and stores the result and verified runtime
+artifact under `~/oneios-m3q-ci/standalone/runs/<commit>/`.
+See `docs/building.md` for one-time systemd timer installation and commands.
 
-Only the runtime is packaged. The app submodule is not checked out.
-Version, ancestry, checksums, archive contents, ELF dependencies and published
-asset hashes are still checked. GitHub orchestrates the queue and artifacts;
-the CachyOS PC performs compilation and tests. The automated jobs never invoke
-ADB, phone root or a OneiOS session switch. Older APK/macOS CI details below
-are historical, not current workflow jobs.
+**The SM8850 branch no longer has an automatically triggered Actions
+workflow.** The previous `sm8850-ci.yml` was removed, avoiding the need
+to register a self-hosted runner. Routine local CI compilation and tests
+use neither GitHub-hosted nor self-hosted Actions runners. The existing
+default-branch workflow may still run for main/PR events until that branch
+is updated or Actions are disabled in repository settings. The feature
+branch's `.github/workflows/release.yml` is manual-only as a legacy
+release mechanism, and is not used for standalone CI.
+
+The local watcher never runs ADB/root or switches the phone. Its results are
+local files, not GitHub checks or GitHub Actions logs. A remote agent cannot
+read them until an authorized log-sharing mechanism is provided. Fork PRs
+do not trigger the local watcher. It does execute code fetched from the
+trusted branch with the rights of its Unix user, so a dedicated account
+or an isolated VM remains recommended.
+
+Older APK/macOS GitHub Actions descriptions below are historical records
+of previous CI, not current branch behavior.
 **tribalfs' packages.** The SESL9 and oneui-design libraries come from GitHub Packages
 (`maven.pkg.github.com/tribalfs`), whose Maven registry wants a login even for public packages.
 `.github/scripts/packages-token.sh` (the fork's first step, shared by apk and apk-macos) tries the run's own

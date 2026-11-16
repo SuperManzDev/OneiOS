@@ -9,40 +9,56 @@ inside the command (`scripts/bg.sh x env VAR=1 cmd`).
 Nothing of Apple's is ever committed or released: the IPSW parts, the image set and `kernel.kc` stay in `inputs/`
 and `out/`.
 
-## CachyOS local-first CI (SM8850, 2026-11-16)
+## Standalone CachyOS local CI (SM8850, 2026-11-16)
 
-The SM8850 branch uses a **self-hosted Linux x64 runner** labelled `oneios-cachyos`,
-not a GitHub-hosted Ubuntu VM. Only trusted branch pushes or manual runs trigger it.
-Pull requests cannot run code on the personal PC. The runner performs no ADB, root
-or phone-switch operations.
+On the SM8850 branch, **CI no longer runs through GitHub Actions**. GitHub
+remains a Git remote for source code only. The CachyOS PC checks the trusted
+`feat/oneios-sm8850-m3q` branch on a user-level systemd timer and builds
+each new commit in a clean detached Git worktree. No self-hosted runner,
+GitHub runner registration token or inbound port is needed.
 
-On the CachyOS build machine:
+Once, on the owner's CachyOS machine with this checkout at
+`~/projects/OneiOS`: 
 
 ```sh
 sudo pacman -S --needed qemu-user shellcheck binutils
 rustup target add aarch64-linux-android
 cd ~/projects/OneiOS
-scripts/ci-local.sh test
-scripts/ci-local.sh all 0.0.0-ci
+git pull --ff-only
+scripts/install-ci-timer.sh
+systemctl --user start oneios-local-ci.service  # optional immediate first run
 ```
 
-The script requires NDK 28.2.13676358, Java, SDK build-tools `d8`, QEMU user
-emulation, shellcheck and Rust's Android target. It fetches the pinned
-`virglrenderer` reference, runs host and kernel tests, and optionally creates
-the ARM64 runtime archive and verifies its checksum, contents and ELF links.
-Missing QEMU is an error. Binder tests may still report a skip when binderfs
-is unavailable; a skip is not evidence that binder behavior passed.
+The timer polls for a new commit approximately one minute after the
+previous CI run finishes. It runs `scripts/ci-local.sh all 0.0.0-ci`, which
+requires NDK 28.2.13676358, SDK build-tools `d8`, Java, Rust's Android target
+and `qemu-aarch64`. The script fetches the pinned `virglrenderer`, runs the
+host runtime and kernel regressions, builds the ARM64 runtime, then verifies
+its ELF dependencies and SHA-256. No device access, ADB, root or OneOS
+session switch is performed automatically. A binderfs-unavailable test can
+still be skipped; that skip must not be reported as a hardware PASS.
 
-Runner installation is a one-time setup: open repository **Settings → Actions →
-Runners → New self-hosted runner**, select Linux x64 and follow the current
-GitHub-supplied download, checksum and registration commands. Add the custom
-label `oneios-cachyos` (default labels are `self-hosted`, `Linux`, `X64`).
-Prefer a separate least-privileged OS account for CI and keep it patched.
-That account needs its own tools, Android SDK/NDK and Rust target. Do not put
-the short-lived runner registration token in source, logs or a chat.
-Optionally install the runner as a systemd service using GitHub's instructions.
-Jobs remain queued until it comes online. GitHub stores logs/artifacts and
-queues jobs, but only the CachyOS PC builds/tests the code.
+Results are stored outside the repository at
+`~/oneios-m3q-ci/standalone/runs/<commit>/run.log` and `artifacts/`,
+with `last-result.txt` recording the last tested commit, exit code and verdict.
+
+```sh
+cd ~/projects/OneiOS
+scripts/ci-watch.sh status     # latest PASS/FAIL and log path
+scripts/ci-watch.sh force      # retry the same commit after fixing dependencies
+scripts/ci-local.sh test       # manually run host tests without packaging
+journalctl --user -u oneios-local-ci.service -n 100 --no-pager
+systemctl --user list-timers oneios-local-ci.timer
+```
+
+Do not run the timer as root. If the CI source or build dependencies are not
+fully trusted, use a separate unprivileged Unix user or isolated VM: a plain
+worktree is **build isolation, not a security sandbox**. GitHub Actions
+cannot see the local result, and neither can a remote coding agent without
+a separately authorized log-sharing mechanism. The user can share
+`run.log` and `result.txt` to review failures. The timer runs while the
+user's systemd user manager is active; persistent operation across logout
+requires the owner to enable user lingering separately.
 ## 0. Prerequisites
 
 | Tool | For | Notes |
