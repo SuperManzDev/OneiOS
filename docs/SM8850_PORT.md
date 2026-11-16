@@ -63,6 +63,10 @@ Adaptive brightness was intended to be disabled for repeatability; the user manu
 
 `settings get system screen_brightness_float` returned `null` at every position. `panel` remained max/brightness/actual=0 and `bl_power=0`; `panel0-backlight/max_brightness` stayed 12750.
 
+**Follow-up at the exact manual slider maximum:** The user moved the One UI brightness slider fully to its end (without an explicit Extra brightness/HBM reading). `adb shell settings get system screen_brightness` returned **255** and `adb shell cat /sys/class/backlight/panel0-backlight/brightness` returned **2300**. The earlier near-high slider at Android value 222 already read 2300, so the **observed normal slider output plateaus** by that point. We have not observed/verified the purpose of the hardware's 12750 upper bound, nor measured HDR/HBM or extra-brightness output.
+
+**SM8850 manual test profile:** Use `ONEIOS_BRIGHT_MAX=2300` as an **explicit opt-in ceiling candidate only in controlled fake-sysfs or future permitted active tests**, never silently change Samsung S24 or generic profiles. The new `test_sm8850_manual_brightness_cap` asserts that `br_bright_open` with `o.ceiling=2300` picks the nonzero-max `panel0-backlight` and maps a full slider to <=2300 in fake sysfs. This is not a physical write validation or a promise that any value up to 2300 is harmless under all panel modes.
+
 **Key safety finding:** The active brightness bridge currently sets its ceiling to `br_bright_ceiling(12750) = 12750` by default; it only halves special max values 510/51000. The measured `panel0-backlight/brightness` at a near-high manual slider setting was **2300**, far lower than 12750. The upper region could be reserved for high-brightness/HDR handling or another extended hardware mode; there is not enough evidence yet to infer its purpose or safe maximum. **Do not run active `brightctl info/levels` or an SM8850 iOS brightness session using the unbounded default ceiling.** Need a passive reading at the slider's normal maximum (without extra-brightness/HBM toggles) and a validated ceiling policy before enabling active writes.
 
 ## Captured S Pen evdev trace (2026-11-16)
