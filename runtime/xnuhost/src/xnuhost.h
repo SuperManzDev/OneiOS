@@ -641,6 +641,8 @@ int   xh_input_start(xh_virtio *dev, const struct xh_input_pen *pen, unsigned wi
 void  xh_input_stop(void);
 // The display showed a guest frame (display.c): the end of input.c's touch-to-frame measurement.
 void  xh_input_frame_shown(void);
+// A candidate evdev direct touchscreen, against a native Samsung touchscreen when present.
+bool  xh_input_accept_touch(const char *name, bool direct, bool have_touch, bool native_present);
 // Called on the input thread at each press of the power key (KEY_POWER down) that is passed to the guest: the brightness
 // bridge wakes the touch IC (br_bright_key). NULL: nothing.
 extern void (*xh_input_power_key)(void);
