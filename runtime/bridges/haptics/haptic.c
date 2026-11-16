@@ -82,20 +82,29 @@ static void *worker(void *arg)
     unsigned period, magnitude;
     br_haptic_map(intensity, frequency, &period, &magnitude);
     int rc = 0;
+    const char *step = "stop";
+    int effect_id = h->effect;
     bool played = false, stopped = false;
     if (!on_ms || !magnitude) {
       if (h->playing && h->effect >= 0) { rc = h->backend->play(h->ctx, h->effect, false); stopped = rc == 0; }
       h->playing = false;
     } else {
+      step = "effect upload";
       int id = h->backend->upload(h->ctx, h->effect, on_ms > LENGTH_MAX_MS ? LENGTH_MAX_MS : on_ms, period, magnitude);
       if (id < 0) rc = id;
       else {
-        h->effect = id;
+        h->effect = effect_id = id;
+        step = "effect play";
         rc = h->backend->play(h->ctx, id, true);
         h->playing = played = rc == 0;
       }
     }
-    if (rc < 0 && h->failures++ < 8) br_log(0, "haptics: request (%u ms, intensity %u) failed: %s", on_ms, intensity, strerror(-rc));
+    // Report the stage and the exact values sent. On Samsung, upload means
+    // EVIOCSFF(FF_PERIODIC/FF_SINE); play means write(EV_FF, effect_id).
+    // Do not guess a different waveform or repeat with higher force on EINVAL.
+    if (rc < 0 && h->failures++ < 8)
+      br_log(0, "haptics: %s failed: %s (%u ms, intensity %u, period %u ms, level %u, effect id %d)",
+             step, strerror(-rc), on_ms, intensity, period, magnitude, effect_id);
     pthread_mutex_lock(&h->lock);
     if (played) h->stats.played++;
     if (stopped) h->stats.stopped++;
@@ -126,7 +135,10 @@ br_haptic *br_haptic_open_backend(const br_haptic_backend *backend, void *ctx)
   pthread_mutex_init(&h->lock, NULL);
   pthread_cond_init(&h->wake, NULL);
   pthread_cond_init(&h->idle, NULL);
-  if (backend->gain) (void)backend->gain(ctx, 10000);
+  if (backend->gain) {
+    int rc = backend->gain(ctx, 10000);
+    if (rc < 0) br_log(0, "haptics: initial gain setting failed: %s", strerror(-rc));
+  }
   if (pthread_create(&h->thread, NULL, worker, h)) { free(h); return NULL; }
   return h;
 }
