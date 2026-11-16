@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // bridgectl: tries each host bridge on the phone, without xnuhost or a guest. Run as root (su):
 //   bridgectl cpu [NVCPU]            the host's cores and the vCPU plan made from them
+//   bridgectl haptic-inspect              O_RDONLY evdev queries only: name, sine/periodic/gain bits, max effects
 //   bridgectl haptic [MS [INTENSITY [HZ]]]   one vibration (default 200 ms, 1000, resonance)
 //   bridgectl haptic-pattern         three taps and a ramp: what an iOS pattern feels like
 // The backend: ONEIOS_HW_BACKEND, ONEIOS_HW_BACKEND_<BRIDGE>, ONEIOS_HW_FALLBACK (bridges/hw_backend.h): haptic's is
@@ -19,6 +20,11 @@
 #include "bridges/bridges.h"
 #include "bridges/hw_backend.h"
 #include <math.h>
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <linux/input.h>
+#include <sys/ioctl.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,6 +56,42 @@ static int cpu(int argc, char **argv)
   return 0;
 }
 
+// Strictly passive probe. Unlike br_haptic_open_as(), this does NOT send
+// FF_GAIN, upload a waveform, create a worker or play an effect.
+static int haptic_inspect(void)
+{
+  DIR *d = opendir("/dev/input");
+  if (!d) { printf("haptic-inspect: cannot open /dev/input: %s\n", strerror(errno)); return 1; }
+  int found = 0;
+  struct dirent *e;
+  while ((e = readdir(d))) {
+    if (strncmp(e->d_name, "event", 5)) continue;
+    char path[256], name[128] = "";
+    snprintf(path, sizeof path, "/dev/input/%.160s", e->d_name);
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) continue;
+    unsigned char bits[FF_MAX / 8 + 1] = { 0 };
+    int rc = ioctl(fd, EVIOCGBIT(EV_FF, sizeof bits), bits);
+    bool periodic = rc >= 0 && ((bits[FF_PERIODIC / 8] >> (FF_PERIODIC % 8)) & 1);
+    bool sine = rc >= 0 && ((bits[FF_SINE / 8] >> (FF_SINE % 8)) & 1);
+    if (periodic && sine) {
+      found++;
+      (void)ioctl(fd, EVIOCGNAME(sizeof name), name);
+      int effects = -1;
+      int effect_rc = ioctl(fd, EVIOCGEFFECTS, &effects);
+      bool custom = ((bits[FF_CUSTOM / 8] >> (FF_CUSTOM % 8)) & 1);
+      bool gain = ((bits[FF_GAIN / 8] >> (FF_GAIN % 8)) & 1);
+      printf("haptic-inspect: %s \"%s\" FF_PERIODIC=1 FF_SINE=1 FF_CUSTOM=%d FF_GAIN=%d max_effects=%d%s\n",
+             path, name, custom, gain, effects, effect_rc < 0 ? " (query unavailable)" : "");
+    }
+    close(fd);
+  }
+  closedir(d);
+  if (!found) { puts("haptic-inspect: no readable FF_PERIODIC + FF_SINE device"); return 1; }
+  puts("haptic-inspect: ok (O_RDONLY; no FF_GAIN, EVIOCSFF, or playback)");
+  return 0;
+}
+
 static int haptic(int argc, char **argv, bool pattern)
 {
   br_haptic *h = br_haptic_open_as(getenv("ONEIOS_INPUT_DIR"), BR_HW_UNSET, NULL);   // the backend: hw-backend-haptics
@@ -63,8 +105,17 @@ static int haptic(int argc, char **argv, bool pattern)
     br_haptic_vib(h, ms, intensity, hz);
     usleep((ms + 100) * 1000);
   }
+  // The worker is asynchronous: an earlier "ok" only meant the CLI
+  // completed, even if the driver rejected every effect (EINVAL).
+  br_haptic_flush(h);
+  br_haptic_stats stats;
+  br_haptic_stats_get(h, &stats);
+  int failed = stats.failed > 0 || stats.played == 0;
+  if (failed)
+    printf("bridgectl: haptic failed (effects played=%llu, failed=%llu)\n",
+           (unsigned long long)stats.played, (unsigned long long)stats.failed);
   br_haptic_close(h);
-  return 0;
+  return failed ? 1 : 0;
 }
 
 static volatile int bt_state = -1;
@@ -304,8 +355,9 @@ int main(int argc, char **argv)
   br_hw_settings_init(&hw);
   if (br_hw_settings_env(&hw, &bad)) { fprintf(stderr, "bridgectl: bad %s (samsung or treble; ONEIOS_HW_FALLBACK 0 or 1)\n", bad); return 2; }
   br_hw_configure(&hw);
-  if (argc < 2) { fprintf(stderr, "usage: bridgectl cpu|haptic|haptic-pattern|bt|net|audio|audio-loop ... (see tools/bridgectl.c)\n"); return 2; }
+  if (argc < 2) { fprintf(stderr, "usage: bridgectl cpu|haptic-inspect|haptic|haptic-pattern|bt|net|audio|audio-loop ... (see tools/bridgectl.c)\n"); return 2; }
   if (!strcmp(argv[1], "cpu")) rc = cpu(argc, argv);
+  else if (!strcmp(argv[1], "haptic-inspect")) rc = haptic_inspect();
   else if (!strcmp(argv[1], "haptic")) rc = haptic(argc, argv, false);
   else if (!strcmp(argv[1], "haptic-pattern")) rc = haptic(argc, argv, true);
   else if (!strcmp(argv[1], "bt")) rc = bt();
