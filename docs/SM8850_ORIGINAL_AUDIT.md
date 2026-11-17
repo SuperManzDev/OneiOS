@@ -638,3 +638,77 @@ pending and must not start automatically. The direct HAL route,
 Bluetooth-controller ownership and OneOS return Gates A/B/C
 remain **unverified / BLOCKED**.
 
+
+## Eighth audit — original OneOS S24 wide-camera test reproduced on m3q (2026-11-17)
+
+The owner completed the **exact capture mode** used by the original
+OneOS `camera` hardware check: Camera2 NDK logical **wide ID 0**,
+**1280×720 @ 30 fps**, **90 frames**, with a 45-second timeout.
+The command ran under KernelSU while One UI's `system_server` was
+still running, using the previously verified standalone `camctl`.
+No OneiOS session, app installation, or vendor HAL takeover occurred.
+
+| Metric | Observed result |
+| --- | --- |
+| Camera backend | `ndk` (Camera2), logical ID `0` |
+| Capture mode | `YUV_420_888` 1280×720, 30–30 fps, CPU-read buffers |
+| Session initialization | Camera opened, session active, repeating request accepted |
+| Frames handed to reader | **90 / 90 requested** |
+| Missed / unreadable frames | **0 / 0** |
+| Capture callback counters at stop | **91 started, 90 completed, 0 failed** |
+| Buffer loss / device errors | **0 / 0** |
+| First frame after start | **335 ms** |
+| Sensor timestamp rate | **29.46 fps** |
+| Reader wall-clock rate | **29.35 fps** |
+| Converted frame | NV12 1280×720, last sequence 90, mean luma 142.4 |
+| Output | `/data/local/tmp/oneios-m3q-camera-wide-720p.png` |
+| Cleanup | NDK session reported `session: closed` |
+| Command exit code | **0** |
+
+**Verdict: PASS for the original OneOS S24-style NDK Wide capture
+configuration, reproduced on the Samsung S26 Ultra.** The 91st
+`started` callback is not itself an error; the test exits upon
+receiving 90 frames, so an additional capture can be in flight at
+teardown. There are no failed capture callbacks or lost buffers.
+The measured ~29.35 read fps is close to requested 30. The owner
+provided logs, not the resulting PNG; visual image correctness is
+still unverified.
+
+Previously passed m3q captures: Wide, Front and Ultrawide at
+640×480 / 15 fps / 10 frames each (individual clean exits).
+
+### Next bounded optical-path test — Tele3 only
+
+The m3q enumeration identified camera `6` as a **physical**
+`tele3` member of logical camera `0`. The current
+`backend_ndk.c` deliberately opens the logical parent, but
+creates a **physical capture output** using
+`ACaptureSessionPhysicalOutput_create(window, "6", ...)`.
+This differs from the proven plain YUV stream path. A physical
+camera advertising YUV output sizes does not guarantee this type
+of physical-only capture session will be accepted.
+
+After closing all apps actively using camera, perform **one**
+`tele3` test at 640×480/15 fps/10 frames, timeout 45 seconds,
+using the same verified standalone diagnostic:
+
+```sh
+adb shell su -c 'timeout 45 /data/local/tmp/oneios-m3q-camctl \
+  --backend ndk --camera tele3 --size 640x480 --fps 15 \
+  --frames 10 --out /data/local/tmp/oneios-m3q-camera-tele3.png \
+  -v capture'
+echo "Exit code: $?"
+```
+
+**Stop and report** if configuration fails, image callbacks do not
+arrive, the camera service disconnects, or the command times out.
+Do **not** automatically fall back to `--zoom 3`, try direct
+`--backend hal`, or proceed to Tele5 without reviewing the
+independent Tele3 result. A physical-output rejection can be a
+camera HAL policy/stream limitation, not a hardware failure.
+
+Even when the host Wide test passes at 720p, **camera after One UI
+framework stop and inside XNU remain untested**. The S26 return
+Gates A/B/C, USB transport continuity, Bluetooth ownership,
+display brightness writes and the original OneOS active audio/HAL
+checks also remain unverified.
