@@ -1419,3 +1419,68 @@ open original checks (display overlay, LED/ALS writes,
 Bluetooth controller ownership, direct camera HAL)
 retain their independent safety gates and must not
 be silently invoked by a batch/Run-all action.
+
+## Nineteenth audit — independent SM8850 microphone capture functional PASS (2026-11-17)
+
+The owner ran a separate microphone test with the *already verified*
+standalone audio binaries under One UI on rooted Galaxy S26 Ultra
+SM-S948B. Only the existing /data/local/tmp diagnostic helper
+`oneios-m3q-audio-coalesce-c4d9` and `oneios-m3q-audio-bridgectl`
+were invoked; no new binaries installed. One UI `system_server`
+availability was checked, the command had a **20-second timeout**,
+and the `record` flag explicitly authorized the 2-second
+microphone test:
+
+```sh
+timeout 20 /data/local/tmp/oneios-m3q-audio-bridgectl \
+  audio /data/local/tmp/oneios-m3q-audio-coalesce-c4d9 2 record
+```
+
+| Observable | Result |
+| --- | --- |
+| Speaker prelude | 440-Hz 96000/96000 frames and 660-Hz 24000/24000 frames; cleanup normal |
+| Speaker probe | 480 frames / 10 ms, pass |
+| Speaker MMAP target/estimate | target 15 ms; output end-to-end approx 20 ms in both tones |
+| Speaker initial conditions | 18 cumulative raw XRuns, 1 ring underrun, 0 PCM drops; no growth in second tone |
+| Microphone backend | AAudio, 48000 Hz mono, performance NONE, SHARED, non-MMAP |
+| Input AAudio device ID | 22 (identifier only; hardware microphone route not independently mapped) |
+| Input buffer/burst | 2880/2880 frames, 960-frame burst |
+| Parent `bridgectl` read | **94320 frames** in a 2-second wall-clock loop (98.25% of nominal 96000) |
+| PCM signal | peak 751, **-32.8 dBFS**; RMS **-47.4 dBFS**, after skipping first 250 ms |
+| Helper `oneios-audio` read | **95280 frames**, 397 periods sent, **0 reported send losses**, **0 short reads** |
+| Shutdown | `microphone stopped`, `speaker stopped`, `socket closed: exit`, `ok`, shell exit **0** |
+
+**Framing of PASS:** The native AAudio input stream opened, read real
+(nonzero) PCM, transferred hundreds of 240-frame packets and closed
+without error. The mic path is **functional on the Android host**.
+No waveform was saved; only aggregate count, peak and RMS were
+printed. This does not establish recognizable voice, capture
+quality, device-22 physical mic identity, echo cancellation,
+full-duplex audio, sample-perfect continuity or any guest-iOS
+audio behavior.
+
+**Accounting gap is understood but not yet diagnosed:** helper
+`reader()` logs 397 packets x 240 = **95280 frames** sent with no
+socket send failure; `bridgectl audio` consumed 393 packets x 240
+= **94320 frames** by the end of its 2-second loop. That is
+**four 240-frame packets (960 frames, 20 ms)** between the two
+counters; the helper total is itself three packets (720 frames,
+15 ms) below the 96000-frame ideal. In source,
+`runtime/bridges/tools/bridgectl.c` ends its receiving loop
+at the wall-clock 2-second limit and immediately calls
+`b->stop(false)`; `runtime/bridges/audio/backend.c`
+has no post-stop PCM drain. Thus frames still in transit / queued
+at the stop boundary are a plausible explanation; the evidence
+does **not** prove internal microphone lost samples. Do not
+silently report sample-accurate 96000/96000 or alter recording
+behavior for this bounded functional test.
+
+**Milestone:** original OneOS hardware `audio` speaker check PASS
+and **additional microphone host input functional PASS**.
+Original S24 checks with potential One UI side effects remain
+separately gated: display overlay/layer, haptic legacy pattern,
+brightness levels/ALS writes, Bluetooth HCI Reset / controller
+ownership, and direct vendor Camera HAL. The independent wired
+recovery and full SM8850 switch/return acceptance are **not
+verified**. Keep original switch guard closed; do not run all
+hardware checks as a batch or stop Android framework.
