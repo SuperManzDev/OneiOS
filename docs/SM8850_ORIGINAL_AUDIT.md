@@ -1160,3 +1160,42 @@ run of this correction; a successful fake test never proves
 Samsung's audio-service implementation. No active phone
 test, direct HAL takeover, Android framework stop, iOS
 guest start or S26 switch-gate changes are included here.
+
+## Fifteenth audit — accepted local CI for scoped audio-prefill fix (2026-11-17)
+
+The owner checked out exact commit `4dd7242c97a265863b2a523b7832190af08704ee` on CachyOS
+and ran an ASAN/UBSAN host audio regression, followed by the full local build
+`JOBS=8 ./scripts/ci-local.sh all 0.0.0-ci` **only after the audio test passed**.
+
+- Audio test: **20,432 checks, 0 failed**.
+- Legacy drift checks: `+0 ppm net +181`, `-2000 ppm net -663`,
+  `+2000 ppm net +1308`; all retained thresholds passed.
+- MMAP drift checks: `+0 ppm net 0`, `-2000 ppm net -1149`,
+  `+2000 ppm net +1131`; all retained thresholds passed.
+- Full local CI: **PASS**, Android ARM64 package built successfully,
+  all ELF dependency checks passed with 0 failures.
+- Produced runtime-only artifact:
+  `out/release/oneios-runtime-0.0.0-ci-arm64.tar.zst`
+  (831955 bytes).
+- Verified complete archive SHA-256:
+  `dc87a3bc16e3249af04ad228b15d6413719a23b90b63027bb656adfa95c956c5`.
+- Outer command exit code: **0**.
+
+**Verdict:** scoped AU_PROBE prefill and accounting change has passed fake-AAudio
+host regression and the full CachyOS local build, but is **NOT YET validated
+on the physical SM8850 audio service**. The previous Samsung MMAP exclusive
+trial with the unprefilled `3f4dc13` helper logged `written 480, read 0`,
+`AAUDIO_ERROR_INVALID_STATE`, 390 cumulative XRuns and an adaptive target of
+80 ms. This baseline must not be overwritten.
+
+**Next step (optical/audio host only):** extract `bin/oneios-audio` from
+the SHA-verified new archive, push it to a unique path under
+`/data/local/tmp`, verify phone-side SHA-256 matches the extracted binary,
+and run one `bridgectl audio <new helper> 2` with a 20-second timeout.
+Keep One UI's system_server running and all competing audio apps closed.
+Inspect whether the first `speaker prefill: N/N` line precedes
+`AU_PROBE`, whether `read` advances and probe succeeds, and whether
+MMAP XRun count and adaptive target remain near baseline or improve.
+A newly measured probe latency on the phone is stronger evidence than
+the fake-HAL acceptance, but is not evidence of guest-iOS audio.
+Do not change default audio routing, switch/return gates or framework.
