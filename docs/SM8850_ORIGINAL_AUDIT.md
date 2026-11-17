@@ -457,3 +457,70 @@ time limit while One UI remains running. Do not run
 `--backend hal list` or camera capture until NDK results have been
 reviewed. The original S24 run previously enumerated cameras with
 the NDK backend, but its camera IDs must not be assumed for S26.
+
+## Fifth audit — Camera2 NDK enumeration on physical m3q (2026-11-17)
+
+The owner used the locally SHA-256-verified runtime archive
+`oneios-runtime-0.0.0-ci-arm64.tar.zst` from commit
+`78e4e025`, extracted `bin/camctl`, transferred it to
+`/data/local/tmp/oneios-m3q-camctl`, checked the on-phone
+SHA-256 against the extracted file, and ran
+`timeout 30 /data/local/tmp/oneios-m3q-camctl --backend ndk list`
+with One UI's `system_server` running.
+
+**Result: PASS for Camera2 NDK camera and metadata enumeration.**
+The tool reports **7 entries**, including 3 physical members of
+logical camera 0. As enumerated:
+
+| ID | Role | Facing | Native sensor | 35 mm equivalent | Orientation | Member of |
+| --- | --- | --- | --- | ---: | ---: | --- |
+| 0 | wide | back | 4080 × 3060 | 23 mm | 90° | logical |
+| 1 | front | front | 4000 × 3000 | 24 mm | 270° | standalone |
+| 2 | ultrawide | back | 4080 × 3060 | 13 mm | 90° | standalone |
+| 3 | other | front | 3056 × 2296 | 30 mm | 270° | standalone |
+| 5 | other | back | 4080 × 3060 | 23 mm | 90° | physical of ID 0 |
+| 6 | tele3 | back | 3648 × 2736 | 66 mm | 90° | physical of ID 0 |
+| 7 | tele5 | back | 4080 × 3060 | 113 mm | 90° | physical of ID 0 |
+
+All seven report YUV output sizes including 640 × 480 and
+1280 × 720, with ranges including 15–30/30–30 fps for the
+main cameras. Tele5 additionally advertises 15–25/25–25 fps.
+These are enumerated camera metadata, not proof of available
+simultaneous streams or of independently capturable physical IDs.
+
+The historical S24 run in `runtime/bridges/camera/README.md`
+printed only 4 listed cameras, *before* the current physical-camera
+enumeration enhancement. Differences in the printed list may stem
+from both hardware and tool revision, so do not claim the S24 lacks
+these camera roles or that the S26 has 7 concurrently open camera
+devices.
+
+**Verified only:** NDK client initialization, logical/physical
+metadata enumeration and role classification, with no frame request.
+**Still blocked:** first frame, sustained capture, exact camera
+permission/ownership, tele3/tele5 physical YUV stream, zoom switch,
+front/back concurrent capture, native HAL capture, and iOS guest
+camera frames.
+
+### Next separately initiated low-impact active test
+
+On a phone with One UI still running and no camera app in use,
+run a **bounded single wide-camera NDK capture**, starting
+with 640 × 480 / 15 fps / 10 frames. This temporarily opens
+the camera and creates an image under `/data/local/tmp`.
+It cannot be classified as a passive or read-only probe.
+Use the already SHA-matched `oneios-m3q-camctl` executable:
+
+```sh
+adb shell su -c 'timeout 45 /data/local/tmp/oneios-m3q-camctl --backend ndk --camera wide --size 640x480 --fps 15 --frames 10 --out /data/local/tmp/oneios-m3q-camera-wide.png -v capture'
+```
+
+Before running, stop any app using the camera. Inspect the
+exit code, diagnostic output and optional PNG size privately.
+If the tool fails or times out, do not automatically retry
+with physical tele camera, HAL direct, zoom or more frames.
+Re-evaluate the actual error and binder callbacks first.
+Never run this capture from unattended CI or in the
+OneOS `Run all` batch, and never share a personal test
+picture in a public repo.
+
