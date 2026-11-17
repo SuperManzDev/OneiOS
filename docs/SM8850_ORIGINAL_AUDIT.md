@@ -773,3 +773,73 @@ the camera callback logs first. After Tele5, return to the remaining
 original OneOS S24 hardware-check matrix (audio, display,
 sensors, Bluetooth) rather than treating camera-only successes
 as completing the S26 port.
+
+## Tenth audit — physical Tele5 NDK stream succeeds (2026-11-17)
+
+The owner separately ran the already-verified `camctl` on the rooted
+SM-S948B with One UI's `system_server` still running. The **active**
+test selected `--backend ndk --camera tele5 --size 640x480
+--fps 15 --frames 10`, with verbose callbacks and a 45-second
+timeout; the PNG was retained privately on the phone.
+
+| Item | Verified |
+| --- | --- |
+| Capture route | Logical camera **ID 0** opened for physical camera **ID 7** |
+| Stream | One **physical** `YUV_420_888` output, CPU-read 640×480, fixed 15–15 fps |
+| Camera callbacks | **10 started / 10 completed / 0 failed** |
+| Images | **10/10** received, 0 unreadable, 0 reader misses |
+| Buffer loss / device errors | **0 / 0** |
+| First frame | **314 ms** |
+| Sensor/read FPS | **13.50 / 13.65** |
+| Last output | NV12 640×480 sequence 10, mean luma 134.1 |
+| PNG | `/data/local/tmp/oneios-m3q-camera-tele5.png` |
+| Teardown | `session: closed`, exit code **0** |
+
+**Verdict: Tele5 physical NDK stream PASS.** The tested NDK route
+opens the logical camera and uses a physical output for ID 7, and
+successfully receives buffers; no fallback to wide zoom 5 or direct
+HAL was necessary. Lens optical quality and guest operation remain
+unverified.
+
+### Combined Camera2 NDK coverage on S26 Ultra
+
+| Camera role | ID | Mode | Frames | Result |
+| --- | --- | --- | --- | --- |
+| Wide | 0 | 640×480, 15 fps | 10/10 | PASS |
+| Front | 1 | 640×480, 15 fps | 10/10 | PASS |
+| Ultrawide | 2 | 640×480, 15 fps | 10/10 | PASS |
+| Tele3 | 6, physical of 0 | 640×480, 15 fps | 10/10 | PASS |
+| Tele5 | 7, physical of 0 | 640×480, 15 fps | 10/10 | PASS |
+| Wide — original S24 check | 0 | 1280×720, 30 fps | 90/90 | PASS |
+
+In addition to the five expected lens roles, enumeration
+advertised ID 3 (another front-facing `other`) and physical
+ID 5 (`other` rear member of 0); **neither was captured**.
+Do not conflate seven enumerated IDs with seven tested streams.
+
+**Remaining camera scope:** visual correctness, extended capture
+under load, unknown camera IDs 3/5, direct camera HAL enumeration
+and capture, simultaneous streams, One UI stopped and iOS guest.
+These are separate from the original S24 `camera-list` and
+`camera` checks, which now have equivalent host PASS evidence.
+
+### Next original S24 check: speaker-only AAudio
+
+`OneOS:app-android/app/src/full/assets/root/oneios_root.sh`
+defines `audio` as `bridgectl audio $R/oneios-audio` (20-second
+limit). Unlike camera enumeration, this deliberately plays a quiet
+tone. The current `bridgectl` implements a 440 Hz tone for 2 s
+then 660 Hz for 0.5 s, with no microphone unless `record` is
+supplied. `oneios-audio` may attempt low-latency AAudio MMAP
+exclusive output and may temporarily alter audio focus/routing;
+avoid running during calls, alarms, media playback, or recording.
+
+Use the **same checksum-verified** local CI runtime artifact to stage
+both `bin/bridgectl` and `bin/oneios-audio` as standalone
+diagnostic binaries to unique `/data/local/tmp` paths. Check both
+phone SHA-256 values before executable use. Run a 25-second bound
+and inspect the helper's output, actual listening confirmation and
+exit code. Do not include `record` yet, do not start the
+disruptive Bluetooth controller test and do not run OneOS
+`Run all`. Keep the OneiOS session stage absent and the
+SM8850 switch gate unchanged.
