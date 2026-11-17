@@ -1484,3 +1484,77 @@ ownership, and direct vendor Camera HAL. The independent wired
 recovery and full SM8850 switch/return acceptance are **not
 verified**. Keep original switch guard closed; do not run all
 hardware checks as a batch or stop Android framework.
+
+## Twentieth audit — passive ALS / Bluetooth / OTG, first HEVC device failure (2026-11-17)
+
+Owner ran the next standalone hardware checks on the rooted SM-S948B
+with One UI active; these are **not** an iOS guest session.
+
+- **USB-C OTG storage:** Android VolumeManager reports
+  `disk:8,80` and `public:8,81 mounted 4E21-0000`, alongside
+  existing private/emulated volumes. This is PASS for removable
+  storage enumeration/mount, **not** USB data-cable ADB,
+  adbd continuity or a rescue boot path.
+  `sys.usb.config=adb`, `sys.usb.state=adb`,
+  controller `a600000.dwc3`, `init.svc.adbd=running`,
+  `/sys/class/power_supply/usb/online=0` were observed.
+- **ALS:** identified the named `als_rear` at
+  `/dev/input/event6` with `enable=1`. An 8-second
+  event read produced no sample, so **device discovery PASS,
+  live sensing not yet verified**. The multi-line form
+  `adb shell su -c '...'` triggered KernelSU
+  `Argument to option 'c' missing` at the start of each
+  block; some subsequent statements executed as ordinary
+  shell commands instead of under su. A single quoted
+  remote command (`adb shell "su -c 'timeout 8 getevent
+  -lt /dev/input/event6'"`) is needed to repeat the
+  bounded read unambiguously. Do not run `brightctl als`:
+  that command opens the active backlight/ALS bridge and
+  may write panel, touch IC and sensor enable nodes.
+- **Bluetooth:** `hwservicemanager=stopped`,
+  `/dev/hwbinder` symlinks to binderfs, and
+  `service list` registers the modern AIDL service
+  `android.hardware.bluetooth.IBluetoothHci/default`,
+  plus Bluetooth audio/ranging/vendor and framework
+  Bluetooth manager services. `lshal list -i` showed
+  `android.hardware.bluetooth@1.0::I*/* (... -qti)` as
+  an implementation-library entry, **not a verified live
+  HIDL `IBluetoothHci/default` instance**. The current
+  production `runtime/bridges/bt/hci_hidl.c` requires
+  `android.hardware.bluetooth@1.x::IBluetoothHci/default`
+  over HWBinder and so must not be assumed compatible.
+  Controller ownership and HCI Reset remain BLOCKED while
+  One UI Bluetooth runs. A separate AIDL bridge/preflight
+  is needed, not a direct `bridgectl bt` call.
+- **HEVC encoder:** the latest SHA-verified local CI
+  archive provided `bin/encctl`, deployed via unique
+  path and SHA-matched between host/device. On
+  `encctl hevc 256 256` the real MediaCodec backend
+  opened a session (32-MiB pool, 2 slots) but the command
+  returned **0 access units, 0 bytes, keyframe false,
+  0 accounted errors, exit 1**. This is an encoder
+  **output FAIL**, not proof HEVC hardware is absent.
+  H.264 was **not run** because the shell had `set -e`.
+
+**Source review:** `encctl.c` ignored some returned V4L2-IOCTL
+statuses (capture/output QBUF, both STREAMON, STOP) and
+`media_device.c` ignored the result of the backend's
+`drain()`. The NDK implementation may return
+`-EAGAIN` when no input buffer is available for the
+EOS marker; such a result is not equivalent to successful
+end-of-stream. The host test with a stand-in backend
+delivers CAPTURE data **before** issuing STOP, unlike
+the phone diagnostic, which issues STOP immediately
+after input QBUF. This timing difference is a candidate
+mechanism, **not a confirmed root cause**.
+
+**Next commit scope:** strictly improve the
+phone diagnostic's status checking and event+frame
+accounting; log the backend drain acceptance status
+without changing drain retry, encoder timing,
+format, or codec selection. Do not mask 0 output
+with another codec/default or count an opened
+MediaCodec session as success. Gate updated ARM64
+diagnostic behind fresh local host regression and
+full CI. Run HEVC first and only later, separately,
+H.264 if independent failure analysis warrants it.

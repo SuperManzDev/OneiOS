@@ -102,6 +102,12 @@ static uint64_t mmap_buf(guest *g, uint32_t sess, uint64_t h) {
   if (command(g, c, sizeof c, NULL, 0, r, sizeof r, NULL, 0)) return 0;
   uint64_t gpa; memcpy(&gpa, r + 8, 8); return gpa;
 }
+// Fail closed if an ioctl/status was rejected: the original phone harness
+// ignored several failures and then misleadingly printed "0 errors".
+#define ENCCTL_IO_CHECK(call, label) do { \
+  uint32_t status_ = (call); \
+  if (status_) { fprintf(stderr, "error: %s rejected: status %u\n", label, status_); return 1; } \
+} while (0)
 #define EVENT_BUFS 8
 static uint8_t event_store[EVENT_BUFS][MEDIA_EVENT_BYTES];
 static uint8_t *wait_event(guest *g, uint32_t *kind) {
@@ -139,22 +145,22 @@ int main(int argc, char **argv) {
   if (ioc(&g, sess, MEDIA_VIDIOC_S_FMT, &f, sizeof f)) { fprintf(stderr, "error: S_FMT output\n"); return 1; }
 
   uint32_t ro[5] = { 2, MEDIA_BUF_TYPE_VIDEO_OUTPUT_MPLANE, MEDIA_MEMORY_MMAP, 0, 0 };
-  ioc(&g, sess, MEDIA_VIDIOC_REQBUFS, ro, sizeof ro);
+  ENCCTL_IO_CHECK(ioc(&g, sess, MEDIA_VIDIOC_REQBUFS, ro, sizeof ro), "REQBUFS OUTPUT");
   struct media_v4l2_buffer qb; memset(&qb, 0, sizeof qb); qb.type = MEDIA_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
-  ioc(&g, sess, MEDIA_VIDIOC_QUERYBUF, &qb, sizeof qb);
+  ENCCTL_IO_CHECK(ioc(&g, sess, MEDIA_VIDIOC_QUERYBUF, &qb, sizeof qb), "QUERYBUF OUTPUT");
   uint8_t *out_buf = (uint8_t *)(uintptr_t)mmap_buf(&g, sess, qb.plane.m);
   uint32_t rc[5] = { 4, MEDIA_BUF_TYPE_VIDEO_CAPTURE_MPLANE, MEDIA_MEMORY_MMAP, 0, 0 };
-  ioc(&g, sess, MEDIA_VIDIOC_REQBUFS, rc, sizeof rc);
+  ENCCTL_IO_CHECK(ioc(&g, sess, MEDIA_VIDIOC_REQBUFS, rc, sizeof rc), "REQBUFS CAPTURE");
   for (unsigned i = 0; i < 4; i++) {
     struct media_v4l2_buffer cb; memset(&cb, 0, sizeof cb); cb.type = MEDIA_BUF_TYPE_VIDEO_CAPTURE_MPLANE; cb.index = i;
-    ioc(&g, sess, MEDIA_VIDIOC_QUERYBUF, &cb, sizeof cb);
-    mmap_buf(&g, sess, cb.plane.m);
-    ioc(&g, sess, MEDIA_VIDIOC_QBUF, &cb, sizeof cb);
+    ENCCTL_IO_CHECK(ioc(&g, sess, MEDIA_VIDIOC_QUERYBUF, &cb, sizeof cb), "QUERYBUF CAPTURE");
+    if (!mmap_buf(&g, sess, cb.plane.m)) { fprintf(stderr, "error: MMAP CAPTURE index %u\n", i); return 1; }
+    ENCCTL_IO_CHECK(ioc(&g, sess, MEDIA_VIDIOC_QBUF, &cb, sizeof cb), "QBUF CAPTURE");
   }
   uint32_t t = MEDIA_BUF_TYPE_VIDEO_OUTPUT_MPLANE; uint8_t rr[8];
-  command(&g, (uint32_t[]){ MEDIA_CMD_IOCTL, 0, sess, MEDIA_VIDIOC_STREAMON }, 16, &t, 4, rr, 8, NULL, 0);
+  ENCCTL_IO_CHECK(command(&g, (uint32_t[]){ MEDIA_CMD_IOCTL, 0, sess, MEDIA_VIDIOC_STREAMON }, 16, &t, 4, rr, 8, NULL, 0), "STREAMON OUTPUT");
   t = MEDIA_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-  command(&g, (uint32_t[]){ MEDIA_CMD_IOCTL, 0, sess, MEDIA_VIDIOC_STREAMON }, 16, &t, 4, rr, 8, NULL, 0);
+  ENCCTL_IO_CHECK(command(&g, (uint32_t[]){ MEDIA_CMD_IOCTL, 0, sess, MEDIA_VIDIOC_STREAMON }, 16, &t, 4, rr, 8, NULL, 0), "STREAMON CAPTURE");
 
   if (!out_buf) { fprintf(stderr, "error: no output buffer\n"); return 1; }
   uint32_t frame = W * H * 3 / 2;
@@ -162,22 +168,36 @@ int main(int argc, char **argv) {
   memset(out_buf + W * H, 128, W * H / 2);                     // grey chroma: a visible gradient
   struct media_v4l2_buffer qo; memset(&qo, 0, sizeof qo);
   qo.type = MEDIA_BUF_TYPE_VIDEO_OUTPUT_MPLANE; qo.index = 0; qo.sec = 1; qo.plane.bytesused = frame;
-  ioc(&g, sess, MEDIA_VIDIOC_QBUF, &qo, sizeof qo);
+  ENCCTL_IO_CHECK(ioc(&g, sess, MEDIA_VIDIOC_QBUF, &qo, sizeof qo), "QBUF OUTPUT (feed)");
+  br_encoder_stats after_feed;
+  br_encoder_get_stats(dev, &after_feed);
+  printf("encctl: after feed: sessions %llu, frames_in %llu, frames_out %llu, errors %llu\n",
+         (unsigned long long)after_feed.sessions, (unsigned long long)after_feed.frames_in,
+         (unsigned long long)after_feed.frames_out, (unsigned long long)after_feed.errors);
 
+  // Keep the exact original one-frame-then-drain order for a diagnostic
+  // comparison; the host fake test drains *after* coded CAPTURE arrives.
   uint32_t enc[10] = { MEDIA_ENC_CMD_STOP };
-  ioc(&g, sess, MEDIA_VIDIOC_ENCODER_CMD, enc, sizeof enc);
+  ENCCTL_IO_CHECK(ioc(&g, sess, MEDIA_VIDIOC_ENCODER_CMD, enc, sizeof enc), "ENCODER_CMD STOP");
 
   uint32_t total = 0, aus = 0; bool key = false, eos = false;
   for (unsigned e = 0; e < 16 && !eos; e++) {
     uint32_t kind; uint8_t *ev = wait_event(&g, &kind);
-    if (!ev) break;
+    if (!ev) { printf("encctl: event timeout (5 s without a completed event)\n"); break; }
+    uint32_t event_session;
+    memcpy(&event_session, ev + 4, sizeof event_session);
+    if (event_session != sess) { printf("encctl: event from unexpected session %u (wanted %u)\n", event_session, sess); continue; }
     if (kind == MEDIA_EVT_DQBUF) {
       struct media_v4l2_buffer b; memcpy(&b, ev + 8, sizeof b);
+      printf("encctl: DQBUF %s index %u, %u bytes, flags %#x\n",
+             b.type == MEDIA_BUF_TYPE_VIDEO_CAPTURE_MPLANE ? "CAPTURE" :
+             b.type == MEDIA_BUF_TYPE_VIDEO_OUTPUT_MPLANE ? "OUTPUT" : "UNKNOWN",
+             b.index, b.plane.bytesused, b.flags);
       if (b.type == MEDIA_BUF_TYPE_VIDEO_CAPTURE_MPLANE && b.plane.bytesused) {
         total += b.plane.bytesused; aus++;
         if (b.flags & MEDIA_BUF_FLAG_KEYFRAME) key = true;
         struct media_v4l2_buffer cb; memset(&cb, 0, sizeof cb); cb.type = MEDIA_BUF_TYPE_VIDEO_CAPTURE_MPLANE; cb.index = b.index;
-        ioc(&g, sess, MEDIA_VIDIOC_QUERYBUF, &cb, sizeof cb);
+        ENCCTL_IO_CHECK(ioc(&g, sess, MEDIA_VIDIOC_QUERYBUF, &cb, sizeof cb), "QUERYBUF CODED");
         uint8_t *nal = (uint8_t *)(uintptr_t)mmap_buf(&g, sess, cb.plane.m);
         if (nal && b.plane.bytesused >= 6) {
           unsigned type = codec == MEDIA_PIXFMT_HEVC ? (nal[4] >> 1) & 0x3f : nal[4] & 0x1f;
@@ -185,10 +205,20 @@ int main(int argc, char **argv) {
         }
         if (b.flags & MEDIA_BUF_FLAG_LAST) eos = true;
       }
-    } else if (kind == MEDIA_EVT_EVENT) eos = true;
+    } else if (kind == MEDIA_EVT_EVENT) {
+      uint32_t what;
+      memcpy(&what, ev + 8, sizeof what);
+      printf("encctl: event type %u (EOS expected %u)\n", what, (unsigned)MEDIA_EVENT_EOS);
+      if (what == MEDIA_EVENT_EOS) eos = true;
+    } else {
+      printf("encctl: unrecognized event kind %u\n", kind);
+    }
   }
 
   br_encoder_stats st; br_encoder_get_stats(dev, &st);
+  printf("encctl: stats: sessions %llu, frames_in %llu, frames_out %llu, errors %llu\n",
+         (unsigned long long)st.sessions, (unsigned long long)st.frames_in,
+         (unsigned long long)st.frames_out, (unsigned long long)st.errors);
   if (aus && key && total && !st.errors) { printf("encctl: %s %ux%u: %u access unit(s), %u bytes, keyframe present; ok\n", codec_name, W, H, aus, total); return 0; }
   fprintf(stderr, "error: %s %ux%u: %u access units, %u bytes, key %d, %llu errors\n", codec_name, W, H, aus, total, key, (unsigned long long)st.errors);
   return 1;

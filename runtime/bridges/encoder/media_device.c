@@ -232,7 +232,15 @@ static int do_ioctl(media_state *m, struct media_session *s, uint32_t nr, uint8_
     if (len < 4) return EINVAL;
     uint32_t cmd;
     memcpy(&cmd, payload, 4);
-    if (cmd == MEDIA_ENC_CMD_STOP && s->enc && !s->draining) { s->draining = true; s->eos_sent = false; m->backend->drain(s->enc); }
+    if (cmd == MEDIA_ENC_CMD_STOP && s->enc && !s->draining) {
+      s->draining = true;
+      s->eos_sent = false;
+      int drain_rc = m->backend->drain(s->enc);
+      // Diagnostic: a synchronous -EAGAIN was previously silently
+      // ignored, even though it means EOS was NOT queued to MediaCodec.
+      br_log(drain_rc ? 0 : 1, "encoder: session %u: drain request %s (rc %d)",
+             s->id, drain_rc == 0 ? "accepted" : "not accepted", drain_rc);
+    }
     return 0;
   }
   case MEDIA_VIDIOC_ENUM_FRAMESIZES:
