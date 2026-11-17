@@ -575,3 +575,66 @@ returns nonzero, times out or leaves the camera provider unhealthy.
 Do **not** fall through to `tele3`, `tele5`, `--backend hal`
 or multi-camera testing automatically: those are separate steps.
 OneOS `Run all` remains disabled on unported SM8850.
+
+## Seventh audit — Front and Ultrawide NDK streams on m3q (2026-11-17)
+
+The owner ran the same **bounded active Camera2 NDK test**, one camera at
+a time, on the root shell while One UI's `system_server` was running.
+Both tests used `/data/local/tmp/oneios-m3q-camctl`, the previously
+verified diagnostic binary, `640x480`, `15 fps`, `10 frames`, `-v
+capture`, separate PNG paths, and a 45-second timeout per test.
+
+| Metric | Front (ID 1) | Ultrawide (ID 2) |
+| --- | --- | --- |
+| Camera opened and session activated | PASS | PASS |
+| Requested / reported mode | 640×480, 15–15 fps | 640×480, 15–15 fps |
+| Capture started / completed / failed | 10 / 10 / 0 | 10 / 10 / 0 |
+| Images returned / unreadable | 10 / 0 | 10 / 0 |
+| Reader frames / missed | 10 / 0 | 10 / 0 |
+| First frame | 330 ms | 380 ms |
+| Sensor timestamp fps / read fps | 13.57 / 13.73 | 13.51 / 13.51 |
+| Buffers lost / device errors | 0 / 0 | 0 / 0 |
+| Mean Y | 133.9 | 119.2 |
+| PNG output | `oneios-m3q-camera-front.png` | `oneios-m3q-camera-ultrawide.png` |
+| Exit code | **0** | **0** |
+
+Both sessions reported binder threads started, session active, a
+`YUV_420_888` CPU-read buffer with chroma step 2, 10 successful
+capture callbacks and `session: closed`. Logs show actual image
+buffers, not only a successful camera open.
+
+**Status:** NDK metadata enumeration and limited 10-frame host
+capture are confirmed for three independent roles: Wide (ID 0),
+Front (ID 1), Ultrawide (ID 2). This does not certify color
+accuracy/image contents, camera operation after framework stop,
+camera support within the guest, or opening multiple cameras at once.
+
+### Next: original S24 OneOS camera check in comparable conditions
+
+The OneOS source
+`app-android/app/src/full/assets/root/oneios_root.sh` (fork branch
+`feat/oneios-sm8850-m3q` at `b81a6032`) specifies:
+
+```sh
+camera) TOOL=camctl ARGS="--backend ndk --camera wide --frames 90 --out $CHECKS/camera.png capture" LIMIT=45 ;;
+```
+
+In the current `camctl`, the unspecified size defaults to
+**1280×720** and fps defaults to **30**. On SM8850 perform the
+equivalent standalone check using the already installed verified
+binary, without staging an iOS image, and with a unique PNG filename:
+
+```sh
+adb shell su -c 'timeout 45 /data/local/tmp/oneios-m3q-camctl --backend ndk --camera wide --size 1280x720 --fps 30 --frames 90 --out /data/local/tmp/oneios-m3q-camera-wide-720p.png -v capture'
+```
+
+Accept **only exit 0, 90 frames, zero failed callbacks and clean
+teardown** as the result for this exact configuration. A capture
+at roughly 30 fps is expected from the metadata but not guaranteed.
+If it fails, inspect the callbacks and camera service state; do
+not silently count the earlier 10-frame PASS as the 90-frame test.
+After this, separate physical Tele3 and Tele5 tests remain
+pending and must not start automatically. The direct HAL route,
+Bluetooth-controller ownership and OneOS return Gates A/B/C
+remain **unverified / BLOCKED**.
+
