@@ -1026,3 +1026,35 @@ and still have the earlier limited probe logging. Until
 the new probe diagnostics have been tested on the S26,
 do not change the production default or claim an audio
 latency is certified for the guest.
+
+### Local-CI acceptance and fake-process isolation (2026-11-17)
+
+The user independently ran `JOBS=8 ./scripts/ci-local.sh all 0.0.0-ci`
+on CachyOS at commit `3f4dc133`. **PASS**: 20,323 fake-AAudio
+checks, 0 failed; 14,076 XNU host checks, 0 failed; runtime,
+display, camera, encoder, link, package and remaining tests passed.
+The signed-out ARM64 runtime-only package is at
+`out/release/oneios-runtime-0.0.0-ci-arm64.tar.zst` with verified
+SHA-256 `1b183698b0b0cfeef3c63e063c7fe605beab710a2d0f818e4f31b6076a901a9a`.
+No iOS guest session was run.
+
+Review of the new fake-AAudio failure-case log found `iOS is told
+15 ms` after an intentionally unmeasured probe. This was a **host
+test-harness isolation leak**, not evidence that a fresh production
+helper had fabricated a latency: multiple fake helpers share static
+`told_frames` in one test process, whereas production starts a new
+helper OS process. The test now resets `told_frames` in
+`helper_up()` and asserts it remains zero both on failed
+`AU_PROBE` and after subsequent normal PCM playback with no
+`AU_TOLD`. The production helper and its staged binary are
+unchanged by this follow-up; **re-run the host audio test** on the
+new commit to accept the test-only correction.
+
+The previous run also demonstrated, in the controlled fake HAL,
+`AU_PROBE` returned no measurement when its synthetic timestamp
+was unavailable even after 73k+ frames were written/read; subsequent
+PCM playback succeeded. This does **not** prove the same root cause
+on the Samsung HAL. The new production diagnostic already emits
+written/read counters and timestamp status on probe failure, so
+the next device A/B test is to run only the updated `oneios-audio`
+from the SHA-verified archive, with the same `bridgectl`.

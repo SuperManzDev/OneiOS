@@ -392,6 +392,9 @@ static pthread_t helper;
 static void helper_up(const char *linger)
 {
   static int pair[2];
+  // Each fake helper thread stands in for a fresh OS process. Do not
+  // leak the previous process\x27s AU_TOLD output latency into a new probe.
+  told_frames = 0;
   setenv("ONEIOS_AUDIO_LINGER_S", linger, 1);
   CHECK(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, pair) == 0);
   guest_fd = pair[0];
@@ -731,6 +734,7 @@ int main(void)
       unavailable.kind = 0;
   }
   CHECK(unavailable.kind == AU_LATENCY && unavailable.value == 0 && out_opens == opens + 1);
+  CHECK(told_frames == 0);  // The failed probe must not reuse the prior helper\x27s latency.
   CHECK(last_out != NULL);
   if (last_out) {
     pthread_mutex_lock(&last_out->lock);
@@ -741,6 +745,7 @@ int main(void)
   send_header(AU_START, true, 2, 48000);
   play(0.2, 0);
   wait_in(9600);
+  CHECK(told_frames == 0);  // Subsequent playback without AU_TOLD still has no latency claim.
   pthread_mutex_lock(&ring_lock);
   CHECK(ostat.in >= 9600);
   pthread_mutex_unlock(&ring_lock);
