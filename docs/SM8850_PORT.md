@@ -1,5 +1,10 @@
 # SM8850 host validation — Galaxy S26 Ultra
 
+Original S24 Ultra switch/return audit and upstream synchronization plan:
+[SM8850_ORIGINAL_AUDIT.md](SM8850_ORIGINAL_AUDIT.md). This passive
+probe must be reviewed before any phone session; an absent stage and an
+unverified recovery path are BLOCKED, not a switch permission.
+
 Target measured on 2026-11-16: Samsung SM-S948B (m3q), Qualcomm SM8850 (canoe), Android 17 / One UI 9.0, kernel 6.12.69, 4 KiB pages, KernelSU/SELinux Enforcing.
 
 ## CPU results
