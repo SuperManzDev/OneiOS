@@ -712,3 +712,64 @@ framework stop and inside XNU remain untested**. The S26 return
 Gates A/B/C, USB transport continuity, Bluetooth ownership,
 display brightness writes and the original OneOS active audio/HAL
 checks also remain unverified.
+
+## Ninth audit — physical Tele3 stream succeeds on SM8850 (2026-11-17)
+
+The owner explicitly ran a **bounded active** Camera2 NDK Tele3 capture
+after the S24-reference wide test. This used the previously verified
+standalone `camctl` with `--backend ndk --camera tele3
+--size 640x480 --fps 15 --frames 10 -v capture` under KernelSU
+with One UI's `system_server` running and a 45-second timeout.
+
+| Metric | Actual m3q result |
+| --- | --- |
+| Requested role | `tele3`, physical camera **ID 6** |
+| Camera device opened | Logical parent **ID 0** for physical ID 6 |
+| Output configuration | **Physical** `YUV_420_888` / 640×480 / CPU-read |
+| Repeating request | Accepted, 15–15 fps, preview template |
+| Session | Active, later closed normally |
+| Capture callbacks | **10 started, 10 completed, 0 failed** |
+| Frame output | **10/10** NV12 frames, 0 unreadable, 0 missed |
+| Buffers lost / device errors | **0 / 0** |
+| First frame | **562 ms** |
+| FPS (sensor / reader) | **13.53 / 13.81** |
+| Last PNG | `/data/local/tmp/oneios-m3q-camera-tele3.png`; mean luma **144.5** |
+| Exit status | **0** |
+
+**Verdict: PASS** for the physical-camera NDK output path on
+the Tele3 sensor. This is stronger than merely enumerating physical
+camera 6: the code's `ACaptureSessionPhysicalOutput_create()`
+route opened logical camera 0, configured the physical stream,
+and delivered actual buffers. The log confirms the session
+stopped without lost buffers or device errors.
+
+**Not proven:** PNG image quality or lens exclusivity by a visual
+inspection, sustained tele operation, zoom transitions, Tele5,
+direct vendor-camera HAL, operation with One UI's framework stopped,
+or guest-iOS camera support. No fallback to `--zoom 3` was
+required to receive Tele3 buffers in the tested configuration.
+
+### Next bounded optical-path test — physical Tele5 (ID 7)
+
+The metadata inventory identifies **Tele5 ID 7** as another
+physical child of logical ID 0, with 113 mm 35-mm-equivalent focal
+length. Test it **independently**, using the same conservative
+parameters as Tele3: 640×480, fixed 15 fps, 10 frames and a
+45-second timeout. Run only while One UI is active and no app
+is occupying the camera.
+
+```sh
+adb shell su -c 'timeout 45 /data/local/tmp/oneios-m3q-camctl \
+  --backend ndk --camera tele5 --size 640x480 --fps 15 \
+  --frames 10 --out /data/local/tmp/oneios-m3q-camera-tele5.png \
+  -v capture'
+echo "Exit code: $?"
+```
+
+Any nonzero exit, unsupported physical stream, missing images or
+timeout is a **STOP**, not a reason to immediately try `--backend
+hal`, `--zoom 5`, another camera or session takeover. Examine
+the camera callback logs first. After Tele5, return to the remaining
+original OneOS S24 hardware-check matrix (audio, display,
+sensors, Bluetooth) rather than treating camera-only successes
+as completing the S26 port.
