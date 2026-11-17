@@ -1558,3 +1558,59 @@ MediaCodec session as success. Gate updated ARM64
 diagnostic behind fresh local host regression and
 full CI. Run HEVC first and only later, separately,
 H.264 if independent failure analysis warrants it.
+
+## Twenty-first audit — both HEVC and H.264 stage frame; no coded output (2026-11-17)
+
+The owner ran the hash-checked standalone diagnostic from
+`ece3da2dd349d61434ba7620c6ac2b6104ba738e` on
+rooted SM-S948B with One UI still running.
+
+- HEVC 256x256: MediaCodec backend opened session 1, 32-MiB pool,
+  `drain request accepted (rc 0)`, `frames_in=1`,
+  `frames_out=0`, `errors=0`; one OUTPUT `DQBUF`
+  index 0, bytes 0, followed by a **5-s event timeout**,
+  0 CAPTURE access units and nonzero shell exit.
+- H.264 640x480: exactly the same sequence and failure.
+  The two codecs were run independently. No output frame
+  or EOS event was seen in either.
+- This demonstrates that the V4L2 command layer accepted
+  input and the NDK backend returned 0 from
+  `AMediaCodec_queueInputBuffer()` and
+  `AMediaCodec_queueInputBuffer(... EOS)` (via the
+  `drain rc 0` path). It **does not** prove either
+  hardware codec created or returned encoded output.
+- The test's early EOS order differs from the host
+  fake test, which obtains the first coded CAPTURE
+  buffer before requesting STOP. Whether that is
+  causally important to Samsung Codec2 is unknown.
+  No MediaCodec vendor error code, chosen component
+  name, or repeated output-dequeue count has yet
+  been captured.
+
+**Next bounded change:** add opt-in
+`ONEIOS_ENCODER_TRACE=1` tracing to the Android
+`backend_ndk.c` only, with the chosen codec name,
+accepted input format, feed/EOS statuses,
+output-format notifications and a poll summary at
+1, 1000, 2000 ... calls. The trace does not change
+format, input bytes, queue ordering, drain behavior,
+worker priority or timeout. Do not deploy until
+a fresh host encoder regression and full local
+CachyOS CI have passed. If the 5-second test
+still shows only `TRY_AGAIN_LATER` output events,
+collect bounded Android Codec2/MediaCodec logcat
+errors before attempting a format/rate or drain-order
+fix. Avoid blaming hardware encoder support on
+the current evidence.
+
+**ALS follow-up:** root quoting was corrected and
+`id` showed uid 0 (KernelSU context); an 8-second
+`getevent -lt /dev/input/event6` completed with
+exit **124** and no sensor events. The device
+`als_rear` exists and reported `enable=1`,
+but active light-sensor reporting on that node
+remains **unverified**. Do not write the node's
+`enable` property or call active `brightctl als`
+while One UI is running. Investigate the Sensors
+HAL's front ambient-light sensor separately with
+passive sensorservice inventory.
