@@ -1339,3 +1339,83 @@ near 10–20 ms, the raw XRun issue still requires investigation:
 do not represent a lower buffer target as proof of glitch-free
 speaker output. One UI/system_server, recovery gates, direct
 HAL and iOS guest are untouched.
+
+## Eighteenth audit — audible S26 speaker PASS, startup coalescing accepted (2026-11-17)
+
+The owner confirmed on the physical rooted Galaxy S26 Ultra SM-S948B that
+the standalone audio diagnostic **actually emitted both sounds**:
+the long `tiiiiiiiii` 440-Hz tone and the short `títtt`
+660-Hz tone. This is direct human confirmation of audible
+speaker output, beyond HAL acceptance and PCM accounting.
+It does **not** independently establish that there are no pops,
+clicks, short glitches or dropouts.
+
+The owner pulled exact branch commit
+`c4d9e318fd06e55e3495852342ba0b6c8a8e1670`
+and ran ASAN/UBSAN `test_audio_helper`:
+**20,422 checks, 0 failures**. The full
+`JOBS=8 ./scripts/ci-local.sh all 0.0.0-ci` also passed;
+all 6 dynamic ELF dependency checks and ARM64 packaging
+passed. Produced artifact: `oneios-runtime-0.0.0-ci-arm64.tar.zst`,
+832765 bytes, verified SHA-256
+`91e46a70890d3979539837420305dd2f7a516c1885c30340a74f69297d4abc2b`.
+
+The owner staged only checksum-matched
+`bin/oneios-audio` at
+`/data/local/tmp/oneios-m3q-audio-coalesce-c4d9`,
+reusing the existing standalone `bridgectl`, and executed
+one 20-second-bounded, **speaker-only** test on One UI.
+No mic capture, system_server stop, global audio policy
+changes, direct HAL takeover, session stage or iOS guest were
+attempted. Exit code **0** and helper socket cleanup normal.
+
+| Observation | Earlier diagnostic 9bd0541 | New c4d9e318 |
+| --- | --- | --- |
+| Pre-start speaker prefill | 576/576 frames | **576/576 frames** |
+| AU_PROBE | 480 frames / 10 ms, PASS | **480 frames / 10 ms, PASS** |
+| MMAP exclusive 48 kHz stereo | yes | yes |
+| Raw AAudio XRun count | 18 | **18** (unchanged) |
+| Internal ring underrun | 1 | **1** (unchanged) |
+| Adaptive target after first tone | **80 ms** | **15 ms** |
+| Estimated helper end-to-end, first tone | 84 ms | **21 ms** (max 22) |
+| Estimated helper end-to-end, second tone | 85 ms | **20 ms** (max 21) |
+| Guest PCM 440 Hz | 96000/96000 frames, 0 dropped | 96000/96000 frames, **0 dropped** |
+| Guest PCM 660 Hz | 24000/24000 frames, 0 dropped | 24000/24000 frames, **0 dropped** |
+| Listening verification | Not yet reported | **YES, both long/short tones audible** |
+
+**Exactly 19 events**, no trace overflow, all within about
+**0.1–0.8 ms of first `AU_START`**, and after the first
+**240 input frames**: 18 raw AAudio XRuns plus 1 ring
+underrun. The first XRun raised target 10 to 15 ms; all
+remaining events in the same starvation window kept it at
+15 ms. There were no new events during the second tone.
+All 3 remaining STOP reports preserved XRun count 18.
+This shows the coalescing logic prevents overreaction to a
+single startup burst but does not eliminate the underlying
+startup XRun / underrun itself.
+
+**Acceptance:** the original OneOS S24 `audio` **speaker
+check** is now **host PASS on SM8850**, with the explicit
+startup-XRun limitation. The 10-ms `AU_PROBE` is a
+pre-tone estimate; 20–21-ms end-to-end is an estimate
+from the helper's AAudio clock/timestamps, not an
+external acoustic latency measurement. `iOS is told
+not known` in standalone `bridgectl` is by design
+because it does not send `AU_TOLD`. The audio guest
+bridge in an actual iOS session, microphone audio,
+repeated-trial glitch rate, latency under load,
+return/restore behavior and recovery remain **untested**.
+
+**Safety-next:** do not repeat more speaker-only experiments
+simply to chase zero startup XRuns when audible and output
+latency have been validated once. A separately authorized
+`bridgectl audio <helper> 2 record` can check the
+microphone (2-second capture summarized only by count,
+peak and RMS, not saved as an audio file); keep the
+standalone process bound with timeout and One UI up.
+The original OneOS S24 audio checklist tests only
+speaker output; mic is an additional audit. Other
+open original checks (display overlay, LED/ALS writes,
+Bluetooth controller ownership, direct camera HAL)
+retain their independent safety gates and must not
+be silently invoked by a batch/Run-all action.
