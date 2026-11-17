@@ -353,6 +353,36 @@ static AAudioStream *open_speaker(unsigned rate, unsigned channels, aaudio_perfo
   return stream;
 }
 
+// AAudio output START is asynchronous. Before asking the HAL to start, fill
+// its advertised buffer with silence using NON-BLOCKING writes. Without this,
+// a new physical SM8850 stream got only 480/576 frames during AU_PROBE, never
+// advanced FramesRead and returned no presentation timestamp. The fake HAL
+// also models devices that cannot begin reading an underfilled start buffer.
+// Do not prefill the microphone, and never start a stream after failed prefill.
+static bool prefill_speaker(AAudioStream *stream)
+{
+  int32_t size = AAudioStream_getBufferSizeInFrames(stream);
+  int32_t capacity = AAudioStream_getBufferCapacityInFrames(stream);
+  if (size <= 0 || capacity <= 0 || size > capacity || size > (int32_t)RING_FRAMES) {
+    fprintf(stderr, "oneios-audio: speaker prefill: invalid buffer %d of %d frames\n", size, capacity);
+    return false;
+  }
+  static const int16_t zeros[CHUNK * 2] = { 0 };
+  int32_t filled = 0;
+  while (filled < size) {
+    int32_t wanted = size - filled < (int32_t)CHUNK ? size - filled : (int32_t)CHUNK;
+    aaudio_result_t n = AAudioStream_write(stream, zeros, wanted, 0 /* non-blocking before START */);
+    if (n <= 0 || n > wanted) {
+      fprintf(stderr, "oneios-audio: speaker prefill: %d/%d frames; write returned %d (%s)\n",
+              filled, size, (int)n, n < 0 ? AAudio_convertResultToText(n) : "incomplete");
+      return false;
+    }
+    filled += n;
+  }
+  fprintf(stderr, "oneios-audio: speaker prefill: %d/%d frames before requestStart\n", filled, size);
+  return true;
+}
+
 static AAudioStream *open_stream(bool output, unsigned rate, unsigned channels)
 {
   // The speaker on its path; the microphone performance mode NONE, shared (AAudio tries MMAP only for LOW_LATENCY).
@@ -385,6 +415,8 @@ static AAudioStream *open_stream(bool output, unsigned rate, unsigned channels)
           AAudioStream_getSharingMode(stream) == AAUDIO_SHARING_MODE_EXCLUSIVE ? "exclusive" : "shared", mmap_used(stream), burst,
           AAudioStream_getBufferSizeInFrames(stream), AAudioStream_getBufferCapacityInFrames(stream), AAudioStream_getDeviceId(stream),
           AAudioStream_getSessionId(stream), output ? "; " : "", output ? path_name(out_path) : "", *why ? " (" : "", why, *why ? ")" : "");
+  // AAudio recommends pre-filling output *before* the asynchronous START.
+  if (output && !prefill_speaker(stream)) { AAudioStream_close(stream); return NULL; }
   aaudio_result_t result = AAudioStream_requestStart(stream);
   if (result != AAUDIO_OK) { fprintf(stderr, "oneios-audio: start %s: %s\n", output ? "speaker" : "microphone", AAudio_convertResultToText(result)); AAudioStream_close(stream); return NULL; }
   return stream;

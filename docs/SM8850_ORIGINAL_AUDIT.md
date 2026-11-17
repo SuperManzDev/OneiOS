@@ -1058,3 +1058,60 @@ on the Samsung HAL. The new production diagnostic already emits
 written/read counters and timestamp status on probe failure, so
 the next device A/B test is to run only the updated `oneios-audio`
 from the SHA-verified archive, with the same `bridgectl`.
+
+## Thirteenth audit — startup prefill root-cause candidate and local fix (2026-11-17)
+
+The owner's independent local regression at `199362ef` passed
+**20,325 checks, zero failed**, and the checksum-verified new
+`oneios-audio` diagnostic was run on the physical SM-S948B.
+The MMAP exclusive output stream reports burst **96 frames**,
+buffer **576 frames**, and this **pre-tone probe**:
+
+```text
+written 480, read 0, xruns 0,
+timestamp status -895 (AAUDIO_ERROR_INVALID_STATE), target 10 ms
+```
+
+With real PCM afterward, the stream works but the raw cumulative
+XRun count rises to **390**, the adaptive buffer target reaches
+**80 ms**, and tone-time estimated latency is **82–85 ms**.
+No iOS session was started. The exact speaker audibility has
+not been independently confirmed.
+
+**Evidence-backed diagnosis:** output `requestStart()` was called
+**before any silence prefill**. The writer then held only its
+target 10 ms (**480 frames**), fewer than the output buffer
+size (**576 frames**), so `FramesRead` was still zero at
+the end of probe. The last timestamp request returned
+`AAUDIO_ERROR_INVALID_STATE`; this does not demonstrate
+that SM8850 lacks timestamp support. The legacy path's
+advertised buffer is similarly larger than its initial
+silence target. Android NDK's AAudio guidance explicitly
+recommends filling output buffers with non-blocking writes
+**before** `AAudioStream_requestStart()` to avoid underruns.
+
+**New candidate runtime fix:** `open_stream()` pre-fills the
+already chosen output stream with digital silence up to its
+advertised AAudio buffer size, using a finite number of
+`AAudioStream_write(..., timeoutNanos=0)` calls, then invokes
+`AAudioStream_requestStart()`. If prefill is incomplete,
+the output start is refused rather than silently treating
+a blocked output as healthy. Microphone startup and the
+SM8850 model/switch/recovery gates are unchanged.
+
+**Added host regression:** a fake HAL that stalls output
+until a full buffer has been primed *before* the start
+request, for both MMAP exclusive and Legacy. The test
+checks the normal AU_PROBE latency answer, actual
+`FramesRead` progress, reuse of the same stream when
+the guest starts PCM, and clean stop. This fake model
+reproduces the mechanism suggested by the SM8850 logs
+but is **not proof of Samsung's internal AAudio code**.
+
+**Status:** patch written and reviewed, **not yet accepted**.
+Run `make -C runtime/bridges build/host/test_audio_helper`
+plus the ASAN host test first, then the CachyOS
+`scripts/ci-local.sh all` packaging pipeline before
+running a newly built standalone helper on m3q.
+Keep the previous on-phone executable untouched for A/B.
+Do not authorize live iOS switching or framework stop.

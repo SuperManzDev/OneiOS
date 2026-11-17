@@ -33,7 +33,7 @@ struct AAudioStreamStruct {
   int mmap;                                             // 0 a mixer track; 1 MMAP (exclusive: the DSP, shared: AAudio's endpoint)
   pthread_mutex_t lock;
   pthread_t server;
-  bool server_on, filled, closed;
+  bool server_on, filled, closed, prefilled_at_start, blocked_at_start;
   atomic_bool quit;
   struct timespec t0;                                   // the microphone's start; the speaker's first write
   bool started;
@@ -68,6 +68,7 @@ static int mmap_policy_set = -1, fake_mmap_used;        // fake_mmap_used: a mix
 enum { HAL_NO_MMAP, HAL_MMAP_SHARED, HAL_MMAP_EXCLUSIVE };
 static int fake_hal = HAL_NO_MMAP, mmap_burst = 192, mmap_capacity = 3072, mmap_below = 240;
 static bool fake_force_no_timestamp; // AAudio can refuse a timestamp even while consuming silence.
+static bool fake_requires_prestart_buffer; // Model a device that stalls permanently on an underfilled START.
 
 static double elapsed(const struct timespec *t0) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (t.tv_sec - t0->tv_sec) + (t.tv_nsec - t0->tv_nsec) / 1e9; }
 static int16_t mark_value(int k) { return (int16_t)(3001 + 7 * k); }
@@ -80,6 +81,15 @@ bool AAudioStream_isMMapUsed(AAudioStream *s) { return s->mmap || fake_mmap_used
 static void *server(void *arg)
 {
   AAudioStream *s = arg;
+  // Deliberately model the failure diagnosed on m3q: starting output before
+  // its buffer was full leaves FramesRead at zero even if writes arrive later.
+  if (s->blocked_at_start) {
+    while (!atomic_load(&s->quit)) {
+      struct timespec nap = { 0, 2000000 };
+      nanosleep(&nap, NULL);
+    }
+    return NULL;
+  }
   double period = (double)s->pull / s->rate / (1 + dac_ppm / 1e6);
   struct timespec start;
   for (; !s->mmap;) {                                    // AudioFlinger's start threshold: the buffer filled once
@@ -161,7 +171,13 @@ aaudio_result_t AAudioStream_requestStart(AAudioStream *s)
 {
   clock_gettime(CLOCK_MONOTONIC, &s->t0);
   s->started = s->direction == AAUDIO_DIRECTION_INPUT;
-  if (s->direction == AAUDIO_DIRECTION_OUTPUT) s->server_on = pthread_create(&s->server, NULL, server, s) == 0;
+  if (s->direction == AAUDIO_DIRECTION_OUTPUT) {
+    pthread_mutex_lock(&s->lock);
+    s->prefilled_at_start = s->written - s->read >= s->buffer;
+    s->blocked_at_start = fake_requires_prestart_buffer && !s->prefilled_at_start;
+    pthread_mutex_unlock(&s->lock);
+    s->server_on = pthread_create(&s->server, NULL, server, s) == 0;
+  }
   return AAUDIO_OK;
 }
 aaudio_result_t AAudioStream_requestStop(AAudioStream *s) { (void)s; return AAUDIO_OK; }
@@ -716,6 +732,36 @@ int main(void)
   CHECK(out_opens == opens + 1 && told_frames == answer.value);
   send_header(AU_STOP, true, 0, 0);
   helper_down();
+
+  // 10a. Samsung-style strict START: the output stream cannot begin
+  // consuming if requestStart was issued before its full buffer was primed.
+  // Exercise both MMAP exclusive and a regular mixer, then play real PCM
+  // without reopening. The old helper hung at read=0 during AU_PROBE.
+  fprintf(stderr, "-- probe: requires full prefill before requestStart\n");
+  fake_requires_prestart_buffer = true;
+  for (int mode = 0; mode < 2; mode++) {
+    fake_hal = mode ? HAL_NO_MMAP : HAL_MMAP_EXCLUSIVE;
+    helper_up("60");
+    opens = out_opens;
+    send_header(AU_PROBE, true, 0, 0);
+    struct au_header primed = { 0 };
+    for (clock_gettime(CLOCK_MONOTONIC, &t0); elapsed(&t0) < 3.0 && primed.kind != AU_LATENCY;) {
+      struct pollfd wait = { .fd = guest_fd, .events = POLLIN };
+      if (poll(&wait, 1, 100) > 0 && recv(guest_fd, &primed, sizeof primed, 0) < (ssize_t)sizeof primed)
+        primed.kind = 0;
+    }
+    CHECK(primed.kind == AU_LATENCY && primed.value > 0 && out_opens == opens + 1);
+    CHECK(last_out && last_out->prefilled_at_start && !last_out->blocked_at_start);
+    if (last_out) CHECK(AAudioStream_getFramesRead(last_out) > 0);
+    send_header(AU_TOLD, true, 0, primed.value);
+    send_header(AU_START, true, 2, 48000);
+    play(0.2, 0);
+    wait_in(9600);
+    CHECK(told_frames == primed.value && out_opens == opens + 1);
+    send_header(AU_STOP, true, 0, 0);
+    helper_down();
+  }
+  fake_requires_prestart_buffer = false;
 
   // 10b. A silent stream that consumes frames but has no presentation
   // timestamp must return AU_LATENCY=0 without fabricating a value; the
