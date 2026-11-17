@@ -843,3 +843,106 @@ exit code. Do not include `record` yet, do not start the
 disruptive Bluetooth controller test and do not run OneOS
 `Run all`. Keep the OneiOS session stage absent and the
 SM8850 switch gate unchanged.
+
+## Eleventh audit — original S24 speaker AAudio check (physical SM8850, 2026-11-17)
+
+The owner staged a **matched pair** of `bin/bridgectl` and
+`bin/oneios-audio` from the same local-CI runtime package
+at commit `78e4e025`. The package SHA-256 check passed.
+Both files were transferred as standalone diagnostic executables
+under `/data/local/tmp`; owner-side host-vs-device SHA-256
+checks succeeded before invocation. The original OneOS
+speaker check was run through KernelSU, One UI running:
+
+```sh
+timeout 20 /data/local/tmp/oneios-m3q-audio-bridgectl \
+  audio /data/local/tmp/oneios-m3q-oneios-audio 2
+```
+
+**Outcome:** application exit **0**, speaker backend opened,
+PCM submitted, normal helper socket closure. **Not a complete
+audio-quality / low-latency PASS.** The owner's audible
+confirmation was not provided with the log.
+
+| Observable | Result |
+| --- | --- |
+| Output configuration | 48000 Hz / 2 channels, low latency accepted |
+| AAudio data path | MMAP **exclusive**, burst 96 frames (2 ms), buffer 576 / 6144 frames |
+| Scheduling | SCHED_OTHER, configured writer uclamp.min 512; no AAudio data callback |
+| Pre-tone probe | **FAIL**: no timestamp during 1.5 s; parent reports `I/O error` |
+| 440 Hz periods | **400 / 400** sent (2 s); helper 96000 in / 96000 played |
+| 660 Hz segment | Helper 24000 in / 24000 played (0.5 s) |
+| Helper's first-run underruns | **2**, second run **0** |
+| Dropped frames / overflows | **0 / 0** in reported segments |
+| Raw AAudio XRun counter | **389**, unchanged in all three later reports |
+| Buffer target and queue | Target **80 ms** / AAudio queued ~**82–86 ms** |
+| Estimated output latency | **82–86 ms**; e2e about **83–86 ms** during tone |
+| Shutdown | `oneios-audio: socket closed: exit`; exit **0** |
+
+**Interpretation from current source** (`runtime/bridges/audio/aaudio_helper.c`):
+1. The log's `389 xruns` comes from the **cumulative current**
+   `AAudioStream_getXRunCount()` in `out_report()`, not 389
+   additional errors at every reported STOP. Since it remains 389
+   for the 440 Hz report, 660 Hz report and final closure, no new
+   XRuns are observed *between those snapshots*. The log does not
+   expose the counter at the end of probe / first START, so precise
+   onset remains unconfirmed.
+2. `open_stream()` issues asynchronous
+   `AAudioStream_requestStart()` **before** `start_dir()`
+   creates the writer and before any explicit output prefill.
+   Android's AAudio documentation recommends pre-filling an
+   output stream before starting it. This is a concrete
+   startup-underrun hazard; it has **not** been isolated as the
+   sole cause of the observed XRun count.
+3. AAudio's writer increases `target` by **5 ms** for
+   each XRun increment until **80 ms**, and the same control
+   responds to internal ring underruns. The first PCM START
+   reuses the stream opened by `AU_PROBE` and resets statistical
+   counters, **not** the raised `target`. Hence initial probe
+   underruns can contaminate the real audio segment's latency
+   and cause the intended 5-ms MMAP floor to rise to 80 ms.
+4. The pre-tone probe requires at least one successful
+   `AAudioStream_getTimestamp()` after `getFramesRead() > 0`
+   during a 1.5-second window. On timeout, it returns 0; the
+   parent `br_audio_probe_latency()` maps that 0 to `-EIO`.
+   Thus the printed `I/O error` is a **probe measurement
+   failure**, not evidence of audio frame write failure.
+   Timestamp availability may depend on asynchronous START
+   completion or vendor MMAP behavior; error codes and
+   stream state are **not currently logged**.
+
+**Proposed host-only regression before a runtime fix:** fake
+AAudio stream that produces XRuns or unavailable timestamps during
+`AU_PROBE`, then starts real PCM, checking the target's
+initial value, cumulative-vs-delta XRun reporting, asynchronous
+START readiness and the accuracy of the probed latency.
+Never treat a probe failure as a successful latency result or
+silently publish an unmeasured value. Fix and test without changing
+the SM8850 switch gates.
+
+### Next controlled A/B on One UI: non-MMAP baseline (speaker only)
+
+Compare with the already staged, checksum-verified pair by
+launching a new helper process with
+`ONEIOS_AUDIO_MMAP=off ONEIOS_AUDIO_PERF=none`.
+These are inherited environment settings of the standalone
+helper; `AAudio_setMMapPolicy(NEVER)` applies in its process.
+This avoids changes to global `setprop`, audioserver restart,
+and vendor ownership. Keep the same 2-second 440 Hz and
+0.5-second 660 Hz test; do not enable microphone `record`
+or an unattended batch.
+
+```sh
+adb shell su -c 'ONEIOS_AUDIO_MMAP=off ONEIOS_AUDIO_PERF=none \
+  timeout 20 /data/local/tmp/oneios-m3q-audio-bridgectl \
+  audio /data/local/tmp/oneios-m3q-oneios-audio 2'
+echo "Exit code: $?"
+```
+
+Compare path/mmap, timestamps/probe, XRun count, first segment
+underruns, queue/target, endpoint latency, cleanup and whether
+the user actually heard two tones. If legacy also fails,
+inspect provider state and timestamps before patching.
+If legacy is healthy, isolate and test MMAP exclusive
+start/prefill before making a production default change.
+No iOS guest run or framework stop is authorized by this test.
