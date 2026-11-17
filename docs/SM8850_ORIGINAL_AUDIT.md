@@ -350,3 +350,60 @@ imply a staged runtime exists.
 `SM-S928*/e3q/SM8650` root guard and app-level m3q block until
 recovery can be demonstrated independently.
 
+
+## Third passive audit — screen ON, genuine volume keys, no USB cable (2026-11-17)
+
+The owner kept One UI running and used read-only ADB commands:
+
+- Screen **ON**: Android DisplayManager reported
+  `mScreenState=ON`, `mScreenBrightness=0.33885762`.
+  `/sys/class/backlight/panel0-backlight` (QCOM MDSS) changed
+  from the previous screen-OFF reading of 0 to **brightness=865**
+  out of max 12750, `bl_power=0`, while its
+  `actual_brightness=0`. This identifies the *likely* active
+  backlight control node; `actual_brightness` is not reliable
+  for reporting screen power/brightness on this kernel without
+  additional driver-level validation. The virtual
+  `/sys/class/backlight/panel` remains `0/0`.
+  Never map the framework's normalized brightness to 865/12750
+  as a linear fraction, and do not write either sysfs node yet.
+- **Physical Volume Up**: `/dev/input/event0` emitted one
+  `KEY_VOLUMEUP DOWN` followed by `UP`.
+  **Physical Volume Down**: `/dev/input/event5` emitted one
+  `KEY_VOLUMEDOWN DOWN` followed by `UP`. These *individually*
+  validate the genuine key event sources on m3q; they do not
+  exercise the 3-second simultaneous chord or OneOS readers.
+  `/dev/input/event13` is an external Huawei Band, not a
+  permissible sole rescue-key source.
+- A data-capable **USB cable is not available** at this
+  stage. Continue read-only checks over Wi-Fi ADB while One UI
+  is up; do not label USB recovery as PASS. Wireless ADB is
+  not a reliable recovery path when the Android framework
+  or network stack is stopped. Do not switch, attempt in-place
+  return, stop zygote, or open watchdog devices until
+  independent return conditions are met.
+
+### Correct command for the next brightness probe
+
+The SM8850 brightness README specifically warns that
+**`brightctl info` is not passive**: it opens the bridge and
+can write panel brightness, touch IC state or ALS enable.
+Only `brightctl inspect` uses read-only sysfs access.
+The owner already has a standalone diagnostic `brightctl`
+at `/data/local/tmp/oneios-m3q-diag/bin/brightctl`;
+confirm `inspect` support before use, or deploy the
+verified current runtime binary by an explicit diagnostic
+procedure. Do **not** call `info`, `levels` or `als`
+during passive validation.
+
+```sh
+adb shell su -c '/data/local/tmp/oneios-m3q-diag/bin/brightctl inspect'
+```
+
+The historical OneOS hardware checklist's `brightness`
+entry invokes `brightctl info`, so the app's "Run all"
+is **not** safe to run indiscriminately on the unported
+S26 Ultra. Tests of actual screen-writing, ALS and
+camera acquisition remain separate opt-in exercises.
+Keep the standalone app's 0.5.16 installation and
+the original SM8850 switch guards unchanged.
