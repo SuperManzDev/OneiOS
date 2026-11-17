@@ -383,7 +383,7 @@ static bool prefill_speaker(AAudioStream *stream)
   return true;
 }
 
-static AAudioStream *open_stream(bool output, unsigned rate, unsigned channels)
+static AAudioStream *open_stream(bool output, unsigned rate, unsigned channels, bool prefill_for_probe)
 {
   // The speaker on its path; the microphone performance mode NONE, shared (AAudio tries MMAP only for LOW_LATENCY).
   aaudio_performance_mode_t asked = AAUDIO_PERFORMANCE_MODE_NONE;
@@ -415,8 +415,10 @@ static AAudioStream *open_stream(bool output, unsigned rate, unsigned channels)
           AAudioStream_getSharingMode(stream) == AAUDIO_SHARING_MODE_EXCLUSIVE ? "exclusive" : "shared", mmap_used(stream), burst,
           AAudioStream_getBufferSizeInFrames(stream), AAudioStream_getBufferCapacityInFrames(stream), AAudioStream_getDeviceId(stream),
           AAudioStream_getSessionId(stream), output ? "; " : "", output ? path_name(out_path) : "", *why ? " (" : "", why, *why ? ")" : "");
-  // AAudio recommends pre-filling output *before* the asynchronous START.
-  if (output && !prefill_speaker(stream)) { AAudioStream_close(stream); return NULL; }
+  // Pre-fill only the AU_PROBE stream used to measure the guest's latency.
+  // Other AU_START output tracks retain their proven legacy startup/drift
+  // behaviour until the prefill change can be separately validated there.
+  if (output && prefill_for_probe && !prefill_speaker(stream)) { AAudioStream_close(stream); return NULL; }
   aaudio_result_t result = AAudioStream_requestStart(stream);
   if (result != AAUDIO_OK) { fprintf(stderr, "oneios-audio: start %s: %s\n", output ? "speaker" : "microphone", AAudio_convertResultToText(result)); AAudioStream_close(stream); return NULL; }
   return stream;
@@ -814,7 +816,7 @@ static void pause_output(void)
   clock_gettime(CLOCK_MONOTONIC, &idle_since);
 }
 
-static int start_dir(bool output, unsigned rate, unsigned channels)
+static int start_dir(bool output, unsigned rate, unsigned channels, bool prefill_for_probe)
 {
   dir_state *d = output ? &out_dir : &in_dir;
   if (output && d->stream && rate == (unsigned)AAudioStream_getSampleRate(d->stream) && channels == d->channels) {
@@ -840,7 +842,7 @@ static int start_dir(bool output, unsigned rate, unsigned channels)
     guest_clock_reset();
     pthread_mutex_unlock(&ring_lock);
   } else in_sent = in_lost = in_short = 0;
-  d->stream = open_stream(output, rate, channels);
+  d->stream = open_stream(output, rate, channels, prefill_for_probe);
   if (!d->stream) return EIO;
   if (output) {                                          // the path's floor (open_stream)
     pthread_mutex_lock(&ring_lock);
@@ -853,7 +855,10 @@ static int start_dir(bool output, unsigned rate, unsigned channels)
   int32_t burst = AAudioStream_getFramesPerBurst(d->stream);
   d->burst = burst >= 16 && burst <= (int32_t)MAX_BURST ? (unsigned)burst : 240u;
   d->channels = (unsigned)AAudioStream_getChannelCount(d->stream);
-  d->frames = 0;
+  // AAudio timestamps count the prefilled silence too. Start the local
+  // writer's frame counter at the stream's actual framesWritten, otherwise
+  // pipeline_frames() subtracts those frames and underreports latency.
+  d->frames = output ? (uint64_t)AAudioStream_getFramesWritten(d->stream) : 0;
   clock_gettime(CLOCK_MONOTONIC, &d->started);
   d->reported = d->started;
   atomic_store(&d->run, true);
@@ -925,7 +930,7 @@ static int cmp_int(const void *a, const void *b) { int x = *(const int *)a, y = 
 static unsigned probe(void)
 {
   if (!out_dir.stream) {
-    if (start_dir(true, RATE, 2)) { fprintf(stderr, "oneios-audio: probe: the speaker did not open\n"); return 0; }
+    if (start_dir(true, RATE, 2, true /* prime AU_PROBE before START */)) { fprintf(stderr, "oneios-audio: probe: the speaker did not open\n"); return 0; }
     pthread_mutex_lock(&ring_lock);
     guest_on = false;                                    // silence until the guest's START, then the linger
     pthread_mutex_unlock(&ring_lock);
@@ -1008,7 +1013,7 @@ int main(int argc, char **argv)
     bool output = packet.header.output;
     switch (packet.header.kind) {
     case AU_START: {
-      int rc = start_dir(output, packet.header.value, packet.header.channels);
+      int rc = start_dir(output, packet.header.value, packet.header.channels, false);
       if (rc) report(output, rc);
       break;
     }

@@ -393,6 +393,8 @@ static void speaker_case(double ppm)
   // of 576, and the level ends within 10 ms of its aim. Not checked: the count of slips each way (the writer's late
   // wakes move the level both ways). These and "no underrun" need the host to run the test's threads on time.
   long net = ((long)s.slips_down - (long)s0.slips_down) - ((long)s.slips_up - (long)s0.slips_up);
+  fprintf(stderr, "   drift: guest %+.0f ppm, net slips %ld, level %d -> %d frames, ring %u, queued %lld frames\n",
+          ppm, net, s0.margin, s.margin, fill, (long long)queued);
   if (host_on_time("no underrun, the slips and the level")) {
     CHECK(s.underruns == 0);
     CHECK(dac->dac_underflows == 0);
@@ -482,6 +484,9 @@ int main(void)
   helper_up("0");
   int opens_before = out_opens;
   dac_ppm = 0; speaker_case(0);
+  // Ordinary AU_START remains the pre-existing path; only AU_PROBE pre-fills
+  // before START. This keeps drift accounting comparable to the baseline.
+  CHECK(!last_out->prefilled_at_start);
   CHECK(mmap_policy_set == 2 && last_out->perf == AAUDIO_PERFORMANCE_MODE_LOW_LATENCY && out_opens == opens_before + 1);
   CHECK(out_path == PATH_LEGACY && !continuous && target_ms == 20);
   dac_ppm = 2000; speaker_case(-2000);                    // the server 2000 ppm fast: the guest is slow against it
@@ -752,6 +757,9 @@ int main(void)
     }
     CHECK(primed.kind == AU_LATENCY && primed.value > 0 && out_opens == opens + 1);
     CHECK(last_out && last_out->prefilled_at_start && !last_out->blocked_at_start);
+    // The helper must include prefilled silence in the cumulative AAudio
+    // frame timeline; otherwise end-to-end latency collapses to near zero.
+    CHECK(last_out && out_dir.frames >= (uint64_t)last_out->buffer);
     if (last_out) CHECK(AAudioStream_getFramesRead(last_out) > 0);
     send_header(AU_TOLD, true, 0, primed.value);
     send_header(AU_START, true, 2, 48000);

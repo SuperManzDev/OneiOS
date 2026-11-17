@@ -1115,3 +1115,48 @@ plus the ASAN host test first, then the CachyOS
 running a newly built standalone helper on m3q.
 Keep the previous on-phone executable untouched for A/B.
 Do not authorize live iOS switching or framework stop.
+
+## Fourteenth audit — prefill scope and AAudio queue accounting corrected (2026-11-17)
+
+Owner's first CachyOS ASAN host-test run on `7cf70ce7` returned
+**20,423 checks, 3 failed**. The fake MMAP and Legacy `AU_PROBE`
+strict-start tests **did** achieve complete prefill (672/672,
+2800/2800 frames) and measured latency, but old **non-probe**
+Legacy drift tests failed `net` expectations (line 400/401)
+and MMAP latency-stage test failed its lower e2e bound
+(line 678). The script stopped before local ARM64 packaging
+and no `7cf70ce7` binary was deployed to the S26 phone.
+
+Two distinct regressions were found in the code:
+
+1. **Over-broad prefill change:** output `requestStart()`
+   prefill was applied to every AU_START, unintentionally
+   changing the start threshold, ring level and drift timing
+   of existing sound-playback tests. Prefill is now an
+   **explicit scoped option for AU_PROBE only**. The
+   normal AU_START still uses its previously tested start
+   path. The separate strict-start fake MMAP/Legacy tests
+   still exercise prefilled AU_PROBE then reuse the stream.
+2. **Wrong AAudio frame timeline:** prefill writes silence
+   directly to AAudio *before* `start_dir()` reset
+   `d->frames=0`. The timestamp position included that
+   initial silence while `pipeline_frames()` used only
+   subsequent writer frames. This made its queue/latency
+   estimate clip to zero; it explains the fake-test
+   mismatch where ~11 ms of marker queue existed but
+   helper e2e was ~1 ms. The counter now initializes from
+   `AAudioStream_getFramesWritten()` after open, so the
+   prefill is included in the timestamp coordinate system.
+
+New fake-host assertions verify the normal AU_START is not
+prefilled, and that a successfully prefilled probe includes
+those frames in `out_dir.frames`. Test diagnostics print
+the signed drift-slip total and starting/ending margin
+without weakening or deleting any original drift or
+latency thresholds.
+
+**Still pending:** a second local ASAN and full CachyOS CI
+run of this correction; a successful fake test never proves
+Samsung's audio-service implementation. No active phone
+test, direct HAL takeover, Android framework stop, iOS
+guest start or S26 switch-gate changes are included here.
