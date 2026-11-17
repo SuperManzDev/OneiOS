@@ -524,3 +524,54 @@ Never run this capture from unattended CI or in the
 OneOS `Run all` batch, and never share a personal test
 picture in a public repo.
 
+## Sixth audit — first successful host camera stream on m3q (2026-11-17)
+
+Owner performed the previously requested **active**, single-camera Camera2 NDK test with the checksum-verified `camctl` from the runtime artifact at `78e4e025`, while One UI remained running. No OneiOS session was started.
+
+```sh
+timeout 45 /data/local/tmp/oneios-m3q-camctl \
+  --backend ndk --camera wide --size 640x480 --fps 15 \
+  --frames 10 --out /data/local/tmp/oneios-m3q-camera-wide.png \
+  -v capture
+```
+
+**Result: PASS, process exit code 0.** The owner-provided diagnostic log independently confirmed:
+
+| Metric | Physical SM8850 result |
+| --- | --- |
+| Camera/backend | Logical camera 0, NDK |
+| Open and session | Opened; 640×480 YUV_420_888 CPU-readable stream configured |
+| Requested video mode | 640×480, fixed 15–15 fps |
+| First frame latency | 698 ms after starting |
+| Camera callback counters | 10 started, 10 completed, **0 failed**, 0 buffers lost, 0 device errors |
+| Received images | 10, 0 unreadable; NV12 frames 10 read, 0 missed |
+| Measured rate | 13.51 fps (sensor timestamps), 13.95 fps (read wall-clock) |
+| Output | 640×480 NV12-derived PNG at `/data/local/tmp/oneios-m3q-camera-wide.png`; mean luma 124.9 |
+| Teardown | `session: closed`; normal exit code 0 |
+
+The camera backend reported `binder threads started`, one active
+repeating capture request, and matching sensor timestamps in the
+capture and frame callbacks. This is positive **real-phone evidence**
+for the host Camera2 NDK → YUV frame → NV12 conversion → PNG route.
+Earlier original-S24 testing opened the camera but got no frame;
+the new result is **consistent with** the source-level binder-thread
+fix now working on m3q, not a controlled S24-vs-S26 A/B experiment.
+
+**Still unverified:** any camera other than logical wide,
+1280×720/30 fps/90-frame reference Run-all mode, true image quality,
+physical tele3/tele5 output, direct vendor HAL backend, concurrency,
+camera availability after stopping One UI, and iOS guest camera.
+Mean luma alone is not proof of a non-black image; the PNG has not
+been visually inspected. Do not upload personal camera images to
+public issues or CI.
+
+### Controlled sequence for the next two lenses
+
+After closing One UI Camera and any competing camera apps, validate
+`front` and `ultrawide` independently with 10 frames at
+640×480 / 15 fps, output to different diagnostic PNGs, and time
+limit each command to 45 seconds. Stop immediately if one fails,
+returns nonzero, times out or leaves the camera provider unhealthy.
+Do **not** fall through to `tele3`, `tele5`, `--backend hal`
+or multi-camera testing automatically: those are separate steps.
+OneOS `Run all` remains disabled on unported SM8850.
