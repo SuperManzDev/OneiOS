@@ -1272,3 +1272,70 @@ CachyOS local CI pass**. If device trace confirms all residual
 XRuns occur in the AU_PROBE-to-first-tone transition,
 then isolate with a targeted regression; do not raise the
 minimum latency or disable XRun accounting without proof.
+
+## Seventeenth audit — cause of MMAP startup target inflation and coalescing regression (2026-11-17)
+
+The owner ran the exact `9bd0541` host audio test (20,432 checks,
+**0 failed**), and the full CachyOS local CI (**PASS**). They
+SHA-verified and installed the standalone trace helper on rooted
+SM-S948B without stopping One UI, running one bounded speaker-only
+`bridgectl audio` session with `ONEIOS_AUDIO_TRACE_STARTUP=1`.
+The host trial ended normally with exit code **0**.
+
+**Exact physical-phone observations:**
+
+- MMAP exclusive, 48 kHz stereo, burst 96 frames, 576-frame buffer.
+- Full `576/576` silence prefill; `AU_PROBE` successful: **480
+  frames (10 ms)**, with **0 XRuns**, 10-ms target, no trace events.
+- Immediately before the first guest `AU_START`: written 1056,
+  read 576, XRun 0, target 10 ms, `guest_on=0`.
+- First tone: 96000/96000 frames input/played, 1 ring underrun,
+  **18 cumulative AAudio XRuns**, no dropped frames.
+- Exactly **19 recorded events**, **0 trace overflows**.
+  The XRun counter rose from 0 to 18 during the approximately
+  **0.2–0.5-ms window after guest START**, while target climbed
+  **10 -> 80 ms**, followed by a stable 83–85-ms output queue.
+  Every reported event had ring=0; the last recorded queue
+  value was 96 frames. The original trace did not capture
+  total guest PCM received at each event, so it did not
+  alone prove whether the first PCM period had arrived.
+- The second (660-Hz) tone, 0.5 seconds, delivered 24000/24000
+  frames with no additional events, XRuns, underruns or drops;
+  target remained at 80 ms (20-second default decay prevents
+  recovery during this short test).
+
+**Mechanism:** the current writer adds **5 ms adaptive target for
+every observed increase** in the AAudio XRun counter, and another
+5 ms for an internal ring underrun. In AOSP's
+`AudioStreamInternalPlay.cpp`, the MMAP free-running path can
+increment `mXRunCount` on successive `processDataNow()` passes
+when its read pointer outruns available written data. A burst of
+rapid client iterations does not necessarily represent an equal
+number of separate hardware-buffer intervals; the SM8850 log
+shows 18 increments in under 1 ms, with a burst nominally 2 ms
+long. Samsung's own vendor implementation has not been inspected.
+
+**Bounded candidate fix:** raw XRun and internal-underrun counts
+remain fully visible, but both adaptive target-raising paths
+use one shared 5-ms (*one guest period*) spacing between target
+increases. This permits gradual response to sustained starvation
+while preventing one rapid output-start episode from driving
+10 -> 80 ms. The host fake test injects **18 synthetic reports plus
+one ring underrun within 0.38 ms** and asserts only one 5-ms
+target increase; another report at +6 ms must raise it again.
+Existing drift, latency, microphone and switch-gate tests remain.
+
+The opt-in trace now includes **received PCM frame count** per
+event (to determine whether the guest has sent its first
+period), and uses a ring-lock-protected guest START timestamp,
+so the displayed time is explicitly `t_guest`, not
+stream-open-relative. It logs only on the control thread.
+
+**Not yet accepted:** this policy change requires independent
+host regression and full local CI on CachyOS, and the same
+one-off device test before recommending a production default.
+If device XRun count remains high but playback latency stays
+near 10–20 ms, the raw XRun issue still requires investigation:
+do not represent a lower buffer target as proof of glitch-free
+speaker output. One UI/system_server, recovery gates, direct
+HAL and iOS guest are untouched.

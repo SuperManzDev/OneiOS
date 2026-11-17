@@ -128,16 +128,19 @@ static unsigned generation;                      // counts the guest's STARTs: t
 #define AUDIO_START_TRACE_LIMIT 48u
 enum { AUDIO_TRACE_XRUN = 1, AUDIO_TRACE_RING_UNDERRUN = 2 };
 struct audio_start_trace {
-  double since_open_ms;
+  double since_guest_start_ms;
   unsigned kind, target_before, target_after, ring_frames;
   int64_t queued_frames;
   int32_t xrun_before, xrun_after;
+  uint64_t pcm_input_frames;
   bool guest_on, priming;
 };
 static bool audio_start_trace_enabled;
 static struct audio_start_trace audio_start_events[AUDIO_START_TRACE_LIMIT];
 static unsigned audio_start_events_count, audio_start_events_reported, audio_start_events_lost;
 static unsigned audio_start_events_lost_reported;
+static double audio_trace_guest_start_s;          // ring_lock; time origin for guest AU_START
+static double audio_target_raise_last_s = -1.0;  // ring_lock; coalesced target adjustment
 
 static unsigned linger_s = 60;
 static pthread_mutex_t ring_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -201,6 +204,23 @@ static void report(bool output, int error)
   (void)send(sock, &header, sizeof header, MSG_DONTWAIT | MSG_NOSIGNAL);
 }
 
+// AAudio's free-running MMAP xRun counter can increase on successive client
+// write attempts while its read cursor is ahead of the write cursor. Those
+// increments may belong to ONE starvation episode (18 in 0.3 ms on SM8850),
+// not 18 independent 5-ms periods of missing guest audio. Record every raw
+// increment, but coalesce adaptive buffer increases across BOTH XRun and
+// ring-underrun reports within one guest period (240 frames = 5 ms).
+// Caller holds ring_lock. Does not alter raw XRun/underrun statistics.
+static bool audio_target_raise_for_starvation(double now)
+{
+  if (audio_target_raise_last_s >= 0
+      && now - audio_target_raise_last_s < (double)CHUNK / RATE) return false;
+  audio_target_raise_last_s = now;
+  unsigned raised = target + MS_FRAMES(5);
+  target = raised > MS_FRAMES(target_max_ms) ? MS_FRAMES(target_max_ms) : raised;
+  return true;
+}
+
 // The caller holds ring_lock. No blocking I/O, allocations or additional locks.
 static void audio_trace_event(unsigned kind, double now, unsigned before, unsigned after,
                               int64_t queued, int32_t previous_xruns, int32_t current_xruns)
@@ -211,7 +231,7 @@ static void audio_trace_event(unsigned kind, double now, unsigned before, unsign
     return;
   }
   struct audio_start_trace *e = &audio_start_events[audio_start_events_count++];
-  e->since_open_ms = (now - (out_dir.started.tv_sec + out_dir.started.tv_nsec / 1e9)) * 1e3;
+  e->since_guest_start_ms = (now - audio_trace_guest_start_s) * 1e3;
   e->kind = kind;
   e->target_before = FRAMES_MS(before);
   e->target_after = FRAMES_MS(after);
@@ -219,6 +239,7 @@ static void audio_trace_event(unsigned kind, double now, unsigned before, unsign
   e->queued_frames = queued;
   e->xrun_before = previous_xruns;
   e->xrun_after = current_xruns;
+  e->pcm_input_frames = ostat.in;
   e->guest_on = guest_on;
   e->priming = priming;
 }
@@ -241,9 +262,10 @@ static void audio_trace_dump(const char *phase)
           phase, n, lost, AUDIO_START_TRACE_LIMIT);
   for (unsigned i = 0; i < n; i++) {
     const struct audio_start_trace *e = &copied[i];
-    fprintf(stderr, "oneios-audio: trace event: t=%+.1f ms %s, guest %d, priming %d, target %u->%u ms, xrun %d->%d, ring %u, queued %lld frames\n",
-            e->since_open_ms, e->kind == AUDIO_TRACE_XRUN ? "AAudio-XRun" : "ring-underrun",
-            e->guest_on, e->priming, e->target_before, e->target_after,
+    fprintf(stderr, "oneios-audio: trace event: t_guest=%+.1f ms %s, guest %d, priming %d, pcm_in %llu, target %u->%u ms, xrun %d->%d, ring %u, queued %lld frames\n",
+            e->since_guest_start_ms, e->kind == AUDIO_TRACE_XRUN ? "AAudio-XRun" : "ring-underrun",
+            e->guest_on, e->priming, (unsigned long long)e->pcm_input_frames,
+            e->target_before, e->target_after,
             e->xrun_before, e->xrun_after, e->ring_frames, (long long)e->queued_frames);
   }
 }
@@ -685,8 +707,7 @@ static void *writer(void *arg)
     if (xruns > xruns_seen) {                            // AAudio ran dry (the writer was late): the level goes up
       ostat.xruns += (uint64_t)(xruns - xruns_seen);
       unsigned before = target;
-      unsigned raised = target + MS_FRAMES(5);
-      target = raised > MS_FRAMES(target_max_ms) ? MS_FRAMES(target_max_ms) : raised;
+      (void)audio_target_raise_for_starvation(now);
       audio_trace_event(AUDIO_TRACE_XRUN, now, before, target, queued, xruns_seen, xruns);
       if (target > ostat.target_peak) ostat.target_peak = target;
       quiet_since = now; window_late_max = 0; window_periods = 0;
@@ -791,8 +812,7 @@ static void *writer(void *arg)
       priming = true;
       ostat.underruns++;
       unsigned before = target;
-      unsigned raised = target + MS_FRAMES(5);
-      target = raised > MS_FRAMES(target_max_ms) ? MS_FRAMES(target_max_ms) : raised;
+      (void)audio_target_raise_for_starvation(now);
       audio_trace_event(AUDIO_TRACE_RING_UNDERRUN, now, before, target, queued, xruns, xruns);
       if (target > ostat.target_peak) ostat.target_peak = target;
       quiet_since = now; window_late_max = 0; window_periods = 0;
@@ -911,6 +931,7 @@ static int start_dir(bool output, unsigned rate, unsigned channels, bool prefill
     generation++;
     memset(&ostat, 0, sizeof ostat);
     guest_clock_reset();
+    audio_trace_guest_start_s = now_s();       // consistent with the trace's t_guest label
     pthread_mutex_unlock(&ring_lock);
     clock_gettime(CLOCK_MONOTONIC, &d->started);
     return 0;
@@ -922,6 +943,8 @@ static int start_dir(bool output, unsigned rate, unsigned channels, bool prefill
     allowance = RING_FRAMES;
     audio_start_events_count = audio_start_events_reported = 0;
     audio_start_events_lost = audio_start_events_lost_reported = 0;
+    audio_target_raise_last_s = -1.0;
+    audio_trace_guest_start_s = now_s();
     ring_head = ring_count = 0;
     priming = true;
     guest_on = true;

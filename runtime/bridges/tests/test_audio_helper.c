@@ -841,6 +841,31 @@ int main(void)
   unsetenv("ONEIOS_AUDIO_TARGET_DECAY_S");
   fake_hal = HAL_NO_MMAP;
 
+  // 12. One SM8850-style MMAP starvation burst must not cause 18
+  // consecutive +5-ms target adjustments in less than a guest period.
+  // Raw AAudio XRun accounting remains independent of this policy check.
+  fprintf(stderr, "-- coalesce a burst of 18 XRun reports plus one ring underrun in <5 ms\n");
+  pthread_mutex_lock(&ring_lock);
+  const unsigned saved_target = target;
+  const double saved_last = audio_target_raise_last_s;
+  target = MS_FRAMES(10);
+  audio_target_raise_last_s = -1.0;
+  unsigned raised_count = 0;
+  const double simulated_start = 12345.0;
+  for (unsigned i = 0; i < 18; i++) {
+    if (audio_target_raise_for_starvation(simulated_start + i * 0.00002)) raised_count++;
+  }
+  // The ring and AAudio report the same starvation episode.
+  if (audio_target_raise_for_starvation(simulated_start + 0.00038)) raised_count++;
+  CHECK(raised_count == 1 && target == MS_FRAMES(15));
+  // A genuinely sustained shortage past the next guest period can
+  // increase the target again rather than being ignored indefinitely.
+  if (audio_target_raise_for_starvation(simulated_start + 0.006)) raised_count++;
+  CHECK(raised_count == 2 && target == MS_FRAMES(20));
+  target = saved_target;
+  audio_target_raise_last_s = saved_last;
+  pthread_mutex_unlock(&ring_lock);
+
   printf("test_audio_helper: %d checks, %d failed\n", checks, failures);
   return failures != 0;
 }
