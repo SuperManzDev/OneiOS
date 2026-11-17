@@ -407,3 +407,53 @@ S26 Ultra. Tests of actual screen-writing, ALS and
 camera acquisition remain separate opt-in exercises.
 Keep the standalone app's 0.5.16 installation and
 the original SM8850 switch guards unchanged.
+
+## Fourth passive audit — verified backlight selection (2026-11-17)
+
+The owner executed the already-staged diagnostic binary (not an active
+brightness test):
+
+```sh
+adb shell su -c '/data/local/tmp/oneios-m3q-diag/bin/brightctl inspect'
+```
+
+Output:
+
+```text
+brightctl: passive inspect (read-only; no panel, touch IC, or ALS writes)
+directory: /sys/class/backlight
+node panel: max 0; brightness 0; actual 0; bl_power 0; skipped (max=0)
+node panel0-backlight: max 12750; brightness 937; actual 0; bl_power 0; selected
+brightctl: inspect ok (no state changes)
+```
+
+**Result: PASS for passive node enumeration and selection only.**
+This also confirms the current `brightctl inspect` code chooses the
+first named node with `max_brightness > 0`, which matches
+`runtime/bridges/brightness/brightness.c:panel_find()` for this
+device: the Samsung-style backend will skip the zero-max `panel`
+and choose `panel0-backlight`; the Treble backend also lists
+`panel0-backlight` first. The node reports a nonzero current brightness
+(937 versus 865 in the prior ON snapshot) and `bl_power=0`.
+`actual_brightness=0` still does not reflect the lit panel; do not
+treat it as a valid readback for SM8850.
+
+The passive test **does not verify**:
+- writing the correct brightness levels or nits mapping;
+- restore to the exact One UI brightness after a stopped session;
+- touchscreen IC enable/disable semantics on m3q;
+- ALS control, animation, or panel modes.
+
+All corresponding active tests remain BLOCKED. Do not run the OneOS
+`brightness` button (`brightctl info`) or `Run all` at this stage.
+
+**Next low-impact original hardware check:** NDK `camctl --backend ndk list`
+for camera metadata enumeration. This does not request capture frames,
+but it *does* initialize a cameraserver client and is not strictly
+passive sysfs inspection. Use only the checksum-verified local CI
+`bin/camctl`, stage a temporary diagnostic file in
+`/data/local/tmp` (not the OneiOS session stage), and run with a
+time limit while One UI remains running. Do not run
+`--backend hal list` or camera capture until NDK results have been
+reviewed. The original S24 run previously enumerated cameras with
+the NDK backend, but its camera IDs must not be assumed for S26.
