@@ -254,3 +254,99 @@ USB gadget and UDC state, shmem options, keys and watchdog presence,
 and the **local** package archive's binary names. It never writes to
 the device or starts a session. It cannot validate return Gates A/B/C.
 A PASS in this follow-up still does not authorize switch.
+
+## Second passive S26 audit: physical key origin, display power and USB (2026-11-17)
+
+Owner-supplied `audit-s24-followup-m3q.sh` result: **PASS=3, WARN=1,
+FAIL=0, BLOCKED=5, INFO=49**. The standalone CI archive for commit
+`78e4e025` passed SHA-256 and contains `bin/bridgectl`, `brightctl`,
+`camctl`, `displayctl`, `gpuctl`, and `oneios-audio`. That archive
+inventory does not test those tools on the live device and does not
+imply a staged runtime exists.
+
+- **Physical rescue keys, now identified:** `gpio-keys` at
+  `/dev/input/event0` advertises Volume Up, and `pmic_resin` at
+  `/dev/input/event5` advertises Volume Down. A connected
+  `HUAWEI Band 11-F88 Consumer Control` at `/dev/input/event13`
+  advertises both keys but is an **external** input device.
+  The S24 `oneios_switch.sh` intentionally combines volume events
+  from multiple readers using shared `control/keys/up` and `down`
+  and also polls all candidate devices. Its fake-phone JUnit tests
+  cover separate device readers and split-device polling: separation
+  alone is **not** a regression. The existing candidate discovery,
+  however, includes the external wearable; do not count the wearable
+  as proof of physical recovery capability. Before enabling an m3q
+  session, restrict recovery-key selection to proven physical hardware
+  sources and add fake tests for a transient/disconnecting external
+  input and cross-device chord. Test a *physical* up/down press while
+  Android stays live; do not engage the recovery script yet.
+- **HIDL:** `init.svc.hwservicemanager=stopped` remains the only
+  warning. The vendor QTI composer service and Composer3 AIDL binder
+  are **running/registered**, as are SurfaceFlinger, audio-policy,
+  camera, networking, keystore2 and servicemanager.
+  `lshal` returned no matching legacy HIDL interfaces. A stopped
+  hwservicemanager alone is not proof of broken modern AIDL services,
+  but any legacy bridge dependency must be inspected before runtime.
+- **Brightness:** `panel` (a virtual LCD node) reads `0/0`; the
+  actual qcom MDSS backlight sysfs candidate is
+  `panel0-backlight` at
+  `/sys/devices/platform/soc/9800000.qcom,mdss_mdp/backlight/panel0-backlight`,
+  with `max_brightness=12750`. Both reported zero and the latter
+  `bl_power=4` *while* `dumpsys display` reported
+  `mScreenState=OFF`; that is **not** evidence of brightness failure.
+  Re-read while the display is visibly awake to identify the live
+  backlight path. Do not write brightness or take display ownership.
+- **USB:** `sys.usb.config=adb`, `sys.usb.state=adb`,
+  `init.svc.adbd=running`, controller `a600000.dwc3`, and
+  `/config/usb_gadget/g1/UDC=a600000.dwc3`; nevertheless
+  `/sys/class/udc/a600000.dwc3/state=not attached`.
+  This is compatible with the known wireless-only ADB session, not
+  proof of USB transport continuity. Attach a data-capable USB cable
+  to CachyOS and recheck physical enumeration in a later read-only
+  audit. Do not alter `sys.usb.*` yet.
+- **Shared memory:** `shmem_enabled` is
+  `always within_size advise [never] deny force`, writable as root.
+  The host supports the upstream `advise` mode and currently chooses
+  `never`. The mode round-trip is **not** tested; the upstream
+  early-return restoration edge case remains open.
+- **Watchdogs:** `/dev/watchdog` and `/dev/watchdog0` exist.
+  The S24 switch closes/feeds Samsung's software watchdog after
+  framework stop; presence of character devices alone proves
+  nothing about identical semantics on S26. Do not open/write them
+  as a read-only test.
+- **Cgroups:** root `cgroup.controllers` reports `memory`,
+  while root `cgroup.kill` does not exist. The S24 return has a
+  per-process SIGKILL fallback where `oneios_session/cgroup.kill`
+  is unavailable. This is a **recovery-path compatibility question**,
+  not a reason to simulate a kill against the live system.
+- **Local-CI timing:** the posted status still reported
+  `78e4e025` PASS while the source was already checked out at
+  `379f64a5`. This is a prior run, **not proof that 379f64a5 passed**.
+  Wait for the standalone watcher to process that commit and inspect
+  its own status before treating its new scripts as CI-verified.
+
+### Remaining checkpoints before *any* m3q recovery port
+
+1. With One UI screen visibly on, read the physical MDSS
+   backlight and confirm the framework reports ON. No sysfs writes.
+2. Verify one **ordinary press each** of physical Volume Up and
+   Volume Down with a bounded `getevent` capture. An external wearable
+   cannot be an emergency-return dependency.
+3. Connect a real USB **data** cable and confirm a USB ADB endpoint,
+   USB controller attachment and serial route distinct from Wi-Fi ADB.
+4. Reproduce recovery watchdog/USB/key-state logic in fake-phone tests
+   specific to the S26 input graph; resolve shmem early-return.
+5. Build and test the relevant OneOS fork locally before updating
+   the OneiOS `app/` submodule pin; do not install/debug APK or
+   touch OneOS 0.5.16 until the tests pass.
+6. Later, the 14 original hardware checks still include active
+   display, haptic, audio, brightness, camera and Bluetooth tests.
+   Run each as a separately bounded diagnostic only with suitable
+   prerequisites; do not label the existing passive inventories
+   as full hardware PASS. The full return Gates A/B/C cannot be
+   certified without a controlled recovery exercise.
+
+**No switch permission follows from this audit.** Keep the
+`SM-S928*/e3q/SM8650` root guard and app-level m3q block until
+recovery can be demonstrated independently.
+
