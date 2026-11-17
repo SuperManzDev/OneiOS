@@ -1199,3 +1199,76 @@ MMAP XRun count and adaptive target remain near baseline or improve.
 A newly measured probe latency on the phone is stronger evidence than
 the fake-HAL acceptance, but is not evidence of guest-iOS audio.
 Do not change default audio routing, switch/return gates or framework.
+
+## Sixteenth audit — host audio prefill works; residual XRun/latency inflation (2026-11-17)
+
+A single owner-initiated speaker-only trial on rooted SM-S948B used the
+checksum-verified runtime package built from `4dd7242c`,
+SHA-256 `dc87a3bc16e3249af04ad228b15d6413719a23b90b63027bb656adfa95c956c5`,
+and deployed **only** `bin/oneios-audio` to the distinct path
+`/data/local/tmp/oneios-m3q-audio-prefill4dd7242`. The original
+standalone `bridgectl` was reused; no iOS guest/framework switch,
+microphone or global audio policy change occurred.
+
+| Check | Previous diagnostic (3f4dc13) | Prefill (4dd7242) |
+| --- | --- | --- |
+| Output | MMAP exclusive, 48 kHz stereo, 96-frame burst, 576-frame buffer | Same |
+| Explicit silence before START | No | **576/576 frames** |
+| AU_PROBE | **FAIL**: written 480/read 0; timestamp invalid state | **PASS**: 480 frames (10 ms) |
+| First 440-Hz segment | 400/400 guest periods | 400/400 |
+| Writer ring underruns | 2 | 1 |
+| Raw cumulative AAudio XRun count | 390 | **18** |
+| Adaptive target at first STOP | 80 ms | **80 ms** |
+| PCM-time estimated end-to-end | 83–86 ms | **84–86 ms** |
+| Cleanup & shell status | Closed / 0 | Closed / 0 |
+
+**Verdict:** explicit prefill repaired the AU_PROBE measurement and
+the initial output-start starvation symptoms in this trial.
+The residual output-latency inflation is **not fixed**; 18 raw
+XRuns were present at the first 440-Hz STOP, and no new XRuns were
+observed between the three STOP snapshots. Exact XRun onset
+during AU_PROBE vs the 440-Hz segment cannot be determined from
+this log alone. A single trial also cannot prove an across-run
+percentage improvement. Audible speaker confirmation remains open.
+
+The successful 10-ms probe is a **pre-tone latency estimate**
+derived while the helper's adaptive target was low. It is not
+the same measure as the later 84–86-ms guest-tone end-to-end
+estimate. On this standalone diagnostic, `bridgectl audio`
+prints `oneios-audio-latency=480 in a session` but does
+**not call** `br_audio_told()`; therefore the helper reports
+`iOS is told not known` as expected. This is not a probe
+regression or a guest iOS result.
+
+The current writer has *two* paths to raise target by 5 ms,
+capped at 80: observing an increase in cumulative AAudio
+`getXRunCount()`, or a ring underflow with the guest
+running. In the first case one observed **increase** can
+represent multiple raw XRuns; the log only reports snapshots.
+The target-decay policy waits 20 seconds of stable operation
+per 5-ms decrease (subject to guest-period lateness), much
+longer than the 2-second + 0.5-second diagnostic. Do not
+interpret 80-ms target as a persistent hardware floor.
+
+### Next change: bounded opt-in startup tracing only
+
+To distinguish when the inflation occurs, the next commit adds
+`ONEIOS_AUDIO_TRACE_STARTUP=1`, off by default:
+- snapshots after successful AU_PROBE and before the first
+  guest `AU_START`, with actual written/read, XRun and target;
+- up to **48** in-memory XRun / ring-underrun events captured
+  inside the existing writer's lock, including stream-relative
+  time, target before/after, guest_on, priming, queue and
+  frame counts;
+- print these events only on control-thread AU_STOP / teardown,
+  not inside the writer's hot loop.
+
+Playback buffer sizing, target logic, latency calculation,
+AAudio mode, PCM content and SM8850 safety gates are unchanged.
+The fake-AAudio strict-prefill test activates trace output to
+exercise the event and snapshot paths. **Do not deploy the new
+instrumented binary until a fresh ASAN host test and full
+CachyOS local CI pass**. If device trace confirms all residual
+XRuns occur in the AU_PROBE-to-first-tone transition,
+then isolate with a targeted regression; do not raise the
+minimum latency or disable XRun accounting without proof.

@@ -738,6 +738,9 @@ int main(void)
   send_header(AU_STOP, true, 0, 0);
   helper_down();
 
+  // Enable the optional fixed-size startup trace during the strict prefill
+  // regression, exercising probe/start/stop telemetry without changing PCM.
+  setenv("ONEIOS_AUDIO_TRACE_STARTUP", "1", 1);
   // 10a. Samsung-style strict START: the output stream cannot begin
   // consuming if requestStart was issued before its full buffer was primed.
   // Exercise both MMAP exclusive and a regular mixer, then play real PCM
@@ -770,6 +773,7 @@ int main(void)
     helper_down();
   }
   fake_requires_prestart_buffer = false;
+  unsetenv("ONEIOS_AUDIO_TRACE_STARTUP");
 
   // 10b. A silent stream that consumes frames but has no presentation
   // timestamp must return AU_LATENCY=0 without fabricating a value; the
