@@ -43,12 +43,14 @@ shellcheck -S error $(git ls-files 'kernel/*.sh' 'runtime/*.sh' '.github/*.sh')
 bash -n scripts/ci-local.sh
 # The passive S24->SM8850 audit is a Bash wrapper containing a POSIX Android
 # /system/bin/sh heredoc. Check that phone payload's syntax separately.
-awk '
-  /<<.*PHONE/ { phone=1; next }
-  phone && /^PHONE$/ { closed=1; exit }
-  phone { print }
-  END { if (!phone || !closed) exit 1 }
-' scripts/phone/audit-s24-preflight-m3q.sh | sh -n
+for audit in scripts/phone/audit-s24-preflight-m3q.sh scripts/phone/audit-s24-followup-m3q.sh; do
+  awk '
+    /<<.*PHONE/ { phone=1; next }
+    phone && /^PHONE$/ { closed=1; exit }
+    phone { print }
+    END { if (!phone || !closed) exit 1 }
+  ' "$audit" | sh -n
+done
 
 # Fetch the pinned 3D renderer before compiling xnuhost. Never build a 2D-only runtime.
 scripts/setup/get-references.sh virglrenderer

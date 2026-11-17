@@ -178,3 +178,79 @@ for every code batch. No automatic phone stage/switch in CI.
 
 **A PASS inventory is not a PASS boot.** The test must stop before port or
 switch operations whenever any condition remains unverified.
+
+## Actual first-pass S26 Ultra results (owner's passive report)
+
+The owner ran `scripts/phone/audit-s24-preflight-m3q.sh` on the rooted
+Samsung SM-S948B (m3q/SM8850, Android 17 SDK 37, Linux 6.12.69) while
+One UI was running. The returned breakdown:
+
+| Verdict | Count | Meaning |
+| --- | ---: | --- |
+| PASS | **71** | Specific passive prerequisites observed |
+| WARN | **1** | `init.svc.hwservicemanager=stopped` |
+| FAIL | **0** | No failed *measured* passive predicates |
+| BLOCKED | **24** | Untested active/rollback tasks or absent OneiOS stage |
+| INFO | **36** | Context only |
+
+The return prerequisites observable on an idle One UI passed:
+KernelSU root and its BusyBox applets/resetprop, SELinux Enforcing,
+init namespace, zygote/system_server/surfaceflinger, critical services,
+Binder `SurfaceFlinger` / audio / vold / installd, composer3 AIDL and
+the Samsung vendor composer, volume-key capability, battery at 96%,
+28.9 C, free storage over 2 GiB, wakelock and cgroup permissions.
+
+**Findings requiring further inspection:**
+
+- `hwservicemanager` is **stopped**. AIDL composer and the required Binder
+  services are registered, so this alone does *not* establish an error.
+  Inspect HIDL clients (if any) and this vendor build's service topology;
+  do not start it manually.
+- `/sys/class/backlight/panel` reports 0/0 while
+  `panel0-backlight` reports 0/12750. These are passive sysfs values
+  only; determine which path is the actual controller and how One UI
+  represents current brightness before any sysfs writes.
+- `sys.usb.config=adb`, controller `a600000.dwc3` reports
+  `not attached`. These readings are consistent with a wireless-only
+  ADB connection. A real USB cable and a later controlled session are
+  needed for continuity testing.
+- `shmem_enabled` lists `advise` and currently selects `never`.
+  This meets the *capability* prerequisite for upstream's shmem patch,
+  but does **not** prove a mode change/restore round-trip.
+- Hardware inventory shows standalone diagnostic `bridgectl`,
+  `displayctl`, `brightctl` but no staged `gpuctl`, `camctl`
+  or `oneios-audio`. No OneiOS stage exists yet, so absence of staged
+  binaries is expected and does not mean they are missing from the
+  built archive. A host-side archive inventory is needed.
+- The original `SM-S928*/e3q/SM8650` switch guard is **BLOCKED**,
+  correctly, on `SM-S948B/m3q/SM8850`; no code should bypass it.
+  OneOS APK 0.5.16 (versionCode 145) being installed is not proof of
+  staging or switch support.
+
+**Important upstream code-review finding:** at OneOS upstream
+`bdf3db05`, `oneios_switch.sh` changes `shmem_enabled` to `advise`
+while One UI is still up, but `oneios_return.sh` has an early-return
+branch for a session that never stopped One UI *before* its shmem restore
+block in Gate A. Consequently, a canceled/failed session before zygote
+stop may leave the mode changed. This is a source-level potential defect,
+not a confirmed S26 incident. Do not copy that implementation unchanged.
+The eventual patch needs a fake-phone regression proving both the
+early-return and full Gate A paths restore the **bare** original mode
+(e.g., `never`), plus idempotent/no-change cases, before physical testing.
+
+For the second passive pass, run:
+
+```sh
+cd ~/projects/OneiOS
+git pull --ff-only
+ONEIOS_AUDIT_OUT="$HOME/oneios-m3q-ci/audits/followup-s24-vs-m3q" \
+  ./scripts/phone/audit-s24-followup-m3q.sh
+cat "$HOME/oneios-m3q-ci/audits/followup-s24-vs-m3q/followup.tsv"
+cat "$HOME/oneios-m3q-ci/audits/followup-s24-vs-m3q/host-artifact.txt"
+```
+
+This reads HIDL/AIDL, display backlight attributes and source paths,
+USB gadget and UDC state, shmem options, keys and watchdog presence,
+and the **local** package archive's binary names. It never writes to
+the device or starts a session. It cannot validate return Gates A/B/C.
+A PASS in this follow-up still does not authorize switch.
