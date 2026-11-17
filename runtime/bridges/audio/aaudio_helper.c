@@ -907,7 +907,24 @@ static unsigned probe(void)
     int below = AAudioStream_getFramesRead(out_dir.stream) > 0 ? below_read(&out_dir) : -1;
     if (below >= 0) samples[n++] = below;
   }
-  if (!n) { fprintf(stderr, "oneios-audio: probe: no timestamp from the speaker's stream in 1.5 s: not measured\n"); return 0; }
+  if (!n) {
+    // A silent AU_PROBE can fail before the first real PCM period even on a
+    // stream that subsequently plays. Distinguish no frames consumed from an
+    // AAudio timestamp refusal; do not invent an output latency on failure.
+    int64_t pos = 0, stamp = 0;
+    aaudio_result_t ts_rc = AAudioStream_getTimestamp(out_dir.stream, CLOCK_MONOTONIC, &pos, &stamp);
+    int64_t written = AAudioStream_getFramesWritten(out_dir.stream);
+    int64_t read = AAudioStream_getFramesRead(out_dir.stream);
+    int32_t xruns = AAudioStream_getXRunCount(out_dir.stream);
+    pthread_mutex_lock(&ring_lock);
+    unsigned aim = target;
+    pthread_mutex_unlock(&ring_lock);
+    fprintf(stderr, "oneios-audio: probe: no timestamp from the speaker's stream in 1.5 s: not measured\n");
+    fprintf(stderr, "oneios-audio: probe diagnostic: written %lld, read %lld, xruns %d, timestamp status %d (%s), target %u ms\n",
+            (long long)written, (long long)read, xruns, (int)ts_rc,
+            AAudio_convertResultToText(ts_rc), FRAMES_MS(aim));
+    return 0;
+  }
   qsort(samples, n, sizeof *samples, cmp_int);
   pthread_mutex_lock(&ring_lock);
   unsigned level = target + (out_path == PATH_MMAP_SHARED ? out_dir.burst : continuous ? 0 : (pulls.size ? pulls.size : out_dir.burst) / 2);

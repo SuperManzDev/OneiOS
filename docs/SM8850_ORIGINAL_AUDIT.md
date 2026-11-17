@@ -946,3 +946,83 @@ inspect provider state and timestamps before patching.
 If legacy is healthy, isolate and test MMAP exclusive
 start/prefill before making a production default change.
 No iOS guest run or framework stop is authorized by this test.
+
+## Twelfth audit — Legacy AAudio A/B and shared silent-probe failure (2026-11-17)
+
+The owner explicitly repeated the **speaker-only** original OneOS audio
+test on SM8850 using the same pair of checksum-verified standalone
+`bridgectl` / `oneios-audio` diagnostics, setting process-local
+`ONEIOS_AUDIO_MMAP=off ONEIOS_AUDIO_PERF=none`.
+No Android audio-system properties were changed and One UI remained up.
+
+| Measure | MMAP exclusive (previous trial) | Legacy mixer (current trial) |
+| --- | --- | --- |
+| Output | 48 kHz stereo | 48 kHz stereo |
+| Performance requested / given | Low latency / low latency | None / none |
+| Path | Exclusive, mmap=1 | Shared, mmap=0 |
+| Burst | 96 frames, 2 ms | 1920 frames, 40 ms |
+| Output buffer after open | 576/6144 frames | 3120/5760 frames |
+| Pre-tone probe | **no timestamp, no latency measured** | **no timestamp, no latency measured** |
+| 440 Hz periods | 400/400 | 400/400 |
+| Helper input accounted for | 96000 frames | 96000 frames |
+| Helper underruns | 2 first segment, 0 second | 0 first and second |
+| AAudio XRun raw counter | 389 on all 3 reports | 0 on all 3 reports |
+| Adaptive target | 80 ms | 20 ms |
+| AAudio estimated queued output | 82–86 ms | 184–192 ms |
+| Estimated end-to-end during PCM | 83–86 ms | 187–193 ms |
+| Cleanup / shell exit | Clean / 0 | Clean / 0 |
+
+Legacy's mixer reports regular pulls of **1920 frames every ~40 ms**.
+It reported `slips +0/-900` in the first tone: the helper's
+drift-control output resampled a total of 900 fewer output frames
+(18.75 ms at 48 kHz), **not** 900 capture or buffer losses. The
+helper's `played` count measures ring input consumed before
+resampling, so it does not independently demonstrate all 96000
+PCM frames reached the physical speaker unchanged. Neither log
+is a substitute for the owner's audible confirmation.
+
+**Narrowed conclusion:** the capture/PCM pathways are functional at
+the host API level in both configurations. MMAP exclusive was
+~105–110 ms lower latency than Legacy in the reported windows but
+had serious startup XRun/target inflation; Legacy reported zero
+XRun/underruns but much higher output queue latency. **Both** fail
+the `AU_PROBE` early timestamp measurement. This is a
+shared initial-probe lifecycle problem, not proof of a global
+vendor absence of timestamps: `pipeline_frames()` yielded
+end-to-end measurements during real PCM playback.
+
+Source analysis: `probe()` skips calling
+`AAudioStream_getTimestamp()` whenever
+`AAudioStream_getFramesRead() == 0`; when no valid samples
+arrive within 1.5 seconds it reports only
+`no timestamp` without distinguishing lack of consumption
+from timestamp return error or stream START timing.
+Android's AAudio NDK documentation specifies
+`AAudioStream_requestStart()` is asynchronous, and
+timestamps are only valid in STARTED state. The helper
+also starts the AAudio stream before explicitly pre-filling
+the buffer, a possible startup underrun cause. Neither
+has yet been proven to be the sole trigger on m3q.
+
+### Diagnostic-only follow-up, not a playback behavior change
+
+The fork's `runtime/bridges/audio/aaudio_helper.c` now logs
+`framesWritten`, `framesRead`,
+`AAudioStream_getXRunCount()`, final
+`AAudioStream_getTimestamp()` return code and adaptive
+target **only when the probe fails**. The test fake AAudio
+can simulate a stream that consumes silence but refuses
+timestamps, asserting `AU_LATENCY=0` and that real
+PCM can start afterward. The additional logging changes
+no audio scheduling, buffer sizing, timestamp fallback,
+frame transfer or default backend.
+
+**Local validation required:** run the existing
+`runtime/bridges/tests/test_audio_helper.c` host suite
+and CachyOS local-CI build at this commit before
+transferring any new helper onto the phone.
+The previously installed phone binaries are unchanged
+and still have the earlier limited probe logging. Until
+the new probe diagnostics have been tested on the S26,
+do not change the production default or claim an audio
+latency is certified for the guest.

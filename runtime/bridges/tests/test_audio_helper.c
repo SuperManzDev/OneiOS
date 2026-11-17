@@ -67,6 +67,7 @@ static int mmap_policy_set = -1, fake_mmap_used;        // fake_mmap_used: a mix
 // what there is), and its timestamp presents a frame `mmap_below` frames after its read (the HAL and the DSP).
 enum { HAL_NO_MMAP, HAL_MMAP_SHARED, HAL_MMAP_EXCLUSIVE };
 static int fake_hal = HAL_NO_MMAP, mmap_burst = 192, mmap_capacity = 3072, mmap_below = 240;
+static bool fake_force_no_timestamp; // AAudio can refuse a timestamp even while consuming silence.
 
 static double elapsed(const struct timespec *t0) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (t.tv_sec - t0->tv_sec) + (t.tv_nsec - t0->tv_nsec) / 1e9; }
 static int16_t mark_value(int k) { return (int16_t)(3001 + 7 * k); }
@@ -227,7 +228,7 @@ aaudio_result_t AAudioStream_getTimestamp(AAudioStream *s, clockid_t clock, int6
 {
   (void)clock;
   pthread_mutex_lock(&s->lock);
-  bool ok = s->pulls_done > 0 && (!s->mmap || s->read >= mmap_below);
+  bool ok = !fake_force_no_timestamp && s->pulls_done > 0 && (!s->mmap || s->read >= mmap_below);
   *position = s->mmap ? s->read - mmap_below : s->read;      // MMAP: the HAL and the DSP after the read
   *time_ns = (int64_t)(s->last_pull * 1e9);
   pthread_mutex_unlock(&s->lock);
@@ -712,6 +713,40 @@ int main(void)
   CHECK(out_opens == opens + 1 && told_frames == answer.value);
   send_header(AU_STOP, true, 0, 0);
   helper_down();
+
+  // 10b. A silent stream that consumes frames but has no presentation
+  // timestamp must return AU_LATENCY=0 without fabricating a value; the
+  // caller can still START the same AAudio stream afterward. This matches
+  // the real S26 probe failure observed with both MMAP and legacy paths.
+  fprintf(stderr, "-- probe: timestamp unavailable despite consumed frames\n");
+  fake_hal = HAL_MMAP_EXCLUSIVE;
+  fake_force_no_timestamp = true;
+  helper_up("60");
+  opens = out_opens;
+  send_header(AU_PROBE, true, 0, 0);
+  struct au_header unavailable = { 0 };
+  for (clock_gettime(CLOCK_MONOTONIC, &t0); elapsed(&t0) < 3.0 && unavailable.kind != AU_LATENCY;) {
+    struct pollfd wait = { .fd = guest_fd, .events = POLLIN };
+    if (poll(&wait, 1, 100) > 0 && recv(guest_fd, &unavailable, sizeof unavailable, 0) < (ssize_t)sizeof unavailable)
+      unavailable.kind = 0;
+  }
+  CHECK(unavailable.kind == AU_LATENCY && unavailable.value == 0 && out_opens == opens + 1);
+  CHECK(last_out != NULL);
+  if (last_out) {
+    pthread_mutex_lock(&last_out->lock);
+    bool silence_consumed = last_out->written > 0 && last_out->read > 0;
+    pthread_mutex_unlock(&last_out->lock);
+    CHECK(silence_consumed);
+  }
+  send_header(AU_START, true, 2, 48000);
+  play(0.2, 0);
+  wait_in(9600);
+  pthread_mutex_lock(&ring_lock);
+  CHECK(ostat.in >= 9600);
+  pthread_mutex_unlock(&ring_lock);
+  send_header(AU_STOP, true, 0, 0);
+  helper_down();
+  fake_force_no_timestamp = false;
 
   // 11. MMAP exclusive, the guest late by 40 ms every 0.5 s: underruns (the level's floor of 5 ms is far below)
   // raise the target; on time again it comes back to 5 ms.
