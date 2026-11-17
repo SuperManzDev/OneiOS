@@ -1614,3 +1614,81 @@ remains **unverified**. Do not write the node's
 while One UI is running. Investigate the Sensors
 HAL's front ambient-light sensor separately with
 passive sensorservice inventory.
+
+## Twenty-second audit — Qualcomm HEVC no-output trace; live front ALS inventory (2026-11-17)
+
+The owner deployed the SHA-verified `encctl` from the
+`ba16b8ca8fb85c58135b23447c5a52b7306ccd2d`
+diagnostic package to a new standalone path
+`/data/local/tmp/oneios-m3q-encctl-ba16b8` and ran the
+bounded `ONEIOS_ENCODER_TRACE=1` HEVC 256x256 test on
+rooted SM-S948B, with One UI and `system_server` running.
+The pasted output only contains the **HEVC trace**: the
+shell's `set -e` stopped the enclosing command after
+the failed HEVC test; no new H.264 trace was attached.
+
+- `AMediaCodec_getName` selected **c2.qti.hevc.encoder**
+  (status 0), NOT a software encoder.
+- `AMediaCodec_configure` and `start` both returned
+  0; accepted format was **256x256 NV12 color-format 21**.
+  The requested encoder mode was constant quality
+  (bitrate-mode CQ = 0), a potential vendor-specific
+  compatibility variable that has not yet been tested.
+- The first input buffer was dequeued at index 0;
+  **98304 NV12 bytes**, PTS **1000000 us**, were queued
+  with status 0. Input EOS was queued at index 1 with
+  status 0, and bridge `drain request accepted (rc 0)`.
+- `dequeueOutputBuffer(..., timeoutUs=0)` reported
+  **TRY_AGAIN_LATER** at each observed poll,
+  including polls 1, 1000, 2000, 3000 and 4000.
+  No `INFO_OUTPUT_FORMAT_CHANGED`, buffer-changed
+  notice or output-buffer index was observed;
+  `frames_out=0`, `errors=0`.
+- One V4L2 **OUTPUT** DQBUF for index 0 occurred;
+  this only recycles the submitted input buffer,
+  **not** an encoded CAPTURE buffer. The guest
+  event loop timed out after five seconds;
+  `0 access units, 0 bytes, key=0`. The test failed.
+- Cause remains **unresolved**: the result cannot
+  establish a hardware encoder defect, because
+  both input-queue success and accepted EOS occur
+  before Codec2 produces a coded frame. Unlike the
+  PC fake-encoder test, the phone harness sends EOS
+  immediately after feeding just one frame.
+  Further Android-side Codec2 diagnostics are
+  needed before changing CQ mode, input packing,
+  timing or sequencing. The earlier H.264 no-output
+  test at `ece3da2d` remains recorded separately.
+
+**Passive ALS discovery:** `dumpsys sensorservice`
+revealed actual front Sensortek **STK33F15** sensors:
+standard `android.sensor.light` handle **0x33**
+(active, 250 ms sampling) and Samsung automatic-
+brightness light sensor handle **0x673** (active,
+50 ms sampling, privileged permission). Samsung
+vendor extensions for light IR and CCT were listed.
+The rear **STK6DAX Rear ALS**, handle **0x01000001**,
+is a different sensor of type `bio_alc` requiring
+`com.samsung.permission.HRM_EXT`; it is not the
+front ambient light input used for One UI display
+brightness. The prior `/dev/input/event6`
+`als_rear` test produced no events while enabled.
+Sensorservice's reported active listeners confirm
+framework registration, **not** that fresh numeric
+lux values were captured by our bridge. Current
+`runtime/bridges/brightness/brightness.c` Treble
+path explicitly lacks a Sensors HAL client;
+it can only fall back to rear evdev ALS.
+Consequently, S26 **front ALS -> OneiOS guest
+auto-brightness is NOT implemented or PASS**.
+
+**Safe next evidence:** inspect existing, bounded
+`logcat` entries for `CCodec`, `Codec2`,
+`qti`, `VIDC` around the HEVC test; do not
+clear Android's log buffers. Query the STK33F15
+front sensor's recent event values from a bounded
+`dumpsys sensorservice` excerpt, without enabling
+or disabling sensors. Do not send Bluetooth HCI
+reset, write screen brightness, start an iOS
+session, or replace the sensor HAL without a
+separate host-gated plan.
