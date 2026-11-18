@@ -1753,3 +1753,103 @@ activity. Keep the test `timeout 30`, keep
 `system_server` running, and preserve the
 original exit code. No direct HAL takeover,
 framework stops or guest start.
+
+## Twenty-fourth audit — live Codec2 log pins native Binder pool gap (2026-11-18)
+
+The owner captured a bounded live `adb logcat` alongside
+`ONEIOS_ENCODER_TRACE=1 encctl hevc 256 256`, using
+the SHA-verified standalone `encctl` on rooted
+SM-S948B with One UI / `system_server` still running.
+The 40-MB raw log contains ~290,000 lines, mostly
+historical noise; the *relevant run* is 2026-11-18
+**09:37:10.364 to 09:37:16.233 local time**. Test
+process **PID 5727**, Qualcomm vendor C2 service
+**PID 2120**.
+
+Evidence in chronological order:
+
+- At 09:37:10.364, *before* codec creation, **PID
+  5727** reported `Binder Thread Pool max thread
+  count is 0` for media.player; same for
+  media.resource_manager and the AIDL
+  `android.hardware.media.c2.IComponentStore/default`.
+  `BpBinder: Linking to death ... no threads ...
+  listening to incoming transactions` was explicitly
+  logged against `IComponent` at 09:37:10.420.
+  The standalone `encctl` program does not call
+  `ABinderProcess_startThreadPool()`; unlike a
+  framework-launched Android app it has no
+  pre-existing Binder callback pool.
+- At 09:37:10.426, the C2 query reported
+  bitrate-mode 3 initially; at 09:37:10.438,
+  configured bitrate-mode became **7** inside C2;
+  the public MediaCodec output format later showed
+  `bitrate-mode = 0` (requested CQ), bitrate
+  **262144**. These are *different abstraction-layer
+  parameter values*; do not assume they are
+  numerically interchangeable. Color-format 21 was
+  requested, and CCodec internally logged
+  `android._color-format = 2141391876` while
+  Qualcomm `QC2Buf` reported
+  `unsupported color format` at 09:37:10.486.
+- At 09:37:10.492 and 09:37:10.499, Qualcomm
+  `QC2PipelinedEntity` reported
+  `BufferTracking pipelineid=103 failed to
+  queueInputs, err 38` (Linux ENOSYS) for
+  `hvcE_612`; its components also logged
+  `Few parameters failed to configure`.
+  These vendor-side faults occurred **before** the
+  test timed out, not only at shutdown.
+- At 09:37:10.490, `CCodec` was RUNNING with
+  15 initial input buffers; both the 98304-byte
+  NV12 feed and empty-EOS queue returned status 0
+  from the NDK API. The test made >4000
+  nonblocking output polls without any encoded
+  frames, output-format change or output EOS,
+  then returned **exit 1** after a 5-second event
+  timeout.
+- At 09:37:16.225–09:37:16.233,
+  `Codec2-AIDL-BufferTypes` reported
+  `registerSender error 4`, corrupted work item,
+  AIDL transaction failed, then
+  `unlinkToDeath ... DEAD_OBJECT`. These were
+  at/after standalone process shutdown, so
+  they may be a **consequence**, not the
+  initiating failure. No causal assertion yet.
+- Historical crashes in the `-b crash` log
+  were from 2026-11-16 and concerned
+  `app_process64` / third-party
+  `com.aidc.immortal.DaemonEntry`
+  `ClassNotFoundException`; they must not be
+  conflated with this HEVC trial.
+
+**A/B hypothesis:** absent native Binder threadpool
+can leave incoming AIDL callbacks/death handling
+unprocessed (AOSP says client processes must
+start one if they require callbacks); it is
+technically plausible as a cause of no-output.
+But the separate Qualcomm `QC2Buf`/BufferTracking
+errors also make unsupported NV12 layout,
+CQ configuration or vendor behavior plausible.
+Do **not** mark root cause as resolved.
+
+**Diagnostic commit scope:** add explicit, opt-in
+`ONEIOS_ENCODER_BINDER_POOL=1` handling only to
+`runtime/bridges/encoder/encctl.c` main
+(entrypoint), link `-lbinder_ndk` only for this
+diagnostic executable. This does not modify
+production helper `oneios-encoder` or any
+codec configuration, input pattern, EOS timing
+or worker queue behavior. Compare the same
+HEVC testcase with and without the opt-in,
+only after passing CachyOS host encoder tests,
+full local CI, ARM64 packaging/ELF checks
+and SHA-matched device deployment. If still
+failing, investigate color/layout and vendor
+queueInputs error separately with controlled
+one-variable tests.
+
+**Restore/safety gate:** One UI, ADB, system_server
+and host recovery must remain intact. No
+full iOS guest, switch, Bluetooth HCI ownership,
+backlight writes or HAL stop.

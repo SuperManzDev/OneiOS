@@ -5,12 +5,14 @@
 // phone's hardware encoder as root with One UI up, and checks the bitstream. No xnuhost, no Apple code.
 //
 //   encctl hevc|h264 [WIDTH HEIGHT]        default hevc 256x256
+//   ONEIOS_ENCODER_BINDER_POOL=1           diagnostic opt-in: start native Binder callback threads
 //
 // A pass prints the backend, the encoded size, the first parameter sets (VPS/SPS/PPS for HEVC, SPS/PPS for H.264) and
 // the keyframe, and "ok". `error:` lines say which step failed.
 #define _GNU_SOURCE
 #include "encoder.h"
 #include "media_proto.h"
+#include <android/binder_process.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -119,7 +121,25 @@ static uint8_t *wait_event(guest *g, uint32_t *kind) {
   return NULL;
 }
 
+// A *standalone executable* must start its own Binder callback pool.
+// Unlike app_process/zygote apps, encctl has no framework bootstrap.
+// Do this in main, never in the reusable NDK encoder backend; keep the
+// baseline default unchanged so device trials can compare one variable.
+static int maybe_start_binder_pool(void) {
+  const char *opt = getenv("ONEIOS_ENCODER_BINDER_POOL");
+  if (!opt || strcmp(opt, "1")) return 0;
+  if (!ABinderProcess_setThreadPoolMaxThreadCount(2)) {
+    fprintf(stderr, "error: cannot set Binder max callback threads to 2\n");
+    return -1;
+  }
+  ABinderProcess_startThreadPool();
+  fprintf(stderr, "encctl: Binder callback threadpool started (1 initial + up to 2 lazy)\n");
+  return 0;
+}
+
 int main(int argc, char **argv) {
+  // Must precede any MediaCodec, CCodec2 or binder service lookups.
+  if (maybe_start_binder_pool()) return 1;
   const char *codec_name = argc > 1 ? argv[1] : "hevc";
   uint32_t W = argc > 3 ? (uint32_t)atoi(argv[2]) : 256, H = argc > 3 ? (uint32_t)atoi(argv[3]) : 256;
   uint32_t codec = strcmp(codec_name, "h264") ? MEDIA_PIXFMT_HEVC : MEDIA_PIXFMT_H264;
