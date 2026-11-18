@@ -1692,3 +1692,64 @@ or disabling sensors. Do not send Bluetooth HCI
 reset, write screen brightness, start an iOS
 session, or replace the sensor HAL without a
 separate host-gated plan.
+
+## Twenty-third audit — front ambient-light numeric samples PASS; unrelated logcat excluded (2026-11-18)
+
+The owner supplied read-only Android `dumpsys sensorservice` output
+from rooted SM-S948B with One UI running:
+
+- **Front STK33F15 Light Ambient Light Sensor Non-wakeup**:
+  the "last 50 events" history contained timestamped samples
+  at 2026-11-18 09:29:17–09:29:20 (local phone time):
+  **114.01, 113.00, 111.98, 113.00, 114.01, 115.02,
+  114.01, 116.98, 117.99, 116.98, 116.03, 115.02,
+  114.01, 100.98, 95.99**. These are *real, variable,
+  time-stamped front ALS values* reported to Android
+  sensorservice, rather than only device enumeration or
+  active listener registration. Mark the **Android host
+  front ALS data path PASS**; do not infer that the
+  guest OneiOS brightness bridge has a Sensors HAL
+  consumer. Its existing Treble path still lacks one.
+- The rear `als_rear` / `STK6DAX` at
+  `/dev/input/event6` remained silent in the
+  previous bounded 8-second evdev test. That is a
+  separate sensor and route and is **not PASS**.
+- The owner's `logcat -d ... | grep -iE
+  'CCodec|Codec2|c2\\.qti|MediaCodec|vidc|venus|venc|encoder'
+  | tail -n 180` output contained mostly
+  **c2.android.aac.decoder**, an unrelated **audio
+  decoder** around 09:29:38. An isolated
+  `Codec2-ComponentInterface: We have a failed config`
+  line was adjacent to that AAC decoder, not
+  causally tied to `c2.qti.hevc.encoder` or
+  `c2.qti.avc.encoder`. **Do not attribute**
+  the video encoding failure to it.
+- The earlier targeted `ba16b8ca` video trace
+  confirmed `c2.qti.hevc.encoder` configure,
+  start, 98304-byte NV12 input, and input EOS
+  succeeded, while output returned
+  `TRY_AGAIN_LATER` on >4000 polls with no
+  output-format change, CAPTURE frame or output
+  EOS. The root cause is still **unknown**.
+- Android MediaCodec's public end-of-stream contract
+  expressly permits a *separate empty input*
+  marked EOS after the last valid frame; its
+  timestamp is ignored. Therefore the earlier
+  "one input frame then immediate EOS" hypothesis
+  is **not sufficient to declare a harness defect**.
+  If Qualcomm exhibits a vendor-specific delay,
+  it needs direct runtime evidence.
+
+**Next bounded diagnostic:** record a **fresh live
+logcat** (do not clear global logs) in parallel with
+one `ONEIOS_ENCODER_TRACE=1 encctl hevc 256 256`
+run. Preserve logcat with exact timestamps and
+filter by `c2.qti.hevc.encoder`, `Codec2`,
+`CCodec`, `VIDC`, `VENC`, `OMX`, vendor
+codec service name and test process PID/time.
+`tail -n 180` of all generic MediaCodec matches
+buries the relevant run under background AAC
+activity. Keep the test `timeout 30`, keep
+`system_server` running, and preserve the
+original exit code. No direct HAL takeover,
+framework stops or guest start.
