@@ -12,7 +12,7 @@
 #define _GNU_SOURCE
 #include "encoder.h"
 #include "media_proto.h"
-#include <dlfcn.h>
+#include "binder_pool.h"
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -121,37 +121,12 @@ static uint8_t *wait_event(guest *g, uint32_t *kind) {
   return NULL;
 }
 
-// A standalone executable has no framework-provided Binder callback pool.
-// binder_process.h is an AOSP *platform* header, not part of NDK r28's
-// public API-30 sysroot. Resolve the platform-only process API at runtime,
-// only when explicitly opted in; do not impose its dependency on normal
-// diagnostic runs or on the production encoder helper. The dlopen handle
-// stays open for process lifetime because Binder's threads may call into it.
+// A/B phone test: default remains identical to the original no-pool case.
+// With opt-in, use the same bootstrap used by the production helper.
 static int maybe_start_binder_pool(void) {
   const char *opt = getenv("ONEIOS_ENCODER_BINDER_POOL");
   if (!opt || strcmp(opt, "1")) return 0;
-
-  void *lib = dlopen("libbinder_ndk.so", RTLD_NOW | RTLD_LOCAL);
-  if (!lib) {
-    fprintf(stderr, "error: Binder A/B opt-in: libbinder_ndk.so unavailable: %s\n", dlerror());
-    return -1;
-  }
-
-  bool (*set_max)(uint32_t) = (bool (*)(uint32_t))dlsym(lib, "ABinderProcess_setThreadPoolMaxThreadCount");
-  void (*start_pool)(void) = (void (*)(void))dlsym(lib, "ABinderProcess_startThreadPool");
-  if (!set_max || !start_pool) {
-    fprintf(stderr, "error: Binder A/B opt-in: platform threadpool symbols unavailable\n");
-    dlclose(lib);
-    return -1;
-  }
-  if (!set_max(2)) {
-    fprintf(stderr, "error: Binder A/B opt-in: cannot set max lazy threads to 2\n");
-    dlclose(lib);
-    return -1;
-  }
-  start_pool();
-  fprintf(stderr, "encctl: Binder callback threadpool started (1 initial + up to 2 lazy)\n");
-  return 0;
+  return oneios_encoder_start_binder_pool();
 }
 
 int main(int argc, char **argv) {

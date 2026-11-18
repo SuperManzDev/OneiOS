@@ -1900,3 +1900,77 @@ without deploying or running any new phone binary.
   HEVC case with and without the opt-in, reporting
   both shell exit codes and logs. The phone
   test remains unverified on this corrected code.
+
+## Twenty-sixth audit — real Qualcomm HEVC A/B PASS with native Binder pool (2026-11-18)
+
+The owner pulled `16f74797e748b940eb54937e5ca0fceef079fd8b`
+on CachyOS and reported local `make -C runtime/bridges/encoder
+test` **69/69 PASS**, `JOBS=8 ./scripts/ci-local.sh all
+0.0.0-ci` **PASS**, SHA-verified runtime artifact and
+**0 failures** in 6 dynamic ARM64 ELF checks. The helper
+and `encctl` compiled without platform Binder headers.
+
+The exact same SHA-matched standalone `encctl` binary
+was then tested twice on rooted SM-S948B with One UI and
+`system_server` running. Only
+`ONEIOS_ENCODER_BINDER_POOL` differed:
+
+- **OFF = 0 (baseline):** `c2.qti.hevc.encoder`
+  configured/started and queued one 98304-byte
+  256x256 NV12 frame + EOS (both queue statuses 0);
+  **4,000+ output polls returned not-ready**; no
+  output-format change, coded CAPTURE or EOS;
+  5-s event timeout; **exit 1**.
+- **ON = 1 (experimental Binder pool):**
+  `ABinderProcess_setThreadPoolMaxThreadCount(2)`
+  and `ABinderProcess_startThreadPool()` succeeded;
+  same `c2.qti.hevc.encoder` and exact frame size,
+  mode (CQ=0), color format 21, EOS sequencing.
+  The NDK codec reported **one output-format change**
+  with `csd-0`, then:
+  **79 bytes** codec config (`flags 0x2`),
+  **10454 bytes** keyframe (`flags 0x1`) and
+  **0-byte output EOS** (`flags 0x4`).
+  The guest virtio-media test saw corresponding
+  **CAPTURE 79+10454 bytes**, with NAL 32 (VPS)
+  and NAL 20 (IDR) at the beginnings,
+  `frames_in=1`, `frames_out=2`,
+  `errors=0`, `event type 2` (EOS),
+  `10533 bytes` total, and **exit 0**.
+- Within this one matched A/B pair, enabling native
+  Binder callback threads is a **strongly supported
+  causal fix for the no-output symptom**.
+  Mark **HEVC encode on Android host PASS** for
+  this standalone `encctl` one-frame test only.
+  This does NOT establish H.264, real production
+  helper operation, guest iOS VideoToolbox,
+  HEIC container support or prolonged operation.
+- The previous vendor `QC2Buf unsupported color
+  format` and `queueInputs err 38` in an OFF run
+  did not preclude a full frame with the original
+  format in the ON run. Treat their relationship
+  to missing callback dispatch as unresolved;
+  don't change NV12, CQ, bitrate or EOS based on
+  the earlier OFF-only vendor errors.
+
+**Production source follow-up (not device-validated):**
+`runtime/bridges/encoder/helper.c` is also a standalone
+native executable; it uses `backend_ndk` but did not
+bootstrap its own Binder threadpool. Add the **same
+bootstrap to the production `oneios-encoder` entrypoint**
+before its `ENC_MSG_HELLO`, failing closed if the
+Binder process API is unavailable. Keep
+`ONEIOS_ENCODER_STUB`/host test paths intact and
+provide a passive `oneios-encoder --binder-preflight`
+to check the binary on-device without MediaCodec or
+switching into iOS. Share the dynamic symbol
+bootstrap in `binder_pool.c`, using `dlopen`
+and `dlsym` so NDK r28/API30 and package
+ELF checks continue to work.
+
+**Gate:** the code change must pass a *fresh* host
+regression and full local CI before phone deployment.
+A PASS from `--binder-preflight` validates Binder
+initialization only; it does not replace a real
+production-helper MediaCodec round-trip or iOS test.
+An unverified OneiOS switch/return remains blocked.

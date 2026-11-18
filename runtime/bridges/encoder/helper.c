@@ -7,6 +7,9 @@
 #define _GNU_SOURCE
 #include "encoder.h"
 #include "encoder_link.h"
+#ifndef ONEIOS_ENCODER_STUB_ONLY
+#include "binder_pool.h"
+#endif
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,11 +41,26 @@ static int send_msg(int fd, uint32_t type, uint32_t session, int64_t pts, uint32
 }
 
 int main(int argc, char **argv) {
+#ifndef ONEIOS_ENCODER_STUB_ONLY
+  // Passive preflight: validates the *real helper executable's* Binder
+  // bootstrap without opening MediaCodec, allocating an encoder or starting
+  // an iOS session. Explicit command; never part of normal startup.
+  if (argc == 2 && strcmp(argv[1], "--binder-preflight") == 0) {
+    if (oneios_encoder_start_binder_pool()) return 1;
+    fprintf(stderr, "oneios-encoder: binder-preflight PASS (no codec opened)\n");
+    return 0;
+  }
+#endif
   int fd = argc > 1 ? atoi(argv[1]) : 3;
 #ifdef ONEIOS_ENCODER_STUB_ONLY
   const br_encoder_backend *backend = br_encoder_backend_stub();          // the host build: no MediaCodec on the box
 #else
   const br_encoder_backend *backend = getenv("ONEIOS_ENCODER_STUB") ? br_encoder_backend_stub() : br_encoder_backend_ndk();
+  // Unlike app_process, this standalone, unzygote'd helper has no Binder
+  // callback threads. The same S26 HEVC A/B that failed without a pool
+  // produced a complete keyframe+EOS with one. Start before HELLO so that
+  // a failed bootstrap cannot masquerade as an initialized encoder.
+  if (backend == br_encoder_backend_ndk() && oneios_encoder_start_binder_pool()) return 1;
 #endif
 
   struct { br_enc_session *enc; uint32_t id; } sess[HELPER_SESSIONS] = { { 0 } };
