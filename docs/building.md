@@ -157,9 +157,13 @@ scripts/bg.sh kernel-hosted env HOSTED_OUT=me kernel/build-hosted.sh
   `llvm-objdump -d --disassemble-symbols=_oneios_drivers_start xnu.macho | grep oneios_hid_input_start`.
 - `HOSTED_OUT=<name>` gives you your own tree and output; without it the build uses the default tree
   (`out/kernel-hosted`, `out/kernel/current-hosted/`), which belongs to the lead.
-- The build compiles UniXNU's sources from `external/` (`scripts/setup/get-references.sh`): among them
-  `NativeHidInput` at 24f1f3f for the touch screen and buttons; a checkout from before 2026-11-11 is older and the
-  build says so (remove `external/NativeHidInput` and fetch again).
+- The build calls `kernel/fetch.sh` for the pinned UniXNU base and
+  `scripts/setup/get-references.sh` for the pinned GPU, HID and display source dependencies
+  (`NativeHidInput`, `NativeMobileDisplay`, `NativeAdreno`, `NativeMetal`, `AdrenoPM4`, `ArmSmmu4K`).
+  An empty fresh `external/` is supported: no separate manual reference-fetch step is required.
+  `NativeMetal/OriginalAcceleratorABI.h` is needed for the Adreno/Metal kernel accelerator archive.
+  Existing reference checkouts are never silently advanced; if one is at an older pin (e.g.
+  `NativeHidInput` before 24f1f3f), inspect and replace that checkout explicitly before rebuilding.
 - Incremental work on one patch: `kernel/hosted-dev.sh` (see [kernel/patches/oneios-hosted/README.md](../kernel/patches/oneios-hosted/README.md)).
 - The reference for the prelink (optional, worth thousands of paired functions; rebuild only when the source
   changes): `XNU_FILESET_REFERENCE=1` in the build's command. It lands next to the kernel as
