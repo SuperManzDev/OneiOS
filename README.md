@@ -40,10 +40,14 @@ How to build and test it: [docs/building.md](docs/building.md).
   phone/model gate or interpret a passing host CI as switch approval. No firmware is
   flashed by the intended model, but a failed recovery could still require a reboot.
 
-The upstream OneOS `oneios` branch has additional work not yet merged into the
-SM8850 fork; integration is tracked separately in
-[the draft upstream sync PR](https://github.com/YMGPwcca/OneOS/pull/2).
-Local testing and conflict resolution are required before adopting those changes.
+The OneOS fork's upstream changes through `akshaynexus/OneOS` `oneios`
+`bdf3db05` have been integrated into
+[the SM8850 OneOS branch](https://github.com/YMGPwcca/OneOS/pull/3)
+at `270230df`, and this repository pins that integration in `app/`.
+The S26 Ultra switch remains fail-closed at the model, UI/job and root-script
+boundaries. **The integrated APK has not yet passed a fresh local CachyOS
+Gradle build/test run and must not be installed for an S26U switch**; host
+CI PASS from before the sync does not validate the newly merged app code.
 
 ### Galaxy S24 Ultra — historical guest-boot record (2026-11-11 to 2026-11-12)
 
