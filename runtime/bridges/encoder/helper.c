@@ -104,7 +104,8 @@ int main(int argc, char **argv) {
         if (send_error(fd, m.session, -sess[slot].error)) break;
         continue;
       }
-      // Coded payload carries its key flag; EOS is a separate ENC_MSG_EOS.\n      // Collect coded data already ready, without waiting for the next FEED.
+      // Coded payload carries its key flag; EOS is a separate ENC_MSG_EOS.
+      // Collect coded data already ready, without waiting for the next FEED.
       for (;;) {
         int key = 0, eos = 0; int64_t pts = 0;
         int bytes = backend->poll(sess[slot].enc, coded, CODED_CAP, &key, &pts, &eos);
