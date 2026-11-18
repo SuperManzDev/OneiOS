@@ -8,9 +8,11 @@ encoder, so CMPhoto writes HEIC: chronod's widget snapshots, screenshots, the ph
 the SHA-verified, standalone `encctl` successfully encoded **one HEVC 256x256 keyframe+EOS** with
 `c2.qti.hevc.encoder` (10533 bytes total) and **one H.264 640x480 keyframe+EOS** with
 `c2.qti.avc.encoder` (11594 bytes) only after starting a native Binder callback threadpool.
-The production `oneios-encoder --binder-preflight` also passed. The production helper's actual socket round-trip
-has **not yet been run on the phone**; `encctl --helper /absolute/path/to/oneios-encoder` is the new independent
-validation for that route. No iOS guest VideoToolbox or HEIC container has been verified on the S26.
+The production `oneios-encoder --binder-preflight` passed. The production **UNIX socket round-trip**
+has now also passed on the physical S26 for both codecs: `encctl --helper` reported 10533 B HEVC
+(VPS + IDR 20 + EOS) and 11594 B H.264 (SPS + IDR 5 + EOS), both exit 0.
+No iOS guest VideoToolbox, HEIC container or sustained multi-frame test has been verified on the S26.
+The latest commit's full local CI status was not visible in the owner's abbreviated log.
 
 ```sh
 make test          # host test: the device + socket + helper + stand-in, over the real transport (ASan, UBSan)

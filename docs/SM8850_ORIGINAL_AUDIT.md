@@ -2052,3 +2052,77 @@ and shouldn't be interpreted as proof of
 robust, lossless flush semantics or video
 streaming. The separate error contract
 deserves a follow-up after the first E2E run.
+
+## Twenty-eighth audit — production encoder socket HEVC + H.264 PASS on S26 Ultra (2026-11-18)
+
+After pulling `9cbf548d53c56dc253525fe9fdaff3c972f22528`,
+the owner staged an SHA-matched `bin/encctl` and
+`bin/oneios-encoder` pair from their local
+`oneios-runtime-0.0.0-ci-arm64.tar.zst` on the
+rooted SM-S948B (One UI running). The archive's
+own SHA256 sidecar passed. The remote files were
+verified against the extracted host binaries before
+execution. The **first local CI snippet shown for
+this commit stops at `Updating 72517d3..9cbf548`**:
+neither a new `test_encoder: 69/69` nor a
+`ci-local: PASS` line for this **specific commit**
+is visible in the supplied output. Do NOT infer
+full local CI PASS for 9cbf548 from the earlier
+72517d3 PASS or from a self-consistent archive.
+
+**Physically observed E2E:**
+- `encctl --helper /data/local/tmp/oneios-m3q-9cbf548d-oneios-encoder hevc 256 256`
+  used `mediacodec-helper`, spawned the production
+  encoder, which reported
+  `Binder callback threadpool started`;
+  `frames_in=1`, `frames_out=2`,
+  `errors=0`, CAPTURE 79-byte HEVC config
+  (NAL 32) and 10454-byte IDR frame (NAL 20),
+  followed by CAPTURE 0-byte LAST and
+  `EVENT EOS=2`; **10533 bytes total**,
+  `IDR+EOS present; ok`, **exit 0**.
+- `encctl --helper ... h264 640 480`
+  likewise used the production
+  `mediacodec-helper` socket path, independently
+  started the child's Binder threadpool, returned
+  CAPTURE 30-byte H.264 SPS config (NAL 7)
+  and 11564-byte IDR frame (NAL 5),
+  a 0-byte LAST and EOS event; `frames_in=1`,
+  `frames_out=2`, `errors=0`;
+  **11594 bytes total**, `IDR+EOS present; ok`,
+  **exit 0**; enclosing test **Overall exit code: 0**.
+- Because `--helper` selects
+  `br_encoder_backend_helper`, these runs test:
+  **plain-memory guest → virtio-media →
+  backend_helper.c → UNIX socket →
+  production oneios-encoder helper → Qualcomm
+  MediaCodec → socket → CAPTURE/IDR/EOS**.
+  Mark *single-frame hardware encoding through
+  the production host path on physical SM-S948B*
+  **PASS for HEVC and H.264**, independently of
+  the unconfirmed full CI output.
+- This is **not** a booted S26 iOS guest, iOS
+  VideoToolbox end-to-end test, HEIC container,
+  sustained/multi-frame video throughput test,
+  or full crash/restore certification.
+- Known code-level limitation still remains:
+  `helper.c` may synthesize `ENC_MSG_EOS` after
+  1000 unsuccessful ~2-ms polls without actual
+  codec EOS. It also ignores the return values
+  from `backend->feed()` and
+  `backend->drain()`; backend_helper.c currently
+  does not process `ENC_MSG_ERROR`. The smoke
+  test's real coded IDR plus EOS proves the happy
+  path, **not** lossless failure propagation or
+  timeout correctness. Future work should return
+  explicit errors, never fake EOS on a deadline,
+  and add tests for malformed/missing output,
+  helper failure, cleanup, multi-frame operation.
+
+**Immediate next safe gate:** confirm a fresh
+`make -C runtime/bridges/encoder test` and
+`JOBS=8 ./scripts/ci-local.sh all 0.0.0-ci`
+PASS at **9cbf548d**, and inspect the package's
+embedded `runtime.json` git commit to avoid
+testing a stale archive. No iOS hot-switch before
+independent USB recovery/return verification.
