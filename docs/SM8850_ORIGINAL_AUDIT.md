@@ -1974,3 +1974,81 @@ A PASS from `--binder-preflight` validates Binder
 initialization only; it does not replace a real
 production-helper MediaCodec round-trip or iOS test.
 An unverified OneiOS switch/return remains blocked.
+
+## Twenty-seventh audit — H.264 host PASS and production Binder preflight PASS (2026-11-18)
+
+The owner pulled `72517d38297e99e760bd6eed65526a10c2249cc1`
+on CachyOS and reported the following **physically run** validations
+on rooted SM-S948B, One UI still active:
+
+- Host `make -C runtime/bridges/encoder test`:
+  **69/69 PASS**.
+- Full `JOBS=8 ./scripts/ci-local.sh all 0.0.0-ci`:
+  **PASS**. SHA-verified ARM64 package
+  `oneios-runtime-0.0.0-ci-arm64.tar.zst`,
+  archive sha256
+  `75324d3a979d15357331c31732e79a7037ac31921380430259d2bc84f6ef985e`,
+  6 dynamic ELF files validated against public
+  NDK API 30 libraries, 0 failures.
+- The SHA-matched **production**
+  `oneios-encoder --binder-preflight` ran on
+  S26 as root and printed
+  `Binder callback threadpool started` then
+  `binder-preflight PASS (no codec opened)`.
+  This validates the production helper's
+  Binder bootstrap but is **not an encoder
+  socket or MediaCodec E2E test**.
+- **H.264 device PASS in standalone direct
+  `encctl`:** `c2.qti.avc.encoder`
+  configure/start/accepted NV12 640x480 all
+  succeeded, one 460800-byte NV12 frame and
+  input EOS queued with status 0.
+  One output-format change, 30-byte codec-config
+  SPS (NAL type 7 at start), 11564-byte keyframe
+  IDR (NAL type 5), zero-byte EOS; `frames_in=1`,
+  `frames_out=2`, `errors=0`; combined
+  **11594 bytes**, shell **exit 0**.
+- Combined with the previous A/B HEVC device
+  success (10533 bytes, keyframe+EOS), **both
+  Qualcomm hardware video encoders are now
+  verified at the *Android host, direct
+  encctl* level**, not at the iOS guest level.
+  No proof of iOS VideoToolbox, HEIC container,
+  full video stream, or production-helper
+  socket round-trip yet.
+
+**Follow-up code, not yet run on phone:** add an
+optional `encctl --helper PATH hevc|h264 W H`
+mode that uses `br_encoder_backend_helper`
+instead of direct NDK backend. It exercises
+the production route from the same stand-in
+virtio guest over UNIX socket to the
+standalone production `oneios-encoder`
+process (and real Qualcomm MediaCodec).
+The test harness itself **does not** start
+a Binder pool in this mode; the helper must
+start its own. Tighten the production
+backend's socket creation to
+`SOCK_STREAM|SOCK_CLOEXEC` to avoid the
+child inheriting both ends and holding the
+parent endpoint alive. Harden the diagnostic
+PASS gate to require **actual Annex-B IDR
+NAL type (HEVC 19/20; AVC 5), nonempty
+coded bytes, KEYFRAME flag, EOS event and
+zero counted backend errors**, because
+the older helper/NDK code can flag codec
+configuration as a keyframe and the helper
+can synthesize EOS on a timeout.
+Must pass a fresh local host regression/full
+ARM64 CI before phone deployment.
+
+**Known limitation:** the production
+`helper.c` currently sends `ENC_MSG_EOS`
+even when its drain wait reaches ~2 seconds
+without a true NDK EOS. Therefore smoke
+test success must require **actual nonempty
+coded keyframe data**, not only an EOS event,
+and shouldn't be interpreted as proof of
+robust, lossless flush semantics or video
+streaming. The separate error contract
+deserves a follow-up after the first E2E run.

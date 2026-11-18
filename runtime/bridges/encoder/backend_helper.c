@@ -91,7 +91,10 @@ static void *receive(void *arg) {
 static int helper_start(void) {
   if (H.started) return H.gone ? -EPIPE : 0;
   int sv[2];
-  if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv)) return -errno;
+  // Both endpoints must be CLOEXEC: the child receives only the dup2'ed
+  // helper fd 3. Inheriting the parent endpoint would prevent EOF when
+  // xnuhost (or encctl --helper) exits and could orphan a helper process.
+  if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv)) return -errno;
   posix_spawn_file_actions_t fa;
   posix_spawn_file_actions_init(&fa);
   posix_spawn_file_actions_adddup2(&fa, sv[1], 3);

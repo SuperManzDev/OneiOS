@@ -4,10 +4,13 @@ Owner: the encoder agent. The iOS/guest side: `kernel/patches/oneios-hosted/code
 `docs/hardware.md` section 7g ("Video encoder"). This is the host end of iOS's paravirtualized VideoToolbox
 encoder, so CMPhoto writes HEIC: chronod's widget snapshots, screenshots, the photo library (then video later).
 
-**State (2026-11-15):** host done and **proven on the PC** (69 checks, the device driven over xnuhost's real
-transport through the real helper process with a stand-in encoder). The Android build (`encctl`, the helper, the
-device library) builds with NDK r28c. Not yet run on the phone (`encctl`, below) nor in a session (needs the guest
-codec archive built into `kernel.kc`).
+**State (2026-11-18):** host fake-encoder transport proved on PC (69 checks). On the S26 Ultra SM-S948B,
+the SHA-verified, standalone `encctl` successfully encoded **one HEVC 256x256 keyframe+EOS** with
+`c2.qti.hevc.encoder` (10533 bytes total) and **one H.264 640x480 keyframe+EOS** with
+`c2.qti.avc.encoder` (11594 bytes) only after starting a native Binder callback threadpool.
+The production `oneios-encoder --binder-preflight` also passed. The production helper's actual socket round-trip
+has **not yet been run on the phone**; `encctl --helper /absolute/path/to/oneios-encoder` is the new independent
+validation for that route. No iOS guest VideoToolbox or HEIC container has been verified on the S26.
 
 ```sh
 make test          # host test: the device + socket + helper + stand-in, over the real transport (ASan, UBSan)
@@ -25,7 +28,7 @@ make               # build/android/{oneios-encoder, encctl, liboneencoder.a}   (
 | `helper.c` → `oneios-encoder` | the helper: reads the device's messages, runs the backend, streams the bitstream back. Dynamic |
 | `backend_ndk.c` | the real backend: the NDK's `AMediaCodec` (`video/hevc` → Codec2 `c2.qti.hevc.encoder`, `video/avc`), NV12 ByteBuffer input, Annex-B output. Still-image settings: one keyframe, constant quality. Both the `samsung` and `treble` hardware backends use this same path |
 | `backend_stub.c` | the PC stand-in: the box has no MediaCodec, so it emits a structurally valid HEVC/H.264 Annex-B access unit (VPS/SPS/PPS + IDR) sized to the frame, the IDR body carrying the frame's dims and an NV12 checksum. It checks the path, it does not compress |
-| `encctl.c` → `encctl` | the phone test: the whole host path in one process (direct MediaCodec, no helper), encoding a test pattern as root |
+| `encctl.c` → `encctl` | standalone phone test: direct MediaCodec or `--helper PATH` through the full production socket backend, with a plain-memory virtio guest and no iOS session |
 | `tests/test_encoder.c` | the host test (above) |
 
 ## Into xnuhost
@@ -46,14 +49,27 @@ guest), once the guest codec archive is in `kernel.kc`.
 
 ## On the phone
 
-The phone is not on this box. Give the Mac these commands (root through KernelSU, One UI running, after staging the
-runtime package so `bin/oneios-encoder` is beside `encctl`):
+On the **S26 Ultra**, keep One UI and `system_server` running. Stage SHA-matched `encctl` and
+`oneios-encoder` binaries from the same locally verified runtime archive and invoke using
+**absolute device paths** (KernelSU multiline `su -c` quoting has previously failed):
 
 ```sh
-adb push build/android/encctl build/android/oneios-encoder /data/local/tmp/
-adb shell su -c 'cd /data/local/tmp && ./encctl hevc'        # HEVC 256x256 through c2.qti.hevc.encoder
-adb shell su -c 'cd /data/local/tmp && ./encctl h264 640 480'
+# Direct path already verified: client executable itself owns the Binder threadpool.
+adb shell "su -c 'ONEIOS_ENCODER_BINDER_POOL=1 timeout 20 /data/local/tmp/encctl hevc 256 256'"
+
+# New production end-to-end path: only the child oneios-encoder starts Binder.
+adb shell "su -c 'timeout 25 /data/local/tmp/encctl --helper /data/local/tmp/oneios-encoder hevc 256 256'"
+adb shell "su -c 'timeout 25 /data/local/tmp/encctl --helper /data/local/tmp/oneios-encoder h264 640 480'"
 ```
+
+`encctl --helper` drives the real V4L2-shaped virtio-media device, opens its
+`backend_helper.c` UNIX socket, spawns the real production `oneios-encoder`
+(which starts its own Binder callback pool), feeds NV12, and verifies that coded
+CAPTURE NAL bytes and EOS return through both boundaries. A 5-second event timeout,
+missing coded bytes, keyframe or EOS is **FAIL**, not a PASS.
+The backend helper socket uses `SOCK_CLOEXEC` so the child cannot keep the
+parent endpoint alive after the parent exits. Test only after local CI PASS;
+the iOS guest switch/return path remains blocked until independent recovery proof.
 
 `encctl` encodes one NV12 test pattern and prints, on a pass: each access unit's size and first NAL type, and
 `encctl: hevc 256x256: N access unit(s), M bytes, keyframe present; ok`. `error:` lines say which step failed

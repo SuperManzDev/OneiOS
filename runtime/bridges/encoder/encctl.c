@@ -4,8 +4,9 @@
 // (backend_ndk.c) -- with a guest made of plain memory in this process, encodes an NV12 test pattern through the
 // phone's hardware encoder as root with One UI up, and checks the bitstream. No xnuhost, no Apple code.
 //
-//   encctl hevc|h264 [WIDTH HEIGHT]        default hevc 256x256
-//   ONEIOS_ENCODER_BINDER_POOL=1           diagnostic opt-in: start native Binder callback threads
+//   encctl hevc|h264 [WIDTH HEIGHT]        direct MediaCodec backend (phone A/B)
+//   encctl --helper PATH hevc|h264 [WIDTH HEIGHT]  virtio-media -> socket -> real helper -> MediaCodec
+//   ONEIOS_ENCODER_BINDER_POOL=1           opt-in only for direct MediaCodec backend
 //
 // A pass prints the backend, the encoded size, the first parameter sets (VPS/SPS/PPS for HEVC, SPS/PPS for H.264) and
 // the keyframe, and "ok". `error:` lines say which step failed.
@@ -130,17 +131,52 @@ static int maybe_start_binder_pool(void) {
 }
 
 int main(int argc, char **argv) {
-  // Must precede any MediaCodec, CCodec2 or binder service lookups.
-  if (maybe_start_binder_pool()) return 1;
-  const char *codec_name = argc > 1 ? argv[1] : "hevc";
-  uint32_t W = argc > 3 ? (uint32_t)atoi(argv[2]) : 256, H = argc > 3 ? (uint32_t)atoi(argv[3]) : 256;
-  uint32_t codec = strcmp(codec_name, "h264") ? MEDIA_PIXFMT_HEVC : MEDIA_PIXFMT_H264;
+  // --helper tests the *actual production route* through backend_helper.c:
+  // virtio-media -> UNIX socket -> oneios-encoder -> MediaCodec -> socket.
+  // Neither this harness nor the real helper starts an iOS guest.
+  const char *helper = NULL;
+  int codec_arg = 1;
+  if (argc > 1 && strcmp(argv[1], "--helper") == 0) {
+    if (argc < 4 || !argv[2][0]) {
+      fprintf(stderr, "usage: encctl --helper /absolute/path/to/oneios-encoder hevc|h264 [WIDTH HEIGHT]\n");
+      return 2;
+    }
+    helper = argv[2];
+    codec_arg = 3;
+  }
+  const char *codec_name = argc > codec_arg ? argv[codec_arg] : "hevc";
+  if (strcmp(codec_name, "hevc") && strcmp(codec_name, "h264")) {
+    fprintf(stderr, "error: unsupported codec %s (expected hevc or h264)\n", codec_name);
+    return 2;
+  }
+  if (argc > codec_arg + 1 && argc != codec_arg + 3) {
+    fprintf(stderr, "error: WIDTH and HEIGHT must be specified together\n");
+    return 2;
+  }
+  uint32_t W = argc > codec_arg + 2 ? (uint32_t)atoi(argv[codec_arg + 1]) : 256;
+  uint32_t H = argc > codec_arg + 2 ? (uint32_t)atoi(argv[codec_arg + 2]) : 256;
+  if (W < 96 || H < 96 || W > 4096 || H > 4096 || (W & 1) || (H & 1)) {
+    fprintf(stderr, "error: invalid encoder dimensions %ux%u (even values 96..4096 required)\n", W, H);
+    return 2;
+  }
+  uint32_t codec = !strcmp(codec_name, "h264") ? MEDIA_PIXFMT_H264 : MEDIA_PIXFMT_HEVC;
+  const br_encoder_backend *backend;
+  if (helper) {
+    // The spawned production helper owns its Binder pool. Do not start
+    // another pool in this test harness or mask the helper's bootstrap.
+    backend = br_encoder_backend_helper(helper);
+    printf("encctl: production helper route: %s\n", helper);
+  } else {
+    // Must precede any MediaCodec, CCodec2 or Binder service lookup.
+    if (maybe_start_binder_pool()) return 1;
+    backend = br_encoder_backend_ndk();
+  }
 
   static guest g;
   uint64_t pool_size = 32ull << 20;
   uint8_t *pool = malloc(pool_size);
   if (!pool) { fprintf(stderr, "error: no pool\n"); return 1; }
-  xh_virtio *dev = br_encoder_create(0x0a000000, 40, br_encoder_backend_ndk(), pool, (uint64_t)(uintptr_t)pool, pool_size);
+  xh_virtio *dev = br_encoder_create(0x0a000000, 40, backend, pool, (uint64_t)(uintptr_t)pool, pool_size);
   if (!dev) { fprintf(stderr, "error: the encoder device could not be made\n"); return 1; }
   guest_up(&g, dev);
   for (unsigned i = 0; i < EVENT_BUFS; i++) { void *b = event_store[i]; uint32_t l = MEDIA_EVENT_BYTES; bool w = true; post(&g, MEDIA_QUEUE_EVENT, &b, &l, &w, 1); }
@@ -192,7 +228,7 @@ int main(int argc, char **argv) {
   uint32_t enc[10] = { MEDIA_ENC_CMD_STOP };
   ENCCTL_IO_CHECK(ioc(&g, sess, MEDIA_VIDIOC_ENCODER_CMD, enc, sizeof enc), "ENCODER_CMD STOP");
 
-  uint32_t total = 0, aus = 0; bool key = false, eos = false;
+  uint32_t total = 0, aus = 0; bool key = false, eos = false, idr = false;
   for (unsigned e = 0; e < 16 && !eos; e++) {
     uint32_t kind; uint8_t *ev = wait_event(&g, &kind);
     if (!ev) { printf("encctl: event timeout (5 s without a completed event)\n"); break; }
@@ -212,8 +248,21 @@ int main(int argc, char **argv) {
         ENCCTL_IO_CHECK(ioc(&g, sess, MEDIA_VIDIOC_QUERYBUF, &cb, sizeof cb), "QUERYBUF CODED");
         uint8_t *nal = (uint8_t *)(uintptr_t)mmap_buf(&g, sess, cb.plane.m);
         if (nal && b.plane.bytesused >= 6) {
-          unsigned type = codec == MEDIA_PIXFMT_HEVC ? (nal[4] >> 1) & 0x3f : nal[4] & 0x1f;
-          printf("encctl: AU %u bytes, first NAL type %u%s\n", b.plane.bytesused, type, (b.flags & MEDIA_BUF_FLAG_KEYFRAME) ? " (keyframe)" : "");
+          unsigned first_type = codec == MEDIA_PIXFMT_HEVC ? (nal[4] >> 1) & 0x3f : nal[4] & 0x1f;
+          printf("encctl: AU %u bytes, first NAL type %u%s\n", b.plane.bytesused, first_type, (b.flags & MEDIA_BUF_FLAG_KEYFRAME) ? " (keyframe)" : "");
+          // Codec-config output itself carries the KEYFRAME bit in the NDK
+          // backend. Do not report success without a *real IDR* NAL type.
+          // Scan all Annex-B start codes: host stub packs parameter sets
+          // and IDR together, while Qualcomm emits them as separate AUs.
+          for (uint32_t at = 0; at + 5 < b.plane.bytesused; at++) {
+            if (nal[at] || nal[at + 1]) continue;
+            uint32_t header = 0;
+            if (nal[at + 2] == 1) header = at + 3;
+            else if (nal[at + 2] == 0 && nal[at + 3] == 1) header = at + 4;
+            if (!header || header + (codec == MEDIA_PIXFMT_HEVC ? 1u : 0u) >= b.plane.bytesused) continue;
+            unsigned type = codec == MEDIA_PIXFMT_HEVC ? (nal[header] >> 1) & 0x3f : nal[header] & 0x1f;
+            if (codec == MEDIA_PIXFMT_HEVC ? (type == 19 || type == 20) : type == 5) idr = true;
+          }
         }
         if (b.flags & MEDIA_BUF_FLAG_LAST) eos = true;
       }
@@ -231,7 +280,7 @@ int main(int argc, char **argv) {
   printf("encctl: stats: sessions %llu, frames_in %llu, frames_out %llu, errors %llu\n",
          (unsigned long long)st.sessions, (unsigned long long)st.frames_in,
          (unsigned long long)st.frames_out, (unsigned long long)st.errors);
-  if (aus && key && total && !st.errors) { printf("encctl: %s %ux%u: %u access unit(s), %u bytes, keyframe present; ok\n", codec_name, W, H, aus, total); return 0; }
-  fprintf(stderr, "error: %s %ux%u: %u access units, %u bytes, key %d, %llu errors\n", codec_name, W, H, aus, total, key, (unsigned long long)st.errors);
+  if (aus && key && idr && eos && total && !st.errors) { printf("encctl: %s %ux%u: %u access unit(s), %u bytes, IDR+EOS present; ok\n", codec_name, W, H, aus, total); return 0; }
+  fprintf(stderr, "error: %s %ux%u: %u access units, %u bytes, key %d, idr %d, eos %d, %llu errors\n", codec_name, W, H, aus, total, key, idr, eos, (unsigned long long)st.errors);
   return 1;
 }

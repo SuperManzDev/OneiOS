@@ -33,9 +33,9 @@ $(A)/oneios-encoder: helper.c backend_ndk.c backend_stub.c $(BINDER_POOL) $(HDR)
 	@mkdir -p $(A)
 	$(ANDROID_CC) -std=gnu11 $(CFLAGS) $(WARN) $(INC) helper.c backend_ndk.c backend_stub.c $(BINDER_POOL) $(LIBS) -o $@
 # encctl: the whole path in one process (dynamic), encoding a test pattern through MediaCodec directly (no helper).
-$(A)/encctl: encctl.c media_device.c backend_ndk.c $(BINDER_POOL) $(XNUHOST)/src/virtio.c $(HDR)
+$(A)/encctl: encctl.c media_device.c backend_ndk.c backend_helper.c $(BINDER_POOL) $(XNUHOST)/src/virtio.c $(HDR)
 	@mkdir -p $(A)
-	$(ANDROID_CC) -std=gnu11 $(CFLAGS) $(WARN) $(INC) encctl.c media_device.c backend_ndk.c $(BINDER_POOL) $(XNUHOST)/src/virtio.c $(LIBS) -o $@
+	$(ANDROID_CC) -std=gnu11 $(CFLAGS) $(WARN) $(INC) encctl.c media_device.c backend_ndk.c backend_helper.c $(BINDER_POOL) $(XNUHOST)/src/virtio.c -pthread $(LIBS) -o $@
 
 # On the build host: the helper with the stand-in encoder, and the device test that drives it over the real transport.
 $(H)/oneios-encoder: helper.c backend_stub.c $(HDR)
