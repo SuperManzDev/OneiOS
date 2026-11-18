@@ -79,3 +79,15 @@ the iOS guest switch/return path remains blocked until independent recovery proo
 `encctl` with a larger size, since `c2.qti` encoders have a 96x96 minimum). It is harmless beside One UI (it opens
 its own MediaCodec instance; it touches nothing of One UI's). The device library and the helper have not been run on
 the phone yet.
+
+## Failure-path hardening (2026-11-18)
+
+The production helper must never send a fake `ENC_MSG_EOS` after a drain deadline.
+It sends the existing `ENC_MSG_ERROR` with a positive errno in message field `a`
+for backend feed, drain, poll and bounded drain-timeout failures, and treats a
+failed session as terminal. The device-side socket backend converts that into
+`-errno`, and the virtio-media worker emits exactly one `MEDIA_EVT_ERROR` instead
+of EOS. `MSG_NOSIGNAL` prevents a dead helper from killing xnuhost with SIGPIPE.
+An independent host fault-injection regression checks feed/drain/poll/timeout and
+unexpected helper exit. This patch makes failures explicit; **multi-frame video
+and true output EOS robustness remain unverified until device tests**.

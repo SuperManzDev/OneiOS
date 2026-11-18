@@ -44,6 +44,13 @@ $(H)/oneios-encoder: helper.c backend_stub.c $(HDR)
 $(H)/test_encoder: tests/test_encoder.c media_device.c backend_helper.c $(XNUHOST)/src/virtio.c $(HDR)
 	@mkdir -p $(H)
 	$(CC) -std=gnu11 $(SAN) $(WARN) $(INC) tests/test_encoder.c media_device.c backend_helper.c $(XNUHOST)/src/virtio.c -lpthread -o $@
-test: $(H)/test_encoder $(H)/oneios-encoder
+$(H)/test_encoder_errors: tests/test_encoder_errors.c backend_helper.c $(HDR)
+	@mkdir -p $(H)
+	$(CC) -std=gnu11 $(SAN) $(WARN) $(INC) tests/test_encoder_errors.c backend_helper.c -lpthread -o $@
+test: $(H)/test_encoder $(H)/oneios-encoder $(H)/test_encoder_errors
 	ONEIOS_ENCODER_STUB=1 $(H)/test_encoder $(H)/oneios-encoder
+	@for fault in feed drain poll timeout crash; do \
+	  echo "encoder: error regression $fault"; \
+	  ONEIOS_ENCODER_STUB=1 timeout 12 $(H)/test_encoder_errors $(H)/oneios-encoder "$fault" || exit 1; \
+	done
 .PHONY: all test

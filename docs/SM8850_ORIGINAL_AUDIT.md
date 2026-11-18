@@ -2126,3 +2126,42 @@ PASS at **9cbf548d**, and inspect the package's
 embedded `runtime.json` git commit to avoid
 testing a stale archive. No iOS hot-switch before
 independent USB recovery/return verification.
+
+## Twenty-ninth audit — CI verified, encoder error/EOS contract hardening (2026-11-18)
+
+**Owner's final validation of the previously installed production encoder
+E2E work:** after pulling `660aa47ac8b6973dc5225b5e939e813e3acd3183`, they
+ran `make -C runtime/bridges/encoder test` (**69/69 PASS**) and full local
+`JOBS=8 ./scripts/ci-local.sh all 0.0.0-ci` (**PASS**). ARM64 ELF checks:
+**zero failures**. Embedded `runtime.json` contained the exact current commit
+`660aa47ac8b6973dc5225b5e939e813e3acd3183`. A passive process listing
+reported **no leftover oneios-encoder helper process**. These checks close
+all host CI/package/lifecycle gates for the previous single-frame HEVC/H.264
+production socket-path PASS, but they do not validate the new code below.
+
+**Next proposed implementation (needs fresh CI and device validation):**
+- The original production `helper.c` ignored `backend->feed()` and
+  `backend->drain()` errors and also accepted `backend->poll()` errors
+  as if no data were currently ready. After ~2 seconds without EOS, it
+  emitted `ENC_MSG_EOS` anyway, masking failure as completion.
+- Reuse existing `ENC_MSG_ERROR=9` with positive errno in header field `a`
+  (no new binary framing or link-version change). Send a sticky terminal
+  error on feed/drain/poll failure or a real deadline, **not synthetic EOS**.
+  Preserve real output buffers before EOS where present; handle EOS on a
+  nonempty last coded buffer too.
+- `backend_helper.c` records asynchronous errors, returns `-errno` from
+  `poll()` once already-queued coded buffers are consumed, and returns
+  `-EPIPE` if helper died prematurely. No process should die from
+  `SIGPIPE` when the other socket endpoint closes.
+- `media_device.c` counts such failures, marks the session failed
+  once and issues `MEDIA_EVT_ERROR` with an errno body rather than an
+  EOS event. `encctl` distinguishes it and fails promptly.
+- New Linux host stub fault modes deliberately inject feed, drain, poll,
+  missing EOS and helper crash failures; a dedicated test executable checks
+  errno and **absence of fake EOS**. They are compile-time host-only test
+  injections, never active in Android production builds.
+
+**Status:** code changes need a fresh local encoder host regression and
+full CachyOS ARM64 CI. Do not claim the hardening or multi-frame behavior
+is PASS on S26 without subsequent physical tests. Guest iOS and USB recovery
+remain blocked independently.

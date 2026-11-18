@@ -228,7 +228,7 @@ int main(int argc, char **argv) {
   uint32_t enc[10] = { MEDIA_ENC_CMD_STOP };
   ENCCTL_IO_CHECK(ioc(&g, sess, MEDIA_VIDIOC_ENCODER_CMD, enc, sizeof enc), "ENCODER_CMD STOP");
 
-  uint32_t total = 0, aus = 0; bool key = false, eos = false, idr = false;
+  uint32_t total = 0, aus = 0; bool key = false, eos = false, idr = false, failed = false;
   for (unsigned e = 0; e < 16 && !eos; e++) {
     uint32_t kind; uint8_t *ev = wait_event(&g, &kind);
     if (!ev) { printf("encctl: event timeout (5 s without a completed event)\n"); break; }
@@ -266,6 +266,12 @@ int main(int argc, char **argv) {
         }
         if (b.flags & MEDIA_BUF_FLAG_LAST) eos = true;
       }
+    } else if (kind == MEDIA_EVT_ERROR) {
+      uint32_t err;
+      memcpy(&err, ev + 8, sizeof err);
+      fprintf(stderr, "error: virtio-media session %u backend ERROR errno %u\n", sess, err);
+      failed = true;
+      break;
     } else if (kind == MEDIA_EVT_EVENT) {
       uint32_t what;
       memcpy(&what, ev + 8, sizeof what);
@@ -280,7 +286,7 @@ int main(int argc, char **argv) {
   printf("encctl: stats: sessions %llu, frames_in %llu, frames_out %llu, errors %llu\n",
          (unsigned long long)st.sessions, (unsigned long long)st.frames_in,
          (unsigned long long)st.frames_out, (unsigned long long)st.errors);
-  if (aus && key && idr && eos && total && !st.errors) { printf("encctl: %s %ux%u: %u access unit(s), %u bytes, IDR+EOS present; ok\n", codec_name, W, H, aus, total); return 0; }
+  if (aus && key && idr && eos && total && !failed && !st.errors) { printf("encctl: %s %ux%u: %u access unit(s), %u bytes, IDR+EOS present; ok\n", codec_name, W, H, aus, total); return 0; }
   fprintf(stderr, "error: %s %ux%u: %u access units, %u bytes, key %d, idr %d, eos %d, %llu errors\n", codec_name, W, H, aus, total, key, idr, eos, (unsigned long long)st.errors);
   return 1;
 }
