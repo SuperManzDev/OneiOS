@@ -43,7 +43,9 @@ How to build and test it: [docs/building.md](docs/building.md).
 The OneOS fork's upstream changes through `akshaynexus/OneOS` `oneios`
 `bdf3db05` have been integrated into
 [the SM8850 OneOS branch](https://github.com/YMGPwcca/OneOS/pull/3)
-at `270230df`, and this repository pins that integration in `app/`.
+at `270230df`. The `app/` submodule now pins `842262a`, which also fixes
+Tribalfs Maven repository routing for local Gradle builds. A classic GitHub
+PAT with `read:packages` is required to download the pinned SESL9 dependencies.
 The S26 Ultra switch remains fail-closed at the model, UI/job and root-script
 boundaries. **The integrated APK has not yet passed a fresh local CachyOS
 Gradle build/test run and must not be installed for an S26U switch**; host
