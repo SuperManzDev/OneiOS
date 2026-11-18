@@ -1853,3 +1853,50 @@ one-variable tests.
 and host recovery must remain intact. No
 full iOS guest, switch, Bluetooth HCI ownership,
 backlight writes or HAL stop.
+
+## Twenty-fifth audit — correct platform Binder header build failure (2026-11-18)
+
+The owner pulled `614945580ecda63bcd7b9848287e78e136063bfa`
+and ran the local CachyOS encoder test + full CI,
+without deploying or running any new phone binary.
+
+- `make -C runtime/bridges/encoder test`: **69/69
+  host checks PASS**.
+- Full `JOBS=8 ./scripts/ci-local.sh all 0.0.0-ci`:
+  **FAIL** while compiling the ARM64 `encctl.c`,
+  `fatal error: 'android/binder_process.h' file not
+  found`. Consequently the encoder Android build,
+  `runtime/build.sh`, and `package.sh` also
+  failed, and the CI exited **1**. This is a
+  *compile/toolchain mismatch introduced by the
+  previous diagnostic commit*, not a phone GPU,
+  MediaCodec, or Binder failure.
+- Confirmed from AOSP source that
+  `android/binder_process.h` is located under
+  `frameworks/native/libs/binder/ndk/include_platform`
+  (a platform implementation header, not NDK r28's
+  public API-30 sysroot). Linking it directly via
+  `-lbinder_ndk` also risks relying on a
+  non-NDK-exported platform symbol.
+- **Remedy:** remove the platform header and the
+  `-lbinder_ndk` link from `encctl`.
+  When and only when
+  `ONEIOS_ENCODER_BINDER_POOL=1`, use NDK-public
+  `dlopen("libbinder_ndk.so", RTLD_NOW|RTLD_LOCAL)`
+  and `dlsym()` to locate the two platform Binder
+  process functions. Keep the library handle
+  resident while Binder threads run. If loading
+  or symbol resolution fails, **fail closed** with
+  an explicit `error:` message, not a fake PASS
+  or fallback. The default test performs *no*
+  Binder library load. Production
+  `oneios-encoder`, MediaCodec settings,
+  frame/EOS order and worker remain untouched.
+- This is an **experimental platform-internal
+  diagnostic**, not a public API for a production
+  Android application. Verify Android ARM64
+  compilation and package ELF/API-30 checks on
+  CachyOS **before** deploying; then A/B the same
+  HEVC case with and without the opt-in, reporting
+  both shell exit codes and logs. The phone
+  test remains unverified on this corrected code.
