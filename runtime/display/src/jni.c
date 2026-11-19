@@ -201,6 +201,7 @@ JNIEXPORT jint JNICALL Java_OneiOSDisplay_nRun(JNIEnv *env, jclass type, jlong h
         xhd_copy(buffer.bits, (size_t)buffer.stride * bytes, layout, f->pixels, f->stride, f->format, r);
     }
     ANativeWindow_unlockAndPost(window);
+    if (xhd_acks_wanted()) xhd_send_ack(c->fd, (uint32_t)frames + 1, &r);   // the frame was copied: the sender may write again
     if (frames++ == 0) {
       char waited[96] = "";
       if (held) snprintf(waited, sizeof waited, "; held %.1f s for session/ready, %lu wakes for flushes not shown", seconds_since(&hold_start), held_flushes);

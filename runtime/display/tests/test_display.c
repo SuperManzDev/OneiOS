@@ -374,6 +374,16 @@ static void test_displayctl(const char *displayctl, const char *dir)
            "awk '/^displayctl: [0-9]+ frames in / {steps=$2+0} /^test-helper: [0-9]+ flush messages$/ {packets=$2+0} END {exit !(steps>0 && packets==steps+1)}' %s/out",
            dir);
   CHECK(system(command) == 0);
+  // The frame handshake: every step after the first frame was acked (none drawn while the helper copied).
+  snprintf(command, sizeof command,
+           "awk '/^displayctl: [0-9]+ frames in / {steps=$2+0; for (i=1;i<=NF;i++) if ($(i+1)==\"acked\") acked=$i+0} END {exit !(steps>0 && acked==steps)}' %s/out", dir);
+  CHECK(system(command) == 0);
+  // A helper without acks (an older runtime): the test still passes, paced by time, and says so.
+  snprintf(command, sizeof command, "TEST_HELPER_NO_ACK=1 TMPDIR=%s %s test --seconds 1 --size 64x48 --helper %s > %s/out 2>&1", dir, displayctl, self_path, dir);
+  status = system(command);
+  CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  snprintf(command, sizeof command, "grep -q '0 acked by the helper (no frame handshake' %s/out && grep -q '^displayctl: ok' %s/out", dir, dir);
+  CHECK(system(command) == 0);
   // The half-float pattern: the stand-in checks the stride, the white edge and the wide band's P3 red.
   snprintf(command, sizeof command, "TMPDIR=%s %s test --seconds 1 --size 64x48 --format rgba16f --helper %s > %s/out 2>&1", dir, displayctl, self_path, dir);
   status = system(command);
@@ -412,7 +422,7 @@ static int as_helper(const char *socket_path)
   int fd = xhd_connect(socket_path, 5000, NULL);
   struct xhd_frame frame;
   if (fd < 0 || xhd_recv_hello(fd, &frame, 5000)) return 9;
-  int full = 0, partial = 0, flushes = 0;
+  int full = 0, partial = 0, flushes = 0, wanted = 0;
   for (int i = 0; i < 2000; i++) {
     // Count wire packets, not helper presentations: a double-flush per
     // animation step would pass the image tests yet flicker on the S26.
@@ -422,7 +432,10 @@ static int as_helper(const char *socket_path)
     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) { usleep(5000); continue; }
     if (n < 0) return 10;
     if (n > 0) {
+      // The frame handshake (xhd.h): ack each flush when asked, unless this stand-in plays a helper without acks.
+      if (n == sizeof m && !memcmp(m.magic, "XHDW", 4)) { wanted = m.a && !getenv("TEST_HELPER_NO_ACK"); continue; }
       if (n != sizeof m || memcmp(m.magic, "XHDF", 4)) return 11;
+      if (wanted) xhd_send_ack(fd, (uint32_t)flushes + 1, NULL);
       struct xhd_rect r = { m.a, m.b, m.c, m.d };
       if (!xhd_rect_clip(&r, frame.width, frame.height)) return 12;
       flushes++;

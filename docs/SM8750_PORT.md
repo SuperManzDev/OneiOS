@@ -114,3 +114,10 @@ guest is still iPhone18,2 iOS 27.0.1.
   (`gpuctl large` failed: order-5 page-array allocation on the 6.6 kernel). Both PASS on the phone after the fix.
   Host tests: 14057 checks, 1 failed (`test_xnuhost.c:2329`, mlock past RLIMIT_MEMLOCK: the container runs as root
   with CAP_IPC_LOCK; not related).
+- 2026-11-19: `displayctl test` on the panel (no takeover): layer up, first frame, layer removed, One UI back. The
+  owner's panel was at HD+ (720x1560: One UI's "Screen resolution"); set to WQHD+ the helper reports 1440x3120 at
+  1:1. The helper posted about 56 frames a second (279 in 5 s; the S26 posted 115): the panel ran at about 60 Hz.
+  The square **flickered** at both resolutions: the test wrote the shared frame while the helper copied it (the
+  known "no frame handshake" limit). Fixed with the frame handshake (`XHDW`/`XHDA`, `runtime/display/README.md`):
+  483 steps in 8 s all acked, the owner saw no flicker. Display host tests 133 checks, 0 failed (with an ack-less
+  stand-in helper too). Before a session: the panel at WQHD+; xnuhost to use the handshake for iOS's swaps.

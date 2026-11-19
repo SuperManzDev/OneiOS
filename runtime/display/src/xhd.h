@@ -37,6 +37,11 @@ int xhd_dataspace_parse(const char *name);
 //   flush  { "XHDF", x, y, w, h }
 // and from the helper, straight after connecting (xnuhost waits for it before it sizes the frame in a session):
 //   panel  { "XHDP", width, height, hz, 0 }
+// The frame handshake (2026-11-19, S25 Ultra): a sender that will not write the frame while the helper copies it asks
+// for acks with  want { "XHDW", 1, 0, 0, 0 }  after the hello; the helper then answers each post with
+//   ack    { "XHDA", posts, x, y, w }   (posts counted from 1; x, y, w of the copied rectangle, informative)
+// and the sender writes the frame again only after the ack (or a timeout, for a helper without acks). With no
+// "XHDW" (xnuhost today) the helper sends nothing: nothing changes. Unknown messages are ignored both ways.
 struct xhd_message { char magic[4]; uint32_t a, b, c, d; };
 
 struct xhd_rect { uint32_t x, y, w, h; };            // w == 0: empty
@@ -62,6 +67,14 @@ void xhd_frame_close(struct xhd_frame *frame);
 // Read every pending flush without blocking, adding each (clipped to the frame) to *damage.
 // 0 the socket is open, -1 it closed.
 int xhd_drain(int fd, const struct xhd_frame *frame, struct xhd_rect *damage);
+// Whether the sender asked for acks ("XHDW" seen by xhd_drain on this process's connection).
+int xhd_acks_wanted(void);
+// The sender's side: ask for acks; the helper's side: one ack (non-blocking: a full socket drops it). 0 or -errno.
+int xhd_send_want_acks(int fd);
+int xhd_send_ack(int fd, uint32_t posts, const struct xhd_rect *copied);
+// The sender's side: wait up to timeout_ms for the next ack, reading (and dropping) anything else. 1 an ack, 0 the
+// timeout, -1 the socket closed or failed.
+int xhd_wait_ack(int fd, int timeout_ms);
 
 // The first post waits for the guest (2026-11-15): the layer is above the OneOS boot screen and opaque, so a posted
 // frame covers it, and until session/ready the frame is black (the empty memfd, then backboardd's first frames) or the

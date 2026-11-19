@@ -135,6 +135,42 @@ int xhd_hold_first(const char *ready)
   return ready && *ready && stat(ready, &st) && errno == ENOENT;
 }
 
+static int acks_wanted;
+int xhd_acks_wanted(void) { return acks_wanted; }
+
+int xhd_send_want_acks(int fd)
+{
+  struct xhd_message m = { { 'X', 'H', 'D', 'W' }, 1, 0, 0, 0 };
+  return send(fd, &m, sizeof m, MSG_NOSIGNAL) < 0 ? -errno : 0;
+}
+
+int xhd_send_ack(int fd, uint32_t posts, const struct xhd_rect *copied)
+{
+  struct xhd_message m = { { 'X', 'H', 'D', 'A' }, posts, copied ? copied->x : 0, copied ? copied->y : 0, copied ? copied->w : 0 };
+  return send(fd, &m, sizeof m, MSG_NOSIGNAL | MSG_DONTWAIT) < 0 ? -errno : 0;
+}
+
+int xhd_wait_ack(int fd, int timeout_ms)
+{
+  struct timespec start, now;
+  clock_gettime(CLOCK_MONOTONIC, &start);
+  for (;;) {
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long left = timeout_ms - ((now.tv_sec - start.tv_sec) * 1000L + (now.tv_nsec - start.tv_nsec) / 1000000L);
+    if (left <= 0) return 0;
+    struct pollfd p = { fd, POLLIN, 0 };
+    int r = poll(&p, 1, (int)left);
+    if (r < 0) { if (errno == EINTR) continue; return -1; }
+    if (r == 0) return 0;
+    if (p.revents & (POLLHUP | POLLERR) && !(p.revents & POLLIN)) return -1;
+    struct xhd_message m;
+    ssize_t n = recv(fd, &m, sizeof m, MSG_DONTWAIT);
+    if (n == 0) return -1;
+    if (n < 0) { if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue; return -1; }
+    if (n == sizeof m && !memcmp(m.magic, "XHDA", 4)) return 1;
+  }
+}
+
 int xhd_drain(int fd, const struct xhd_frame *frame, struct xhd_rect *damage)
 {
   // A bound on one round: a guest that floods flushes must not keep the frame from being posted.
@@ -148,6 +184,7 @@ int xhd_drain(int fd, const struct xhd_frame *frame, struct xhd_rect *damage)
       return -1;
     }
     if (n == 0) { fprintf(stderr, "oneios-display: xnuhost closed the socket\n"); return -1; }
+    if (n == sizeof m && !memcmp(m.magic, "XHDW", 4)) { acks_wanted = m.a != 0; continue; }
     if (n != sizeof m || memcmp(m.magic, "XHDF", 4)) continue;      // not a flush: ignored
     struct xhd_rect r = { m.a, m.b, m.c, m.d };
     if (xhd_rect_clip(&r, frame->width, frame->height)) xhd_rect_union(damage, &r);

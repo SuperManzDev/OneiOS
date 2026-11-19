@@ -219,8 +219,14 @@ extended sRGB: components below 0 and above 1), white at 1.0, white at 2.0. What
   is all damage.
 - A guest that truncates the memfd kills the helper (SIGBUS) and the screen goes dark; the session and the way
   back are not affected.
-- The guest can write the frame while a row is copied: tearing is possible, as there is no frame handshake in
-  the protocol.
+- The guest can write the frame while a row is copied: tearing is possible for a sender that does not use the
+  frame handshake. The handshake (2026-11-19, `xhd.h`): a sender sends `XHDW` after the hello; the helper then
+  answers each post with `XHDA` (posts, copied rectangle), and the sender writes the frame again only after the ack.
+  `displayctl test` uses it (`N acked by the helper (each step drawn only after the helper copied the last)`; with an
+  older helper it falls back to pacing by time after 1 s and says `0 acked ... (no frame handshake ...)`). On the
+  S25 Ultra (panel at about 60 Hz) the square flickered without it in both HD+ and WQHD+, and was steady with it
+  (483 steps in 8 s, all acked; seen by the owner). **xnuhost does not send `XHDW` yet**: a session is unchanged, and
+  iOS's frames can still tear while the helper copies (next: retire the guest's swap only after the ack).
 - Rotation: the picture is the guest's portrait frame; the panel is not rotated.
 
 ## When the panel goes dark while iOS draws (2026-11-12)

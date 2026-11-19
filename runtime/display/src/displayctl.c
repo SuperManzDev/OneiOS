@@ -175,7 +175,13 @@ int main(int argc, char **argv)
     if (poll(&p, 1, 200) > 0) client = accept4(server, NULL, NULL, SOCK_CLOEXEC);
   }
   if (client < 0) { fprintf(stderr, "displayctl: the helper did not connect\n"); status = 1; goto out; }
-  if (xhd_send_hello(client, W, H, W * BPP, FORMAT, memfd) || xhd_send_flush(client, 0, 0, W, H)) { perror("displayctl: hello"); status = 1; goto out; }
+  // The frame handshake: the square is drawn again only after the helper copied the last step (xhd.h, "XHDW"), asked
+  // for before the first flush so that the whole first frame is acked too. Without it this loop wrote the frame while
+  // the helper copied it, and a post could show the old square erased and the new one not drawn yet: a flicker of
+  // the square (S25 Ultra at 60 Hz, 2026-11-19).
+  if (xhd_send_hello(client, W, H, W * BPP, FORMAT, memfd) || xhd_send_want_acks(client) || xhd_send_flush(client, 0, 0, W, H)) { perror("displayctl: hello"); status = 1; goto out; }
+  int acks = xhd_wait_ack(client, 1000), acked = 0, unacked = 0;   // the first frame: the helper's Java start is done by now
+  if (acks < 0) { fprintf(stderr, "displayctl: the helper closed the socket\n"); status = 1; goto out; }
   printf("displayctl: helper %d connected; %ux%u pattern in %s for %.1f s\n", (int)child, W, H, xh_pixels_name(FORMAT), seconds);
   fflush(stdout);
 
@@ -206,10 +212,19 @@ int main(int argc, char **argv)
     }
     old_x = x; old_y = y;
     frames++;
-    struct timespec nap = { 0, 1000000000 / 120 };
-    nanosleep(&nap, NULL);
+    if (acks) {
+      int a = xhd_wait_ack(client, 100);
+      if (a < 0) { gone = 1; break; }
+      if (a) acked++;
+      else if (++unacked >= 3 && !acked) acks = 0;      // acks stopped coming: pace by time, as before
+    }
+    if (!acks) {
+      struct timespec nap = { 0, 1000000000 / 120 };
+      nanosleep(&nap, NULL);
+    }
   }
-  printf("displayctl: %lu frames in %.2f s%s\n", frames, now() - start, gone ? " (the helper closed the socket early)" : "");
+  printf("displayctl: %lu frames in %.2f s%s; %d acked by the helper%s\n", frames, now() - start, gone ? " (the helper closed the socket early)" : "",
+         acked, acked ? " (each step drawn only after the helper copied the last)" : " (no frame handshake: steps paced by time)");
   status = gone;
 out:
   if (client >= 0) close(client);                 // the session ends: the helper removes its layer and exits
