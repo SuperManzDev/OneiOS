@@ -4,8 +4,11 @@ Owner: oneos. The fork is `akshaynexus/OneOS`, branch `oneios` (`/home/akshay/Do
 submodule `app/` of this repository (`.gitmodules`: `branch = oneios`; CI builds the head of that branch, not the
 recorded commit: `docs/building.md` section 7, `docs/releases.md` "CI and releases").
 **In this fork (YumikoHayamato/OneiOS, branch `s25-ultra-sm8750`)** `app/` is `YumikoHayamato/OneOS`, branch
-`oneios-s25-ultra` (from YMGPwcca's `feat/oneios-sm8850-m3q` `86265d8`): its one change is that `oneios_switch.sh`'s
-device gate also lets the Galaxy S25 Ultra through (`SM-S938*:pa3q:SM8750`, `docs/SM8750_PORT.md`).
+`oneios-s25-ultra` (from YMGPwcca's `feat/oneios-sm8850-m3q` `86265d8`): its two changes are that `oneios_switch.sh`'s
+device gate also lets the Galaxy S25 Ultra through (`SM-S938*:pa3q:SM8750`, `d928cdc`, `docs/SM8750_PORT.md`), and
+that the session namespace's read-only binds are remounted with their source and target (`d975ec1`, 2026-11-19:
+KernelSU's busybox on that phone could not remount a bind named by its mount point alone, so the switch ended before
+xnuhost; the session's read-only parts are unchanged).
 Its side of this is `docs/oneios.md`, `switcher/assets/oneios_switch.sh`, `switcher/assets/oneios_return.sh`
 and `app-android/app/src/full/assets/root/oneios_root.sh` there.
 

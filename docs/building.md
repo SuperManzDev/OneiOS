@@ -222,6 +222,12 @@ runtime/build.sh --test           # Linux: the loader, xnuhost and display tests
 
 `external/virglrenderer` (`scripts/setup/get-references.sh virglrenderer`) must be there before a build that goes to
 the phone: without it xnuhost and gpuctl build with the 2D GPU only and say so at run time ([releases.md](releases.md)).
+Since 2026-11-19 `runtime/build.sh STAGE` (and so `runtime/package.sh`) **refuses** to build a stage without it
+(`build: no GPU renderer: .../external/virglrenderer/src/drm/drm2kgsl is missing`, exit 1; when `external` is a link
+whose target is gone it says so); `XNUHOST_2D_ONLY=1` builds the 2D-only xnuhost on purpose. Why: on the owner's PC
+`external` was a link into a tmpfs (`/tmp/claude-1000/oneios-ram/external`) that a reboot emptied, runtime 0.1.10-dev
+came out 2D-only without a word, and the S25 Ultra's session 3 drew iOS on the CPU. Objects of a 2D build are not
+rebuilt with the renderer by `make` (the flags are not tracked): remove `runtime/xnuhost/build/android` after fetching it.
 
 `runtime/host-tests.sh` runs, and prints one line each for: `loader` (`make -C runtime/loader test`), `xnuhost`
 (`make -C runtime/xnuhost test`: the unit tests, drm2kgsl and its leak test with LeakSanitizer, the image set, and

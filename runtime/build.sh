@@ -13,6 +13,8 @@
 # Build hosts: Linux x86_64 (the NDK's linux-x86_64 tools) and macOS (darwin-x86_64; runtime/host.mk).
 # NDK: $NDK, else $ANDROID_NDK_HOME, else $HOME/Android/Sdk/ndk/28.2.13676358 (Linux) or
 #      $HOME/Library/Android/sdk/ndk/28.2.13676358 (macOS).
+# A stage needs external/virglrenderer (scripts/setup/get-references.sh virglrenderer: the GPU's renderer, drm2kgsl)
+# and is refused without it (exit 1); XNUHOST_2D_ONLY=1 builds the 2D-only xnuhost on purpose.
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 case "$(uname -s)" in
@@ -35,6 +37,18 @@ if [ "${1:-}" = --test ]; then
   exit 0
 fi
 STAGE=${1:?usage: runtime/build.sh STAGE | --test}
+# The phone's xnuhost needs the GPU's renderer (drm2kgsl, from external/virglrenderer: scripts/setup/get-references.sh
+# virglrenderer). Without that checkout the Makefile builds the 2D device only and xnuhost says so only when it starts
+# on the phone ("gpu: 2D only: this build has no drm2kgsl"): on 2026-11-19 external/ was a link into a tmpfs that a
+# reboot had emptied, runtime 0.1.10-dev was built 2D-only without a word, and the S25 Ultra's session 3 drew on the
+# CPU (host CPU 686 %, the case at 44 C in a minute). So a stage is refused without it; XNUHOST_2D_ONLY=1 builds one on
+# purpose (a PC run, a test).
+VIRGL_DIR=$ROOT/external/virglrenderer
+if [ ! -f "$VIRGL_DIR/src/drm/drm2kgsl/drm2kgsl_renderer.c" ] && [ "${XNUHOST_2D_ONLY:-0}" != 1 ]; then
+  echo "build: no GPU renderer: $VIRGL_DIR/src/drm/drm2kgsl is missing$([ -L "$ROOT/external" ] && [ ! -e "$ROOT/external" ] && echo " (external is a link to $(readlink "$ROOT/external"), which does not exist)")" >&2
+  echo "build: fetch it with scripts/setup/get-references.sh virglrenderer, or set XNUHOST_2D_ONLY=1 for a 2D-only xnuhost" >&2
+  exit 1
+fi
 make -s -C "$ROOT/runtime/xnuhost" NDK="$NDK" build/android/xnuhost
 mkdir -p "$STAGE/bin"
 "$STRIP" -o "$STAGE/bin/xnuhost" "$ROOT/runtime/xnuhost/build/android/xnuhost"

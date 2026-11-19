@@ -270,3 +270,28 @@ guest is still iPhone18,2 iOS 27.0.1.
     guest gets ... (ram=auto)`, `clocks: .../policy0/scaling_min_freq ... -> 384000` and `policy6/... -> 1017600` (the hardware's floors) in `switch.log`, `gpu: the
     queue's thread ... at uclamp.min 1024`, `oneios-display: the copy loop at uclamp.min 1024`, the boot screen ended
     at `first frame posted`, `wifi: sim`.
+- 2026-11-19: **session 3 on the phone** (battery 89 %, 30 C; `logs/pa3q-s3-failed-remount/`, `logs/pa3q-s3/`).
+  - 11:29:30, first try: the fork's inner shell stopped at `making /data/oneios_switch.sh read-only` (`mount: can't
+    find /data/oneios_switch.sh in /proc/mounts`, status 70); the switch returned to One UI in place (`switch-failed`).
+    KernelSU's busybox 1.36.1.1 (topjohnwu) finds no bound file or folder in `/proc/mounts` when a remount names the
+    mount point alone; the hand-made script had hidden this with `|| true`. Tried in a mount namespace of its own on the
+    phone: `remount,bind,ro SOURCE TARGET` works for a file and a folder (writes refused), `bind,ro` in one step leaves
+    the file writable, toybox's mount refuses. Fixed in the fork (YumikoHayamato/OneOS `oneios-s25-ultra` `d975ec1`:
+    source and target, and `nosuid,nodev` given again, which a bind remount clears); staged (`b82d8943...`).
+  - 11:33:59, second try: the session ran from 11:34:23 to the coordinator's `phone return` at 11:41:51 (the owner:
+    enough). Seen on the phone: `oneios inner: cpuset / (cpus 0-7)`; the floors at the hardware's
+    (`policy0/scaling_min_freq 556800 -> 384000`, policy6 1017600), the caps at the top; `memory: fixed RAM: ...
+    prefaulted 6400 of 6400 MiB, locked 6400 MiB` (`ram=auto` with `ram-pagetable-percent=16`); `thermal: the SoC rule:
+    heavy from 115.0 C, trapping from 120.0 C, ... the kernel's trips: first passive 105.0 C, hot 125.0 C (the median of
+    25 SoC zones)`; `wifi: sim` from the image set; `oneios-display: the copy loop at uclamp.min 1024 while it runs`;
+    the first frame with content at +25 s. **But runtime 0.1.10-dev was built 2D-only** (`gpu: 2D only: this build has
+    no drm2kgsl (external/virglrenderer was absent ...)`): `external` is a link into a tmpfs
+    (`/tmp/claude-1000/oneios-ram/external`) that the PC's reboot at 10:07 had emptied, and the build said nothing. So
+    iOS drew on the CPU: host CPU 166-686 % of 800, the case 40.5-45.1 C, 5 level changes in 7 minutes, all by the case
+    (light, moderate, heavy; none by the SoC, whose sustained reading stayed under 104 C, and no TRAPPING), and 3 user
+    exceptions (`sheng-exc` in `push_surface`; none in session 2). Not a measure of the frame rate or of the heat with
+    the GPU. Return in place, Enforcing, 44 s, by the fork's `oneios_return.sh` (`shmem_enabled back: never`). After
+    it the fork's preflight said `battery too warm (42 C)`: the next switch waits for the battery.
+  - Fixed: `runtime/build.sh` refuses a stage without `external/virglrenderer` (`docs/building.md` section 4);
+    virglrenderer fetched again at `7e17c8e`; runtime 0.1.11-dev (`a6ecf94e...`, 840,592 bytes, with drm2kgsl;
+    `runtime/xnuhost/build/android` removed first) staged. Session 4 is the first with the fork's scripts and the GPU.
