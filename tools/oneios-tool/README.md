@@ -1249,6 +1249,8 @@ oneios-tool phone status                      # root, the installed app, the ses
 oneios-tool phone stage runtime DIR           # an unpacked runtime package, through oneios_root.sh begin/receive/finish
 oneios-tool phone stage runtime-asis DIR      # the same with each file's own size and SHA-256
 oneios-tool phone stage image DIR             # files of an image set at their paths; image.sha256 and image.ids follow
+                                              #   with no set staged: the whole set's first import (begin/receive/finish
+                                              #   image, as the app's import); each pushed copy removed once received
 oneios-tool phone status --watch [SECONDS]    # the same again every 5 s until Ctrl-C
 oneios-tool phone log [--file NAME] [--tail N] [--follow] [--save PATH | --save-auto] [filters] [--since S] [--analyze]
 oneios-tool phone log --list                  # the logs by name, with sizes

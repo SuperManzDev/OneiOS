@@ -564,7 +564,8 @@ build.
 T=tools/oneios-tool/target/release/oneios-tool        # cargo build --release --manifest-path tools/oneios-tool/Cargo.toml
 $T phone status                    # root, the installed app, the session, oneios_root.sh status (@@RESULT ready 1: a switch would start)
 $T phone stage runtime DIR         # an unpacked runtime package        (scripts/phone/stage.sh runtime DIR)
-$T phone stage image DIR           # kernel.kc, kernel.kc.hashes, manifest.json, overlay/... at their paths
+$T phone stage image DIR           # kernel.kc, kernel.kc.hashes, manifest.json, overlay/... at their paths; with no set
+                                   #   staged, the first import of a whole set (out/image/<build>/), as the app's import
 $T phone sums                      # the staged files' sha256
 $T phone image-check               # the staged manifest.json lists the staged files (switch checks it first)
 $T phone manifest DIR --stage      # DIR's files (a new kernel.kc, kernel.kc.hashes) with the phone's manifest, their entries new
