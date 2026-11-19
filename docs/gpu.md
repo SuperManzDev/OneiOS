@@ -65,6 +65,21 @@ Without `external/virglrenderer` xnuhost still builds, with the 2D device, and s
   (`/sys/module/udmabuf/parameters`), but never more than 64 MiB and 1024, so the PC splits as the phone does; not
   readable means the defaults. xnuhost logs them at start (`guest pages in udmabufs of up to 64 MiB and 1024 runs`).
   Nothing in the kernel is changed for this (section 4.2 has why not).
+- **A kernel that refuses a large udmabuf (ENOMEM; S25 Ultra, 2026-11-19).** Before Linux 6.10 udmabuf keeps a
+  udmabuf's page array in one `kmalloc_array`: 8 bytes a page, 128 KiB (order 5) for 64 MiB, physically contiguous.
+  On the S25 Ultra's 6.6 kernel with One UI up for hours that allocation failed (dmesg `gpuctl: page allocation
+  failure: order:5`, the ioctl ENOMEM; `gpuctl large` FAILED with 3 GB free). `xh_gpu3d_udmabufs` now halves the
+  limit and splits again on ENOMEM, down to 4 MiB, and keeps the lower limit for the process; one line says so
+  (`xnuhost: gpu: udmabuf: the kernel refused a 64 MiB udmabuf (ENOMEM: ...); udmabufs of at most 32 MiB from now
+  on`). On the phone: `gpuctl large` then PASS (the 96 MiB blob as 3 udmabufs of 32 MiB, both submits retired, 0
+  faults); the build without it failed every time in the same minutes.
+- **The fence table (S25 Ultra, 2026-11-19).** drm2kgsl exports a KGSL fence fd per submit on GPUs that do not use
+  the wait-timestamp path (the Adreno 830 by default); `drm_timeline_submit_fence` hands it to `virgl_fence_set_fd`,
+  whose table virglrenderer's own init makes and xnuhost (which does not call `virgl_renderer_init`) never made: a
+  NULL dereference at the first `GEM_SUBMIT` (`gpuctl submit` SIGSEGV in `virgl_fence_set_fd_locked`, in runtime
+  0.1.8 and in this branch's build alike). `gpu3d_kgsl.c` now calls `virgl_fence_table_init` beside the context and
+  resource tables. On the phone: `gpuctl submit` PASS (fence retired after 0.68 ms, 0 faults). The S24 (Adreno 750)
+  and S26 (840) take the timestamp path and never reached the table.
 - A resource made of several udmabufs: virglrenderer's resource holds one fd (the first chunk's); the whole list is
   kept by `gpu3d_kgsl.c` under the resource id until the resource is gone, and a second context that attaches the
   resource (`CTX_ATTACH_RESOURCE`: an IOSurface shared between processes, the display's surface) imports every chunk

@@ -463,6 +463,7 @@ static int large(void)
   const uint64_t big_iova = va_start + (256u << 20);
   xh_gpu_entry one = { .addr = RAM_PHYS + big_at, .length = (uint32_t)big_bytes };
   if (guest_buffer(ctx, big_res, 1, big_iova, big_bytes, &one, 1)) return 1;
+  xh_gpu3d_udmabuf_limits(&limit, &runs);        // again: a kernel that refused a large udmabuf lowered it (gpu3d.c)
   printf("large: %llu MiB in 1 run of pages as %llu udmabufs of up to %llu MiB, bound at GPU address 0x%llx\n", (unsigned long long)(big_bytes >> 20),
          (unsigned long long)((big_bytes + limit - 1) / limit), (unsigned long long)(limit >> 20), (unsigned long long)big_iova);
   // Commands in its first udmabuf, then in its last 64 KiB: the last udmabuf is bound after the others.

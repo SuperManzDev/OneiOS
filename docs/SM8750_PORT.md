@@ -102,3 +102,15 @@ guest is still iPhone18,2 iOS 27.0.1.
   `gpuctl probe`, `batteryctl`, `thermalctl` all `ok`. Next: the S26 runtime's `displayctl` fix (the 0.1.8
   `displayctl test` waits for `session/ready` and posts 0 frames) and `brightctl inspect`, built by CI from this branch;
   the OneOS fork's device gate for pa3q; the image set (IPSW fetch and kernel build need Linux or macOS).
+- 2026-11-19: runtime built from this branch in a Linux x86_64 container (NDK 28.2.13676358, build-tools 35.0.0,
+  `external/virglrenderer` at `7e17c8e`; the fork's release workflow needs the S26 owner's self-hosted runner
+  `oneios-cachyos`, so it cannot run in this fork). Staged to `/data/local/tmp/oneios-pa3q-diag` (17 files, SHA-256
+  checked on the phone); the 0.1.8 stage untouched. Read-only results: `brightctl inspect` (`panel0-backlight` max
+  12750 selected, no writes), `bridgectl haptic-inspect` (event6 periodic/sine/custom/gain, 4 effects),
+  `gpuctl routes` (all four routes PASS; 256 GiB VBO starves addresses, 192 GiB works, as on the S26),
+  `wifictl status` (supplicant AIDL, 5 GHz, ok).
+- 2026-11-19: **two GPU fixes found on this phone** (`docs/gpu.md` section 1): the fence table (`gpuctl submit`
+  crashed with SIGSEGV in runtime 0.1.8 too: the Adreno 830's fence-fd path) and the udmabuf ENOMEM fallback
+  (`gpuctl large` failed: order-5 page-array allocation on the 6.6 kernel). Both PASS on the phone after the fix.
+  Host tests: 14057 checks, 1 failed (`test_xnuhost.c:2329`, mlock past RLIMIT_MEMLOCK: the container runs as root
+  with CAP_IPC_LOCK; not related).

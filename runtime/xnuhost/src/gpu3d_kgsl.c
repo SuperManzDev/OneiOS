@@ -20,6 +20,7 @@
 
 #include "virgl_context.h"
 #include "virgl_resource.h"
+#include "virgl_fence.h"
 #include "virgl_util.h"
 #include "drm_hw.h"
 #include "drm2kgsl/drm2kgsl_renderer.h"
@@ -706,6 +707,15 @@ xh_gpu3d *xh_gpu3d_kgsl_open(int ram_fd, uint64_t ram_phys, uint64_t ram_size, v
   if (!k) { snprintf(reason, sizeof reason, "no memory"); return NULL; }
   virgl_log_set_handler(virgl_line, NULL, NULL);
   if (virgl_context_table_init() || virgl_resource_table_init(NULL)) { snprintf(reason, sizeof reason, "no memory for the renderer's tables"); free(k); return NULL; }
+  // The fence table: virglrenderer's own init (virgl_renderer_init) makes it, and xnuhost does not call that. drm2kgsl
+  // exports a KGSL fence fd for each submit on GPUs that do not use the wait-timestamp path (the Adreno 830 of SM8750
+  // by default), and drm_timeline_submit_fence then hands it to virgl_fence_set_fd: with no table that is a NULL
+  // dereference at the first GEM_SUBMIT (gpuctl submit: SIGSEGV in virgl_fence_set_fd_locked, S25 Ultra 2026-11-19).
+  static bool fence_table;
+  if (!fence_table) {
+    if (virgl_fence_table_init()) { snprintf(reason, sizeof reason, "no memory for the renderer's fence table"); free(k); return NULL; }
+    fence_table = true;
+  }
   int fd = open(KGSL_DEVICE_NODE, O_RDWR | O_CLOEXEC);
   k->capset.context_type = VIRTGPU_DRM_CONTEXT_MSM;
   int r = fd < 0 ? -errno : drm2kgsl_renderer_probe(fd, &k->capset);       // keeps its own descriptor for the VBO

@@ -51,11 +51,10 @@ void xh_gpu3d_chunks_free(xh_gpu_chunk *chunks, unsigned n)
   free(chunks);
 }
 
-int xh_gpu3d_udmabufs(int ram_fd, uint64_t ram_phys, uint64_t ram_size, const xh_gpu_entry *entries, unsigned n, xh_gpu_chunk **out)
+// One split at these limits. ENOMEM from the kernel is returned as is (the caller may retry with smaller chunks).
+static int udmabufs_at(int ram_fd, uint64_t ram_phys, uint64_t ram_size, const xh_gpu_entry *entries, unsigned n, xh_gpu_chunk **out,
+                       uint64_t max_bytes, unsigned max_runs)
 {
-  uint64_t max_bytes;
-  unsigned max_runs;
-  xh_gpu3d_udmabuf_limits(&max_bytes, &max_runs);
   *out = NULL;
   if (!n) { errno = EINVAL; return -1; }
   for (unsigned i = 0; i < n; i++) {
@@ -106,6 +105,29 @@ fail:
   xh_gpu3d_chunks_free(chunks, nchunks);
   errno = error;
   return -1;
+}
+
+// A kernel whose udmabuf keeps the page array in one kmalloc (Linux before 6.10, e.g. the S25 Ultra's 6.6) needs
+// physically contiguous memory for it: 8 bytes a page, so 128 KiB (order 5) for a 64 MiB udmabuf. With fragmented
+// memory that allocation fails (dmesg: "page allocation failure: order:5", the ioctl ENOMEM) although plenty of RAM
+// is free. Then udmabufs get smaller, by halves down to MIN_BYTES, for the rest of the process: more chunks, which the
+// chunked blobs already take, instead of a blob the guest cannot have.
+#define MIN_BYTES (4ull << 20)
+int xh_gpu3d_udmabufs(int ram_fd, uint64_t ram_phys, uint64_t ram_size, const xh_gpu_entry *entries, unsigned n, xh_gpu_chunk **out)
+{
+  uint64_t max_bytes;
+  unsigned max_runs;
+  xh_gpu3d_udmabuf_limits(&max_bytes, &max_runs);
+  for (;;) {
+    int r = udmabufs_at(ram_fd, ram_phys, ram_size, entries, n, out, max_bytes, max_runs);
+    if (r >= 0 || errno != ENOMEM || max_bytes <= MIN_BYTES) return r;
+    uint64_t was = max_bytes;
+    max_bytes = (max_bytes / 2) & ~0xfffull;
+    if (max_bytes < MIN_BYTES) max_bytes = MIN_BYTES;
+    limit_bytes = max_bytes;
+    fprintf(stderr, "xnuhost: gpu: udmabuf: the kernel refused a %llu MiB udmabuf (ENOMEM: its page array needs contiguous memory);"
+            " udmabufs of at most %llu MiB from now on\n", (unsigned long long)(was >> 20), (unsigned long long)(max_bytes >> 20));
+  }
 }
 
 int xh_gpu3d_udmabuf(int ram_fd, uint64_t ram_phys, uint64_t ram_size, const xh_gpu_entry *entries, unsigned n)
