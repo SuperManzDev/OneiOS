@@ -3,11 +3,11 @@
 #
 # Apple's files never leave the runner: the SystemOS image is fetched from Apple's CDN into inputs/, the iOS 27 stubs
 # are made from it into out/ios27-tbd, and both are deleted at the end. The only output is this project's own code,
-# built: out/userland/NativeAdrenoMetal.{bundle,gpuaddon,build.json}, packed and encrypted with the repository secret
+# built: out/userland/NativeAdrenoMetal.{bundle,gpuaddon,build.json} and out/userland/helpers, packed and encrypted with the repository secret
 # METAL_ARTIFACT_KEY (openssl AES-256-CBC, PBKDF2), kept one day. On the PC:
 #   gh run download RUN -n metal-plugin -D DIR
 #   openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass file:KEYFILE -in DIR/metal-plugin.tar.zst.enc | zstd -d | tar -x
-name: metal plug-in (macOS)
+name: metal plug-in and helpers (macOS)
 # workflow_dispatch needs the file on the default branch; a push to ci/metal-plugin runs it from any branch:
 #   git push -f origin HEAD:ci/metal-plugin
 on:
@@ -53,7 +53,13 @@ jobs:
           scripts/fetch/fetch.sh --only systemos "$P" 2>&1 | grep -v '%)'
           scripts/setup/ios-toolchain.sh --tbd --image inputs/24A446/043-70037-715.dmg
           scripts/setup/ios-toolchain.sh
+      - name: Guest helpers (userland/helpers)
+        run: |
+          userland/helpers/build.sh
+          cat out/userland/helpers/cdhashes.txt
       - name: Metal plug-in
+        # "[helpers-only]" in the pushed commit's message skips it (about 30 minutes)
+        if: ${{ !contains(github.event.head_commit.message, '[helpers-only]') }}
         run: |
           export PATH="$(brew --prefix bison)/bin:$PATH"
           userland/metal/build.sh
@@ -70,7 +76,9 @@ jobs:
           KEY: ${{ secrets.METAL_ARTIFACT_KEY }}
         run: |
           mkdir -p ship
-          tar -C out/userland -cf - NativeAdrenoMetal.bundle NativeAdrenoMetal.gpuaddon NativeAdrenoMetal.build.json \
+          parts=(helpers)
+          [ -d out/userland/NativeAdrenoMetal.bundle ] && parts+=(NativeAdrenoMetal.bundle NativeAdrenoMetal.gpuaddon NativeAdrenoMetal.build.json)
+          tar -C out/userland -cf - "${parts[@]}" \
             | zstd -19 -q \
             | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:KEY -out ship/metal-plugin.tar.zst.enc
           shasum -a 256 ship/metal-plugin.tar.zst.enc
