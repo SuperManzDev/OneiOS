@@ -98,7 +98,7 @@ pub fn jobs_given() -> bool {
 /// SCHED_NORMAL).
 #[cfg(target_os = "android")]
 const SCHED_OTHER: libc::c_int = libc::SCHED_NORMAL;
-#[cfg(not(target_os = "android"))]
+#[cfg(target_os = "linux")]
 const SCHED_OTHER: libc::c_int = libc::SCHED_OTHER;
 
 /// Put the process at nice `n` (10 to 19) and out of any realtime class. Call it before the first thread starts:
@@ -110,8 +110,8 @@ pub fn set_nice(n: i32) -> std::io::Result<String> {
     let mut said = String::new();
     // Safety: plain system calls on this process; no pointer but the zeroed parameter block.
     unsafe {
-        let policy = libc::sched_getscheduler(0);
-        if policy == libc::SCHED_FIFO || policy == libc::SCHED_RR {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if realtime_class() {
             let param: libc::sched_param = std::mem::zeroed();
             if libc::sched_setscheduler(0, SCHED_OTHER, &param) != 0 {
                 return Err(std::io::Error::last_os_error());
@@ -129,10 +129,19 @@ pub fn set_nice(n: i32) -> std::io::Result<String> {
 /// This thread's nice value and whether its class is a realtime one (for the tests and `hello`).
 pub fn nice_now() -> (i32, bool) {
     // Safety: plain system calls. getpriority's -1 may be a value: errno tells, and a failure reads as 0 here.
-    unsafe {
-        let policy = libc::sched_getscheduler(0);
-        (libc::getpriority(libc::PRIO_PROCESS as _, 0), policy == libc::SCHED_FIFO || policy == libc::SCHED_RR)
-    }
+    unsafe { (libc::getpriority(libc::PRIO_PROCESS as _, 0), realtime_class()) }
+}
+
+/// Whether this process runs in a realtime class (SCHED_FIFO or SCHED_RR). Linux and Android only: macOS has no
+/// per-process scheduling class (no sched_getscheduler), the tools build there too (docs/building.md section 9).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+unsafe fn realtime_class() -> bool {
+    let policy = libc::sched_getscheduler(0);
+    policy == libc::SCHED_FIFO || policy == libc::SCHED_RR
+}
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+unsafe fn realtime_class() -> bool {
+    false
 }
 
 // ---------------------------------------------------------------- who listens
