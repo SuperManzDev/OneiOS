@@ -121,3 +121,10 @@ guest is still iPhone18,2 iOS 27.0.1.
   known "no frame handshake" limit). Fixed with the frame handshake (`XHDW`/`XHDA`, `runtime/display/README.md`):
   483 steps in 8 s all acked, the owner saw no flicker. Display host tests 133 checks, 0 failed (with an ack-less
   stand-in helper too). Before a session: the panel at WQHD+; xnuhost to use the handshake for iOS's swaps.
+- 2026-11-19: the device gate. `oneios_switch.sh` refused every phone but the S24 Ultra (`SM-S928*:e3q:SM8650`, a
+  fail-closed policy line: the switch itself is device-generic, the volume keys are found by capability, the clocks,
+  backlight, watchdog and USB by named sysfs paths). At the owner's decision `YumikoHayamato/OneOS`
+  `oneios-s25-ultra` `d928cdc` adds `SM-S938*:pa3q:SM8750`; `app/` points at it. `oneios-tool` (built static,
+  musl) runs from the owner's PC over wireless adb: `phone status` said `ready 0 unsupported device: SM-S938B (pa3q,
+  SM8750)` before the new script was staged.
+
