@@ -295,3 +295,28 @@ guest is still iPhone18,2 iOS 27.0.1.
   - Fixed: `runtime/build.sh` refuses a stage without `external/virglrenderer` (`docs/building.md` section 4);
     virglrenderer fetched again at `7e17c8e`; runtime 0.1.11-dev (`a6ecf94e...`, 840,592 bytes, with drm2kgsl;
     `runtime/xnuhost/build/android` removed first) staged. Session 4 is the first with the fork's scripts and the GPU.
+- 2026-11-19: **session 4 on the phone** (11:54:23 to the coordinator's `phone return` at 12:01:13 at the owner's word;
+  battery 28.0 C and the case 28.9 C at the start, the phone cooled off the cable; `logs/pa3q-s4/`). The fork's scripts,
+  runtime 0.1.11-dev with drm2kgsl (`gpu: the queue's thread ... at uclamp.min 1024 while it runs`), 6400 MiB locked,
+  the SoC rule at 115/120 C, `wifi: sim`; first frame with content at +25 s; 0 `sheng-exc`, 0 panics. Frames: up to 851
+  flushes in 10 s; the scanout copy mean 1.2 ms, **max 2.7-3.5 ms** (session 2: up to 20.6 ms); 511-587 render-server
+  frames per 10 s, GPU time 2.6-4.2 ms, submit-to-retired mean 3.5-5.1 ms, max 11 ms, 2 over budget per 10 s. Heat: the
+  levels by the case only (light at 39.7 C, moderate at 42.1 C within 1.5 minutes), host CPU 260-708 % of 800 (sys
+  135-397 %) in the first minutes, the battery 28.5 -> 37.2 C in 2.5 minutes, a net 1.2-2.5 A out of it on USB. Return in
+  place, 44 s. **The owner: stable, but slow to start and slow: "an iPhone 11" in latency and in the waits when an app
+  opens.** What the trips cost (`perf:` lines, means; p99; max): a system call 45 us (p50 6 us; 524 us; 577 ms), a page
+  fault 6-12 us (81-131 us; 932 ms), an interrupt 22-50 us (max 545 ms), a batch of maps by release 24-27 us, trap to
+  vCPU 6.8 us and back to the task 8.2 us. And **the disks**: `virtio_blk.c` answers each request inside the vCPU's
+  write of QueueNotify (`virtio.c` `notify`, under the device's lock), one queue per disk, so a vCPU waits for every
+  `pread` and, at a chunk's first read, for the read and SHA-256 of its whole 1 MiB (`xh_verify_range`; ARMv8 SHA
+  instructions), and the disk serves one request at a time; the GPU and input devices have worker threads. Not yet
+  measured: how much of an app's start that is (no per-disk statistics line yet).
+- 2026-11-19: **other projects** (owner's question: who runs iOS 27 smoothly?). None found on an Android phone. HakiOS
+  (`oosexgang/hakios-xnu-kernel`, MIT user space): XNU natively from its own UEFI (Mu-Silicium), loaded from RAM by
+  fastboot (an unlocked bootloader; not possible on this phone: Samsung has no fastboot and this one's bootloader is
+  locked, `verifiedbootstate green`), iOS 16.5's user space on the POCO X5 Pro (SM7325, Adreno 642L): page swipes
+  100-104 fps at 1125x2436 and 107-118 at 750x1624 with its own Metal driver (`hakios-metal`: Metal to the Adreno's
+  command packets over msm-DRM-style requests to its kernel driver, AIR to NIR to Mesa's ir3; A6xx only), against
+  50-57 fps for UniXNU's Metal on Vulkan (Turnip, the kind of path NativeAdrenoMetal is); 120 not reached. Scion-Project
+  (a HakiOS fork): iOS 27 on the Galaxy S9, its README's own states "built, not yet run" and "iOS 27 can hang". UniXNU
+  ran iOS 26 natively on a Surface Duo (UEFI). vphone-cli: iOS 27 as a VM on Apple Silicon Macs only.
