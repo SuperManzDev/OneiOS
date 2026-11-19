@@ -1,6 +1,6 @@
 # SM8750 port — Galaxy S25 Ultra (pa3q)
 
-Status (2026-11-19): **planning; nothing has run on an S25 Ultra.** This branch (`s25-ultra-sm8750`) starts from the
+Status (2026-11-19): **passive audit and read-only bridge tools PASS on the owner's S25 Ultra; no session, no active test yet.** This branch (`s25-ultra-sm8750`) starts from the
 S26 Ultra work (YMGPwcca/OneiOS PR #1, SM8850 `m3q`), not from upstream `main` (S24 Ultra, SM8650 `e3q`), because
 the S25 Ultra is closer to the S26 than to the S24 (section 2).
 
@@ -18,6 +18,40 @@ run as root. **The port cannot start without a rooted S25 Ultra.**
 - US models (SM-S938U/U1) have never had an unlockable bootloader [F: press reports].
 - First question for the owner: model number (`SM-S938B` or other), firmware (`ro.build.PDA`), and whether the
   bootloader is already unlocked and KernelSU installed. No other step of this plan is useful before that.
+
+## 0b. The owner's phone (measured 2026-11-19, `audit-preflight-pa3q-ondevice.sh` + runtime 0.1.8 tools) [F]
+
+- SM-S938B (`pa3qxeea`), SM8750 board `sun`, firmware `S938BXXSDDZJ1`, Android 17 (SDK 37), One UI 9.0 (`90000`),
+  kernel `6.6.127-android15-8`, 4 KiB pages, `/proc/config.gz` present.
+- Root: **temporary**, KernelSU LKM in "jailbreak mode" loaded through an exploit (dfroot) on a **locked** bootloader
+  (`flash.locked=1`, `vbmeta.device_state=locked`, `verifiedbootstate=green`, `warranty_bit=0`). Domain `u:r:ksu:s0`,
+  SELinux Enforcing. KernelSU's busybox (all nine applets) and resetprop present. Root is gone after any reboot: the
+  return's failsafe reboot lands in stock One UI without root (re-run the exploit before a session). A kernel panic
+  under load may come from the exploit's state, not OneiOS: read pstore before blaming our code.
+- Audit: 198 lines, 81 PASS, 0 FAIL, 1 WARN (`hwservicemanager` stopped: Bluetooth is AIDL `IBluetoothHci/default`,
+  registered; no HIDL), 22 BLOCKED (stage image not present, S24-only gate, session-only checks).
+- OneOS app 0.5.14 installed; a stage at `/data/local/tmp/oneios` with runtime **0.1.8** (`ea06d46`), all checksums OK;
+  no image set.
+- Treble HALs registered: health, thermal, vibrator, lights, sensors, wifi supplicant, bluetooth (AIDL), audio core,
+  camera provider `internal/0`.
+- **CPU** (`bridgectl cpu`): cpu0-5 capacity 765, 384000..3532800 kHz; cpu6-7 capacity 1024, 1017600..4473600 kHz;
+  MIDR `0x514f0014` / `0x513f0014` (Qualcomm Oryon, part 0x001); PAC (`paca pacg`), BTI. Plan 6 E + 2 P vCPUs, thread
+  placement and `uclamp.min` done: the S26's shape, no change needed. Cache sysfs has `level`/`type` but no `size`,
+  so caches print 0; nothing passes them to the guest (no use in xnuhost or the loader), so no fix needed.
+- **GPU** (`gpuctl nodes`, `probe`): `Adreno830v2`, KGSL, udmabuf (64 MiB, 1024 runs), system heap open; drm2kgsl:
+  chip `0x44050000`, gpu id 6850, `0x4000000000 + 192 GiB`, GMEM 12288 KiB, 160..832 MHz (`msm-adreno-tz`). The
+  guest's Turnip (Droid-VM/mesa `cecc0e9`, `freedreno_devices.py`) has `Adreno (TM) 830`, a8xx gen1, by the wildcard
+  `0xffff44050000` (and `0x44050001` KGSL): the chip is known to the guest driver [F]; never rendered by it [U].
+- **Input** (evdev): touch `sec_touchscreen` event8 (direct, MT); `sec_touchpad` event9 (MT, not direct);
+  `sec_touchproximity` event10 (direct, no MT: not a touch candidate in `input.c`); S Pen `sec_e-pen` event12 (pen,
+  pressure, tilt); keys Volume Up `gpio-keys` event0, Power `pmic_pwrkey` event3, Volume Down `pmic_resin` event4;
+  haptics `sec_vibrator_inputff` event6 (FF periodic, sine, custom); ALS `als_rear` event7.
+- **Battery** (`batteryctl`): samsung backend works: 5000 mAh full/design, 753 cycles, max77775 fuel gauge.
+- **Thermal** (`thermalctl`): nominal, step 0, no pseudo-zone at 105 C (no `cpu-hw-trip-*` on this phone); dead
+  modem/mmW zones read -273000 and are not CPU/GPU zones.
+- **Backlight**: `panel` max 0; `panel0-backlight` max 12750 (now 1571). Same shape as the S26: the bridge's
+  default ceiling would be 12750; a slider sweep (read only) is needed before any write (S26 method).
+- Memory: 11.4 GB, 16 GB zram swap, 3.2 GB available with One UI up.
 
 ## 1. Workflow (the S26 method)
 
@@ -63,4 +97,8 @@ guest is still iPhone18,2 iOS 27.0.1.
 
 - 2026-11-19: branch created from PR #1 head `0e7329d`; `scripts/phone/audit-preflight-pa3q.sh` added (the S26
   audit plus input, KGSL, thermal, power_supply, backlight, HAL, boot-state and memory inventories, all read only).
-  Its input parser was checked on the PC against an S26-shaped `getevent -pl` sample. Not run on a phone.
+  Its input parser was checked on the PC against an S26-shaped `getevent -pl` sample.
+- 2026-11-19: ran on the owner's phone over wireless adb (section 0b): audit 0 FAIL; `bridgectl cpu`, `gpuctl nodes`,
+  `gpuctl probe`, `batteryctl`, `thermalctl` all `ok`. Next: the S26 runtime's `displayctl` fix (the 0.1.8
+  `displayctl test` waits for `session/ready` and posts 0 frames) and `brightctl inspect`, built by CI from this branch;
+  the OneOS fork's device gate for pa3q; the image set (IPSW fetch and kernel build need Linux or macOS).
