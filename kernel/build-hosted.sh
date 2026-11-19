@@ -134,9 +134,10 @@ mkdir -p "$UNIXNU_OUT_DIR"
 run_build() {
   # macOS has xcrun, plutil, codesign and csh in place (Xcode); Linux gets UniXNU's shims there in a namespace.
   if [ "$HOST" = Darwin ]; then "$@"; return; fi
-  if [ -x /usr/bin/xcrun ] && [ -x /usr/bin/plutil ] && [ -x /usr/bin/codesign ] && [ -x /bin/csh ]; then "$@"; return; fi
-  local binds=() shim
-  for shim in xcrun plutil codesign csh; do
+  # plutil is always UniXNU's: a Linux /usr/bin/plutil is GNUstep's (Arch: gnustep-base), which cannot convert xnu's
+  # Kernel.framework Info.plist ("non-NSData data argument passed to method") and stops installhdrs.
+  local binds=(--ro-bind "$TOOLCHAIN/unixnu/usrbin/plutil" /usr/bin/plutil) shim
+  for shim in xcrun codesign csh; do
     [ -e "/usr/bin/$shim" ] || binds+=(--ro-bind "$TOOLCHAIN/unixnu/usrbin/$shim" "/usr/bin/$shim")
   done
   bwrap --dev-bind / / --overlay-src /usr/bin --tmp-overlay /usr/bin "${binds[@]}" -- "$@"

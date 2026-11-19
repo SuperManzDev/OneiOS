@@ -149,3 +149,20 @@ guest is still iPhone18,2 iOS 27.0.1.
   stalled I/O until only the mouse moved (no OOM, no panic). Heavy builds on this PC: `CARGO_TARGET_DIR` (and other
   build trees) on `/tmp` (tmpfs, 20 GB), `nice -n 19 ionice -c3`, few jobs; the result copied back. Built that way:
   3 min 23 s, `-j4`.
+- 2026-11-19: **image inputs, kernel and `kernel.kc` on the owner's PC.** `fetch.sh` of `ios-27.0.1-iPhone18,2`:
+  13 members, CRC-32 ok, both AEA images decrypted (OS 10,359,930,880 bytes, SystemOS 6,157,238,272), 16 GB in
+  `inputs/24A446/` (on the NTFS disk); about 12 MB/s from Apple's CDN. `kernel-inputs.sh`: kernelcache.macho
+  78,135,296 bytes, sha256 `349c4692...0c57e3`, the pinned one. Kernel (`HOSTED_OUT=me XNU_FILESET_REFERENCE=1`,
+  `JOBS=4`, stock clang **22.1.8**, build trees in tmpfs): `xnu.macho` 24,820,104 bytes, sha256 `a1e5ca1f8a57536d...`,
+  in 348 s; `_oneios_drivers_start` calls `oneios_hid_input_start`. `kernel.kc`: 96,043,008 bytes, sha256
+  `fd1ff268a23c7631...`, audit 2711 paired, 93 on the stub, 9 data unpaired, 0 failures.
+  Four fixes were needed on a fresh Linux checkout (none showed on the PC of 2026-11-12, whose `external/` was full,
+  had no `/usr/bin/plutil` and clang 23):
+  `setup-toolchain.sh` takes `LIBDISPATCH_PREFIX` (a libdispatch outside the system's paths);
+  `unixnu-layout.sh` fetches Droid-VM-UniXNU itself when it is missing (build-hosted runs it before `stage_sources`);
+  `build-hosted.sh` always binds UniXNU's `plutil` shim (GNUstep's `/usr/bin/plutil`, Arch `gnustep-base`, fails on
+  xnu's Kernel.framework Info.plist); `clang-wrapper` defines `__PTRAUTH_INTRINSICS__` for arm64e when the compiler
+  does not (stock clang 22 predefines only `__PTRAUTH__`; xnu's EXTERNAL_HEADERS/ptrauth.h then used its no-PAC
+  stubs: "statement expression not allowed at file scope" in sys/ucred.h). Not yet checked: that clang 22's PAC code
+  matches clang 23's at run time (qemu boot, section 5).
+  Also on this PC: the owner's `panino-focus` service capped the tmux job's scope at 5% CPU (fixed by the owner).

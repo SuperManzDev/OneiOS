@@ -36,6 +36,18 @@ done
 ios=${ONEIOS_IOS_VERSION:-27.0}
 [ "${ONEIOS_KERNEL_WARNINGS:-0}" = 1 ] || args+=(-w)
 if [ "$arch" = arm64e ]; then
+  # xnu's EXTERNAL_HEADERS/ptrauth.h (the one -nostdinc builds see) tests Apple clang's __PTRAUTH_INTRINSICS__. Stock
+  # clang 22 predefines only __PTRAUTH__ (it has the same __builtin_ptrauth_* intrinsics); there the header fell back
+  # to its no-PAC stubs, and ptrauth_string_discriminator() became a statement expression inside __ptrauth(...):
+  # "statement expression not allowed at file scope" (sys/ucred.h, libfirehose_kernel). Define it when the compiler
+  # does not; the answer is cached per compiler beside this wrapper.
+  probe="$(dirname "$0")/.ptrauth-intrinsics-$(basename "$(readlink -f "$(command -v "$real")")")"
+  if ! [ -f "$probe" ]; then
+    if "$real" -target "arm64e-apple-ios$ios" -dM -E -x c /dev/null 2>/dev/null | grep -q '__PTRAUTH_INTRINSICS__'; then
+      echo 0 > "$probe.$$"; else echo 1 > "$probe.$$"; fi
+    mv -f "$probe.$$" "$probe"
+  fi
+  [ "$(cat "$probe")" = 1 ] && args=(-D__PTRAUTH_INTRINSICS__=1 "${args[@]}")
   # The BCM2837 machine config passes no -mcpu, and stock clang's default CPU for arm64e is ARMv8.3: the assembler
   # then refuses `msr DIT` (ARMv8.4) in cswitch.s, which Apple's accepts. For the assembler only: ARMv8.5.
   # Compiled code keeps the default CPU. (The S24 Ultra's cores are ARMv9.2.)

@@ -25,7 +25,18 @@ done <<ROWS
 $(pin_rows "$PINS_TOOLCHAIN")
 ROWS
 # libdispatch and BlocksRuntime outside the default paths (Swift's copy on Arch): tell cctools' configure and the loader.
-if ! [ -e /usr/include/dispatch/dispatch.h ]; then
+# LIBDISPATCH_PREFIX=DIR: a copy that is not the system's (DIR/include/dispatch, DIR/lib/libdispatch.so), e.g. a
+# package extracted into a private sysroot without root; the built tools find it by rpath.
+DISPATCH_LDCONFIG=
+if [ -n "${LIBDISPATCH_PREFIX:-}" ]; then
+  [ -e "$LIBDISPATCH_PREFIX/include/dispatch/dispatch.h" ] && [ -e "$LIBDISPATCH_PREFIX/lib/libdispatch.so" ] \
+    || { echo "setup-toolchain: no libdispatch in LIBDISPATCH_PREFIX=$LIBDISPATCH_PREFIX" >&2; exit 1; }
+  lib=$LIBDISPATCH_PREFIX/lib
+  export CPPFLAGS="${CPPFLAGS:-} -I$LIBDISPATCH_PREFIX/include" LDFLAGS="${LDFLAGS:-} -L$lib -Wl,-rpath,$lib"
+  export LD_LIBRARY_PATH=$lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+  DISPATCH_LDCONFIG=$(printf '\tlibdispatch.so (libc6,x86-64) => %s/libdispatch.so\n\tlibBlocksRuntime.so (libc6,x86-64) => %s/libBlocksRuntime.so' "$lib" "$lib")
+  echo "setup-toolchain: libdispatch from LIBDISPATCH_PREFIX $LIBDISPATCH_PREFIX"
+elif ! [ -e /usr/include/dispatch/dispatch.h ]; then
   for d in /usr/lib/swift /usr/lib/swift/usr/lib/swift; do
     if [ -e "$d/dispatch/dispatch.h" ]; then
       lib=$(dirname "$(ldconfig -p | awk '/libdispatch.so / && !seen {print $NF; seen = 1}')")
@@ -40,7 +51,11 @@ fi
 make -C "$PREFIX/src/unifdef" -j"${JOBS:-$(nproc)}" CFLAGS="-O2 -std=gnu11" unifdef >/dev/null
 # bootstrap.sh tests `ldconfig -p | grep -q libdispatch` under pipefail: with a long library list grep leaves early,
 # ldconfig dies of SIGPIPE and the test fails though the library is there. Give it a short answer.
-ldconfig -p | grep libdispatch > "$PREFIX/src/ldconfig.out" || { echo "setup-toolchain: libdispatch not installed" >&2; exit 1; }
+if [ -n "$DISPATCH_LDCONFIG" ]; then
+  echo "$DISPATCH_LDCONFIG" > "$PREFIX/src/ldconfig.out"
+else
+  ldconfig -p | grep libdispatch > "$PREFIX/src/ldconfig.out" || { echo "setup-toolchain: libdispatch not installed" >&2; exit 1; }
+fi
 mkdir -p "$PREFIX/src/shim"
 printf '#!/bin/sh\ncat "%s"\n' "$PREFIX/src/ldconfig.out" > "$PREFIX/src/shim/ldconfig"
 chmod +x "$PREFIX/src/shim/ldconfig"

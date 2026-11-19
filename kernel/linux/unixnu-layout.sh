@@ -16,6 +16,9 @@ SRC=${XNU_LINUX_PREFIX:-$ROOT/out/toolchain}
 DST=$SRC/unixnu
 UNIXNU=$ROOT/external/Droid-VM-UniXNU
 [ -x "$SRC/cctools/bin/ld" ] && [ -x "$SRC/bin/migcom" ] || { echo "unixnu-layout: run kernel/linux/setup-toolchain.sh first" >&2; exit 1; }
+# build-hosted.sh runs this before stage_sources: on an empty external/ UniXNU (whose shims go in the layout) is not
+# there yet.
+[ -d "$UNIXNU/scripts/linux" ] || "$ROOT/kernel/fetch.sh" Droid-VM-UniXNU
 CLT=$DST/CommandLineTools/usr
 XCT=$DST/XcodeDefault.xctoolchain/usr
 rm -rf "$DST"
