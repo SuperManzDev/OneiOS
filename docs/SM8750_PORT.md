@@ -199,3 +199,13 @@ guest is still iPhone18,2 iOS 27.0.1.
   Not tested by tests/phone (its import checks need the fork checkout `app/`). On this PC two old tests fail
   for reasons outside this change: sparse.rs's holes test, and tests/phone's `touch status` (it expects
   English "No such file"; the PC's locale is Italian).
+- 2026-11-19: **PC boot of the staged pair** (section 5; qemu-aarch64 11.1.3 `-cpu cortex-a710`, runtime 0.1.9-dev's
+  xnuhost, the final image set and `kernel.kc` `fd1ff268...`, `--ram 4G --cpus 8 --display shm`, boot arguments of
+  section 5 plus `oneios-gpu-metal=1 oneios-adreno-selftest=1`). `PAC yes`; at +8 s `droidvm-gpu: Metal accelerator
+  stage 5 status 0` and the selftest's IOKit match (`AGXAccelerator`, `MetalPluginName NativeAdrenoMetal`) and user
+  client open (status 0; no 3D device under qemu); the addon folder mounted over /System/Library/Extensions (stage 5
+  status 0); backboardd's code signature and library validation of `NativeAdrenoMetal` and
+  `libvulkan_freedreno.dylib`: error 0 (the runner-built plug-in is trusted); `stage=backboardd-up`; **first frame
+  of the guest's own at +341 s** (the Apple logo, 1440x3120). Ran 19 minutes with SpringBoard, backboardd and the
+  daemons up: 0 panics, 0 `sheng-exc`. So the clang 22 kernel boots with PAC under qemu; the phone's own parts
+  (KGSL, panel, HALs, timing) are not shown by it.
