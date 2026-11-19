@@ -1,0 +1,71 @@
+# Build the Metal plug-in (userland/metal/build.sh, docs/building.md section 9) on a GitHub macOS runner with Xcode,
+# for an owner who has no Linux iPhoneOS SDK (no Apple ID for the Xcode .xip).
+#
+# Apple's files never leave the runner: the SystemOS image is fetched from Apple's CDN into inputs/, the iOS 27 stubs
+# are made from it into out/ios27-tbd, and both are deleted at the end. The only output is this project's own code,
+# built: out/userland/NativeAdrenoMetal.{bundle,gpuaddon,build.json}, packed and encrypted with the repository secret
+# METAL_ARTIFACT_KEY (openssl AES-256-CBC, PBKDF2), kept one day. On the PC:
+#   gh run download RUN -n metal-plugin -D DIR
+#   openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass file:KEYFILE -in DIR/metal-plugin.tar.zst.enc | zstd -d | tar -x
+name: metal plug-in (macOS)
+on:
+  workflow_dispatch:
+    inputs:
+      xcode:
+        description: 'Xcode on the runner (the Mac build host of 2026-11-12 used 27.2)'
+        default: '27.2'
+permissions:
+  contents: read
+jobs:
+  metal:
+    runs-on: xcode-27
+    timeout-minutes: 120
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_${{ inputs.xcode }}.app/Contents/Developer
+      P: profiles/ios-27.0.1-iPhone18,2.toml
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The key is set
+        env:
+          KEY: ${{ secrets.METAL_ARTIFACT_KEY }}
+        run: '[ -n "$KEY" ] || { echo "no METAL_ARTIFACT_KEY secret: the output would not be encrypted" >&2; exit 1; }'
+      - name: Tools
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          brew install ninja glslang shaderc spirv-tools bison llvm rsync zstd uv
+          uv pip install --system --break-system-packages --python "$(command -v python3)" meson mako pyyaml
+          rustup toolchain install 1.98.0 --profile minimal --component rust-src
+      - name: Sources (pinned references, the kernel base)
+        run: |
+          scripts/setup/get-references.sh NativeMetal NativeAdreno NativeMobileDisplay AdrenoPM4 metal2vulkan mesa-droidvm
+          kernel/fetch.sh Droid-VM-UniXNU
+      - name: SystemOS from Apple (only that member), the iOS 27 stubs
+        run: |
+          scripts/fetch/get-ipsw-cli.sh
+          scripts/fetch/fetch.sh --only systemos "$P" 2>&1 | grep -v '%)'
+          scripts/setup/ios-toolchain.sh --tbd --image inputs/24A446/043-70037-715.dmg
+          scripts/setup/ios-toolchain.sh
+      - name: Metal plug-in
+        run: |
+          export PATH="$(brew --prefix bison)/bin:$PATH"
+          userland/metal/build.sh
+          ls -la out/userland
+      - name: Pack and encrypt (this project's code only)
+        env:
+          KEY: ${{ secrets.METAL_ARTIFACT_KEY }}
+        run: |
+          mkdir -p ship
+          tar -C out/userland -cf - NativeAdrenoMetal.bundle NativeAdrenoMetal.gpuaddon NativeAdrenoMetal.build.json \
+            | zstd -19 -q \
+            | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:KEY -out ship/metal-plugin.tar.zst.enc
+          shasum -a 256 ship/metal-plugin.tar.zst.enc
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: metal-plugin
+          path: ship/metal-plugin.tar.zst.enc
+          retention-days: 1
+          if-no-files-found: error
+      - name: Apple's files off the runner
+        if: always()
+        run: rm -rf inputs out/ios27-tbd out/ios27-cache out/image ship

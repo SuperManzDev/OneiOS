@@ -166,3 +166,12 @@ guest is still iPhone18,2 iOS 27.0.1.
   stubs: "statement expression not allowed at file scope" in sys/ucred.h). Not yet checked: that clang 22's PAC code
   matches clang 23's at run time (qemu boot, section 5).
   Also on this PC: the owner's `panino-focus` service capped the tmux job's scope at 5% CPU (fixed by the owner).
+- 2026-11-19: runtime from the branch: `runtime/build.sh` (external/virglrenderer at `7e17c8e`; xnuhost has
+  drm2kgsl), elf-check 6 dynamic and 9 static ELF files, 0 failures; `runtime/package.sh 0.1.9-dev`:
+  `oneios-runtime-0.1.9-dev-arm64.tar.zst` 838,706 bytes, sha256 `cc521463...4fc9c9` (runtime only: the hosted
+  kernel is not releasable). First image set (no helpers, no Metal plug-in): 21 files, 17,862,581,529 bytes, archive
+  11,139,881,053 bytes, sha256 `066eb02c...0336d8`, verified. **The Metal plug-in**: the owner has no Apple ID for an
+  Xcode `.xip`, and the plug-in needs the iPhoneOS SDK's headers (Metal, Foundation, IOSurface). It is built instead by
+  `.github/workflows/metal-plugin.yml` (manual) on GitHub's `xcode-27` runner (Xcode 27.2): the SystemOS member and the
+  iOS 27 stubs are made on the runner and deleted there; the only output, the bundle, gpuaddon and build record, is
+  encrypted with the repository secret `METAL_ARTIFACT_KEY` (the key file stays on the owner's PC) and kept one day.
