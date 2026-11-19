@@ -41,7 +41,7 @@ jobs:
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
           brew install ninja glslang shaderc spirv-tools bison llvm rsync zstd uv
-          uv pip install --system --break-system-packages --python "$(command -v python3)" meson mako pyyaml
+          uv pip install --system --break-system-packages --python "$(command -v python3)" meson mako pyyaml packaging
           rustup toolchain install 1.98.0 --profile minimal --component rust-src
       - name: Sources (pinned references, the kernel base)
         run: |
@@ -58,6 +58,13 @@ jobs:
           export PATH="$(brew --prefix bison)/bin:$PATH"
           userland/metal/build.sh
           ls -la out/userland
+      - name: The build's own logs (on a failure)
+        if: failure()
+        run: |
+          for f in out/metal/root/.cache/*.log out/metal/root/build/*.log; do
+            [ -f "$f" ] && { echo "::group::$f"; tail -60 "$f"; echo "::endgroup::"; }
+          done
+          true
       - name: Pack and encrypt (this project's code only)
         env:
           KEY: ${{ secrets.METAL_ARTIFACT_KEY }}

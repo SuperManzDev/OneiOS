@@ -118,7 +118,7 @@ runs by default. Format: [image-format.md](image-format.md).
 **On macOS** the commands are the same and need no `sudo`. The fetch decrypts with the macOS `ipsw` release. The
 image build attaches the three images with `hdiutil` (read-only, owners ignored) and reads the owners of
 `/private/var` from the OS image's own APFS records (image-format.md section 8). Tools: Homebrew's `zstd`, and
-`uv pip install --python "$(command -v python3)" pyyaml mako meson` for section 9. Run on the Mac on 2026-11-12:
+`uv pip install --python "$(command -v python3)" pyyaml mako meson packaging` (Mesa's meson needs `packaging` on Python 3.12+) for section 9. Run on the Mac on 2026-11-12:
 the fetch took 62 minutes (10.6 GiB at about 3 MB/s, then both decryptions), the image build 2 minutes with the
 archive (11.15 GB). The three images and the trust files are byte for byte the Linux PC's (the phone's manifest).
 
@@ -903,7 +903,7 @@ is a new seed: the phone's Data store starts over. The kernel needs AppleH9CamIn
 ```sh
 scripts/setup/get-references.sh         # NativeMetal, NativeAdreno, AdrenoPM4, metal2vulkan, mesa-droidvm, Droid-VM-UniXNU
 rustup toolchain install 1.98.0 && rustup +1.98.0 component add rust-src
-# macOS: brew install ninja glslang shaderc spirv-tools bison llvm; uv pip install --python "$(command -v python3)" meson mako pyyaml
+# macOS: brew install ninja glslang shaderc spirv-tools bison llvm; uv pip install --python "$(command -v python3)" meson mako pyyaml packaging
 scripts/bg.sh metal userland/metal/build.sh
 # -> out/userland/NativeAdrenoMetal.bundle, NativeAdrenoMetal.build.json, NativeAdrenoMetal.check.txt, NativeAdrenoMetal.gpuaddon
 ```

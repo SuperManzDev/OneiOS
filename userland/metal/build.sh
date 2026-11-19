@@ -30,7 +30,7 @@
 # llvm-objcopy, llvm-ar, python3 with mako and yaml; rustup with 1.98.0 and its rust-src
 # (rustup toolchain install 1.98.0 && rustup +1.98.0 component add rust-src).
 # macOS: brew install ninja glslang shaderc spirv-tools bison llvm (LLVM's tools are found in `brew --prefix llvm`/bin,
-# Homebrew's bison is put before /usr/bin's 2.3); uv pip install --python "$(command -v python3)" meson mako pyyaml.
+# Homebrew's bison is put before /usr/bin's 2.3); uv pip install --python "$(command -v python3)" meson mako pyyaml packaging.
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 HERE=$ROOT/userland/metal
