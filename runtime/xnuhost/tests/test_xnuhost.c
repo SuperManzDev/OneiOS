@@ -1993,6 +1993,21 @@ static void test_config(const char *dir)
   char *argv6[] = { "xnuhost", "--image", image, "--set", "wifi=sim" };
   xh_config_defaults(&c);
   CHECK(xh_config_args(&c, 5, argv6) == 0 && xh_config_finish(&c) == 0 && !strcmp(c.wifi, "sim"));
+  // the image set's wifi= and bluetooth= with the fork's command line, which has none (until 2026-11-19 they were read
+  // and dropped); a command line that has one wins
+  f = fopen(path, "w");
+  fputs("# settings of this image\nboot-args=-v debug=0x8\nwifi=sim\nbluetooth=virtual\n", f);
+  fclose(f);
+  char *argv_fork[] = { "xnuhost", "--image", image };
+  xh_config_defaults(&c);
+  CHECK(xh_config_args(&c, 3, argv_fork) == 0 && xh_config_finish(&c) == 0 && !strcmp(c.wifi, "sim") && !strcmp(c.bluetooth, "virtual"));
+  xh_config_defaults(&c);
+  CHECK(xh_config_args(&c, 5, argv5) == 0 && xh_config_finish(&c) == 0 && !strcmp(c.wifi, "off") && !strcmp(c.bluetooth, "virtual"));
+  f = fopen(path, "w");
+  fputs("# settings of this image\nboot-args=-v debug=0x8\n", f);
+  fclose(f);
+  xh_config_defaults(&c);
+  CHECK(xh_config_args(&c, 3, argv_fork) == 0 && xh_config_finish(&c) == 0 && !strcmp(c.wifi, "auto") && !strcmp(c.bluetooth, "auto"));
   char *bad_wifi[] = { "xnuhost", "--image", image, "--set", "wifi=nat" };
   xh_config_defaults(&c);
   CHECK(xh_config_args(&c, 5, bad_wifi) == -1);

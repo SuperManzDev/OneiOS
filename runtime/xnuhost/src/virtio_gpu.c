@@ -15,6 +15,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/eventfd.h>
+#include <sys/syscall.h>
 
 enum {
   CMD_GET_DISPLAY_INFO = 0x100, CMD_RESOURCE_CREATE_2D, CMD_RESOURCE_UNREF, CMD_SET_SCANOUT, CMD_RESOURCE_FLUSH,
@@ -844,10 +845,33 @@ static void *slow_worker(void *arg)
   return NULL;
 }
 
+// The frame path's thread at the top clock while it runs: uclamp.min 1024 on the calling thread (sched_setattr(2),
+// Linux 5.3; KEEP_POLICY and KEEP_PARAMS: SCHED_OTHER and its nice stay, never a realtime policy, CLAUDE.md). This
+// thread pops every command of the queue, runs the render server's (its submissions) and copies each scanout flush
+// (flush_blob, about 1 ms for 1080x2340 at the top clock); the vCPUs carry their own clamps (cpu.c), this thread had
+// none. With One UI's CPU floors left to the governor (the switch's clocks_tops writes cpuinfo_min_freq, not the top,
+// since the S25 Ultra's sessions of 2026-11-19 ran at 93-105 C with the floors pinned), a copy started on a core at a
+// low clock would wait for the governor's ramp; the clamp only counts while the thread runs, so an idle queue costs
+// nothing. Returns 0 or -errno; the caller logs it.
+static int frame_path_clamp(void)
+{
+#if defined(__linux__) && defined(SYS_sched_setattr)
+  struct { uint32_t size, policy; uint64_t flags; int32_t nice; uint32_t priority; uint64_t runtime, deadline, period;
+           uint32_t util_min, util_max; } attr = { .size = 56, .flags = 0x18u | 0x20u, .util_min = 1024 };
+  _Static_assert(sizeof attr == 56, "struct sched_attr, SCHED_ATTR_SIZE_VER1");
+  return syscall(SYS_sched_setattr, 0, &attr, 0) ? -errno : 0;
+#else
+  return -ENOSYS;
+#endif
+}
+
 static void *worker(void *arg)
 {
   gpu_state *g = arg;
   static _Thread_local xh_viov iov[WORKER_IOV];
+  int clamp = frame_path_clamp();
+  if (clamp) LOGI("gpu: the queue's thread (the render server's commands, the scanout copy) keeps the governor's clock: uclamp.min not set (%s)", strerror(-clamp));
+  else LOGI("gpu: the queue's thread (the render server's commands, the scanout copy) at uclamp.min 1024 while it runs");
   for (;;) {
     uint64_t count;
     if (read(g->wake, &count, 8) < 0 && errno != EINTR) break;

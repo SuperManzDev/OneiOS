@@ -412,7 +412,16 @@ once per flush; before, each of the 3120 rows went through a row buffer and sear
 (about 1100 segments of 16 KiB pages for a 1440x3120 frame). On an M4, for that frame: 4.2-10.6 ms before, 2.0-3.3 ms
 after (a stand-alone copy of both loops; not measured on the phone). xnuhost logs the copy every 10 s while frames
 come: `display: 10 s: flushes N, copy mean X us max Y us (Z MiB)`. The fast lane's thread does the copy, so the render server's
-next commands wait behind it. The guest's `oneios-display-report` `done=` of a swap (128-211 ms on the phone,
+next commands wait behind it. On the S25 Ultra (2026-11-19, 1080x2340, the CPU floors pinned at their tops by the
+hand-made switch script then staged): mean 0.7-1.8 ms, max 1.3-20.6 ms per 10 s, up to 1202 flushes in 10 s.
+**The fast lane's thread at uclamp.min 1024** (2026-11-19, `virtio_gpu.c` `frame_path_clamp`): sched_setattr on
+itself when it starts, KEEP_POLICY and KEEP_PARAMS (SCHED_OTHER, its nice; no realtime policy), so the render server's
+submissions and the scanout copy run at the top clock of whichever core they land on, as the vCPU threads already do
+with their own clamps. Why now: the fork's switch leaves One UI's CPU floors to the governor (`cpuinfo_min_freq`),
+and a copy that starts on a core at a low clock would wait for the governor's ramp; the clamp counts only while the
+thread runs. Line: `gpu: the queue's thread (the render server's commands, the scanout copy) at uclamp.min 1024 while
+it runs` (or `... keeps the governor's clock: uclamp.min not set (ERROR)`). The display helper's copy loop has the same
+(`runtime/display/README.md`). Not yet run on the phone. The guest's `oneios-display-report` `done=` of a swap (128-211 ms on the phone,
 2026-11-12) runs from the swap's validation to its transfer: the frame's GPU work, then this flush, each behind
 whatever the device thread is doing (blob creations: 0.8 ms each, up to 45 ms in a storm).
 The guest side is `kernel/patches/oneios-hosted/display/` (its README): iOS's framebuffer hands each of

@@ -22,6 +22,10 @@
 #define BR_THERMAL_POLL_MS 5000u          // how often the sensors are read while someone listens
 #define BR_THERMAL_REPORT_MS 30000u       // a sample is sent at least this often, and at once on a new level
 #define BR_THERMAL_MAX_ZONES 96u
+// The SoC rule reads the lowest of the last BR_THERMAL_SOC_SAMPLES SoC readings (15 s at the 5 s poll): heat that
+// lasts, not one core's spike. The hottest of ~30 junction sensors swings by 20-35 C between two polls under load
+// (the S25 Ultra, 2026-11-19: 68.3 -> 103.8 -> 68.3 C in 10 s), and each swing over a threshold was a new level for iOS.
+#define BR_THERMAL_SOC_SAMPLES 3u
 
 // iOS's thermal pressure levels (OSThermalNotification.h of the iPhoneOS SDK: kOSThermalPressureLevel*).
 enum { BR_THERMAL_NOMINAL = 0, BR_THERMAL_LIGHT = 10, BR_THERMAL_MODERATE = 20, BR_THERMAL_HEAVY = 30, BR_THERMAL_TRAPPING = 40,
@@ -42,6 +46,7 @@ typedef struct {
 
 // Thresholds, tenths of a degree C. skin[k] turns on LIGHT, MODERATE, HEAVY, TRAPPING, SLEEPING for k = 0..4;
 // soc[k] and battery[k] turn on HEAVY and TRAPPING. A level stays until its reading is `*_hyst` below its threshold.
+// The SoC's two are raised to the phone's own trips where the kernel has them (br_thermal_limits_from_trips).
 typedef struct {
   int32_t skin[5], skin_hyst;
   int32_t soc[2], soc_hyst;
@@ -54,13 +59,24 @@ typedef struct {
   unsigned skin_level, soc_level, battery_level;      // each rule's own level (its hysteresis follows it)
   unsigned cap;                           // xnuhost's step: br_thermal_cap_for (0, or BR_THERMAL_CAP_CRITICAL)
   br_thermal_raw raw;
+  int32_t soc_seen[BR_THERMAL_SOC_SAMPLES];           // the last SoC readings that were not missing, newest first
+  unsigned soc_n;                                     // how many of soc_seen are filled
+  int32_t soc_held;                       // the lowest of soc_seen, what the SoC rule read (BR_THERMAL_UNKNOWN: no reading yet)
 } br_thermal_state;
 
 // ---- pure ---------------------------------------------------------------------------------------
 void br_thermal_limits_default(br_thermal_limits *l);
 // "390,420,440,460,500" into l->skin (and the same for soc, battery with two values). 0, or -1 (l unchanged).
 int br_thermal_limits_parse(const char *text, int32_t *out, unsigned count);
-// The next state from a reading and the previous state (NULL: nothing before).
+// The SoC rule on the phone's own trips (tenths of a degree C, BR_THERMAL_UNKNOWN when the kernel has none): HEAVY 10 C
+// over the kernel's first passive trip (the kernel throttles from there: a SoC at its first trip is the kernel doing its
+// job, not heat for iOS), TRAPPING 5 C under the hot trip (or 15 C over the first passive one without a hot trip); never
+// lower than what l has. The S25 Ultra (SM8750, 2026-11-19): first passive 105 C, hot 125 C, so 115 and 120 C, where the
+// S24's 95 and 105 C had iOS in TRAPPING (its "too hot" screen) at every throttle. Returns whether l->soc changed.
+bool br_thermal_limits_from_trips(br_thermal_limits *l, int32_t first_passive, int32_t hot);
+// The next state from a reading and the previous state (NULL: nothing before). The SoC rule reads soc_held, the lowest
+// of the last BR_THERMAL_SOC_SAMPLES SoC readings (prev's and this one): it rises only on heat that lasts that long,
+// and falls at the first reading below its hysteresis.
 void br_thermal_decide(const br_thermal_limits *l, const br_thermal_raw *raw, const br_thermal_state *prev, br_thermal_state *out);
 // xnuhost's step (since fix-ram-locked, 2026-11-15): 0, all CPU cores, unless the temperature is critical: the case rule
 // at SLEEPING (50 C) or the battery rule at TRAPPING (50 C); then BR_THERMAL_CAP_CRITICAL, only the slowest P domain and
@@ -83,10 +99,16 @@ typedef struct {
   char root[128];                         // "" on the phone; a fixture's directory in tests (prefixed to every path)
   br_thermal_zone zone[BR_THERMAL_MAX_ZONES];
   unsigned nzone;
+  // The kernel's trips of the SoC zones (cpu, gpu, ddr), tenths of a degree C, BR_THERMAL_UNKNOWN when none: the median
+  // over the zones of each one's lowest passive trip from 60 to 129.9 C (Qualcomm's 135 C passive trips are
+  // placeholders) and of its lowest hot or critical trip from 60 to 149.9 C. Read once by br_thermal_find.
+  int32_t trip_first, trip_hot;
+  unsigned trip_zones;                    // how many zones had a passive trip in that range
 } br_thermal_sensors;
 
-// Finds the zones of interest under root/sys/class/thermal (cpu-*, cpuss-*, gpuss-*, ddr, xo-therm). 0, or -1 when no
-// sensor of any kind can be read (no zone, no thermistor, no battery temperature).
+// Finds the zones of interest under root/sys/class/thermal (cpu-*, cpuss-*, gpuss-*, ddr, xo-therm) and the SoC zones'
+// trips (trip_point_N_type, trip_point_N_temp; read only). 0, or -1 when no sensor of any kind can be read (no zone,
+// no thermistor, no battery temperature).
 int br_thermal_find(const char *root, br_thermal_sensors *s);
 void br_thermal_read(const br_thermal_sensors *s, br_thermal_raw *raw);
 // The treble backend (hw-backend-thermal): the thermal HAL's temperatures (hal/hal.h) as a reading: cpu, gpu the hottest of

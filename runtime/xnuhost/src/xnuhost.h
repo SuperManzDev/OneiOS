@@ -131,6 +131,8 @@ typedef struct {
   char  wifi[8];            // "auto" (the phone's wlan0 for iOS's en0 when the bridges are on), "off" (no network
                             // device), "tap" (the old route: a tap and bin/oneios-net.sh's NAT), "sim" (a made-up
                             // radio with two networks, for a boot with no phone; works with the bridges off)
+  bool  wifi_given, bluetooth_given; // wifi= / bluetooth= was set here: the command line wins over the image set's
+                            // xnuhost.conf, which is used when the command line has none (as ram_given)
   br_hw_settings hw;        // hw-backend=samsung|treble, hw-backend-<bridge>=..., hw-backend-fallback=0|1: which form of the
                             // phone's hardware each bridge uses (bridges/hw_backend.h; docs/hardware.md, "Hardware backends")
 } xh_config;

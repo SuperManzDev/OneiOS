@@ -81,7 +81,13 @@ NDK's `ANativeWindow` on that `Surface`, from the mapped memfd straight into the
   gives no `BGRA_8888` buffer the helper falls back to `R,G,B,X` and swaps while it copies; with no `RGBA_FP16` one
   it falls back to `BGRA_8888` and encodes the half floats to sRGB, clamped (what is outside sRGB is lost). Pacing is
   the buffer queue's: the next buffer is handed out when surfaceflinger has taken the last, so the loop runs at the
-  panel's vsync and every flush that came meanwhile is one post.
+  panel's vsync and every flush that came meanwhile is one post. **The copy loop's thread runs at uclamp.min 1024**
+  (2026-11-19, `jni.c` `copy_loop_clamp`: sched_setattr on itself before the loop, KEEP_POLICY and KEEP_PARAMS, so
+  SCHED_OTHER and its nice stay; no realtime thread): the phone's CPU floors are the governor's in a session (the
+  fork's switch writes `cpuinfo_min_freq`), and the copy (about 1 ms for 1080x2340 at the top clock) must not wait for
+  its ramp; the clamp counts only while the thread runs, not while it polls. Line: `oneios-display: the copy loop at
+  uclamp.min 1024 while it runs` (or `... keeps the governor's clock: uclamp.min not set (ERROR)`). Host tests: 133
+  and 10 checks, 0 failed (the clamp is set or refused on the host; nothing checks the clock). Not yet run on the phone.
 - **The first post waits for `session/ready` (since 2026-11-15).** With `--session DIR` the helper posts nothing
   until `DIR/ready` exists (`xhd_hold_first`): xnuhost makes it at the guest's first frame of its own that is not
   all black, or `ready-content-wait` seconds (120) after its first black one (`docs/booter.md` 2.8, "the ready

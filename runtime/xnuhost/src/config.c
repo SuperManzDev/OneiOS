@@ -158,8 +158,8 @@ int xh_config_set(xh_config *c, const char *key, const char *value)
   else if (!strcmp(key, "encoder")) { ok = !strcmp(value, "auto") || !strcmp(value, "off"); if (ok) strcpy(c->encoder, value); }
   else if (!strcmp(key, "bridges")) { bool on; if (flag(value, &on)) return -1; c->bridges = on; }
   else if (!strcmp(key, "clusters")) { ok = strlen(value) <= XH_MAX_CPUS && strspn(value, "EP") == strlen(value); if (ok) strcpy(c->clusters, value); }
-  else if (!strcmp(key, "wifi")) { ok = !strcmp(value, "auto") || !strcmp(value, "off") || !strcmp(value, "tap") || !strcmp(value, "sim"); if (ok) strcpy(c->wifi, value); }
-  else if (!strcmp(key, "bluetooth")) { ok = !strcmp(value, "auto") || !strcmp(value, "virtual") || !strcmp(value, "hidl") || !strcmp(value, "sim"); if (ok) strcpy(c->bluetooth, value); }
+  else if (!strcmp(key, "wifi")) { ok = !strcmp(value, "auto") || !strcmp(value, "off") || !strcmp(value, "tap") || !strcmp(value, "sim"); if (ok) { strcpy(c->wifi, value); c->wifi_given = true; } }
+  else if (!strcmp(key, "bluetooth")) { ok = !strcmp(value, "auto") || !strcmp(value, "virtual") || !strcmp(value, "hidl") || !strcmp(value, "sim"); if (ok) { strcpy(c->bluetooth, value); c->bluetooth_given = true; } }
   else if (!strcmp(key, "haptics")) { ok = !strcmp(value, "auto") || !strcmp(value, "off") || !strcmp(value, "sim"); if (ok) strcpy(c->haptics, value); }
   else if (!strcmp(key, "haptics-native-impacts")) {
     bool enabled;
@@ -393,6 +393,11 @@ int xh_config_finish(xh_config *c)
   }
   // The guest's RAM: the command line's ram=, else the image set's, else auto.
   if (!c->ram_given && from_image.ram_given) c->ram_bytes = from_image.ram_bytes;
+  // wifi= and bluetooth= the same way: the command line's, else the image set's, else auto. (Until 2026-11-19 the
+  // image set's were parsed and dropped: the defaults' "auto" was already in place, so a session started with the
+  // fork's fixed command line could not be given wifi=sim or bluetooth= by its image set, as docs/booter.md says.)
+  if (!c->wifi_given && from_image.wifi_given) strcpy(c->wifi, from_image.wifi);
+  if (!c->bluetooth_given && from_image.bluetooth_given) strcpy(c->bluetooth, from_image.bluetooth);
   if (c->ram_percent < 0) c->ram_percent = from_image.ram_percent < 0 ? XH_RAM_AUTO_PERCENT : from_image.ram_percent;
   if (c->ram_host_floor < 0) c->ram_host_floor = from_image.ram_host_floor < 0 ? (int64_t)XH_RAM_AUTO_FLOOR : from_image.ram_host_floor;
   if (c->host_mem_log < 0) c->host_mem_log = from_image.host_mem_log < 0 ? 30 : from_image.host_mem_log;

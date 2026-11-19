@@ -31,6 +31,7 @@ void br_thermal_limits_default(br_thermal_limits *l)
   // The SoC: the X4's first trip is 90 C (cpufreq-cpu7), the GPU's 95 C, the cores pause at 108-110 C (the phone's
   // thermal zones). HEAVY at 95 C, TRAPPING at 105 C: the kernel acts first, iOS is told. Not lower: a boot's first minute
   // reaches 94.6 C on the cores for some seconds (the phone, 2026-11-12), and a step then would only slow the boot.
+  // These are the floor: br_thermal_open raises them to the phone's own trips (br_thermal_limits_from_trips).
   l->soc[0] = 950; l->soc[1] = 1050; l->soc_hyst = 50;
   // The cell: charging stops near 50 C on Samsung phones [inference]; HEAVY at 45 C, TRAPPING at 50 C.
   l->battery[0] = 450; l->battery[1] = 500; l->battery_hyst = 20;
@@ -58,6 +59,20 @@ int br_thermal_limits_parse(const char *text, int32_t *out, unsigned count)
   return 0;
 }
 
+bool br_thermal_limits_from_trips(br_thermal_limits *l, int32_t first_passive, int32_t hot)
+{
+  if (first_passive == BR_THERMAL_UNKNOWN) return false;
+  int32_t heavy = first_passive + 100;
+  int32_t trapping = hot != BR_THERMAL_UNKNOWN && hot - 50 > heavy ? hot - 50 : first_passive + 150;
+  if (heavy < l->soc[0]) heavy = l->soc[0];
+  if (trapping < l->soc[1]) trapping = l->soc[1];
+  if (trapping <= heavy) trapping = heavy + 50;             // ascending, or the hysteresis has no meaning
+  bool changed = heavy != l->soc[0] || trapping != l->soc[1];
+  l->soc[0] = heavy;
+  l->soc[1] = trapping;
+  return changed;
+}
+
 // The level of one rule: the highest whose threshold the value reaches; a level at or below the previous one is
 // kept down to `hyst` below its threshold. A missing reading keeps the previous level.
 static unsigned rule(int32_t value, const int32_t *on, const unsigned *levels, unsigned n, unsigned prev, int32_t hyst)
@@ -76,8 +91,16 @@ void br_thermal_decide(const br_thermal_limits *l, const br_thermal_raw *raw, co
   br_thermal_state s;
   memset(&s, 0, sizeof s);
   s.raw = *raw;
+  // The SoC's last readings, newest first; a missing reading keeps the window (and, below, the rule's level).
+  if (raw->soc != BR_THERMAL_UNKNOWN) s.soc_seen[s.soc_n++] = raw->soc;
+  for (unsigned k = 0; prev && k < prev->soc_n && k < BR_THERMAL_SOC_SAMPLES && s.soc_n < BR_THERMAL_SOC_SAMPLES; k++)
+    s.soc_seen[s.soc_n++] = prev->soc_seen[k];
+  s.soc_held = BR_THERMAL_UNKNOWN;
+  for (unsigned k = 0; k < s.soc_n; k++)
+    if (s.soc_held == BR_THERMAL_UNKNOWN || s.soc_seen[k] < s.soc_held) s.soc_held = s.soc_seen[k];
   s.skin_level = rule(raw->skin, l->skin, skin_levels, 5, prev ? prev->skin_level : 0, l->skin_hyst);
-  s.soc_level = rule(raw->soc, l->soc, two_levels, 2, prev ? prev->soc_level : 0, l->soc_hyst);
+  s.soc_level = rule(raw->soc == BR_THERMAL_UNKNOWN ? BR_THERMAL_UNKNOWN : s.soc_held, l->soc, two_levels, 2,
+                     prev ? prev->soc_level : 0, l->soc_hyst);
   s.battery_level = rule(raw->battery, l->battery, two_levels, 2, prev ? prev->battery_level : 0, l->battery_hyst);
   s.level = s.skin_level;
   if (s.soc_level > s.level) s.level = s.soc_level;
@@ -175,12 +198,45 @@ static int group_of(const char *type)
   return -1;
 }
 
+// One zone's lowest passive trip from 60 to 129.9 C and its lowest hot or critical trip from 60 to 149.9 C, tenths of a
+// degree (BR_THERMAL_UNKNOWN: none). Qualcomm's zones carry a 135 C passive trip that is a placeholder (on every CPU and
+// GPU zone of the S25 Ultra, beside the real ones at 105, 118, 120 and the hot one at 125 C), hence the range.
+static void zone_trips(const char *zone_dir, int32_t *passive, int32_t *hot)
+{
+  *passive = *hot = BR_THERMAL_UNKNOWN;
+  for (unsigned i = 0; i < 16; i++) {
+    char path[400], type[24];
+    long long v;
+    snprintf(path, sizeof path, "%.360s/trip_point_%u_type", zone_dir, i);
+    if (!read_line(path, type, sizeof type)) break;          // the kernel numbers its trips from 0 without gaps
+    snprintf(path, sizeof path, "%.360s/trip_point_%u_temp", zone_dir, i);
+    if (!read_int(path, &v)) continue;
+    int32_t deci = (int32_t)(v / 100);
+    if (!strcmp(type, "passive") && v >= 60000 && v < 130000) {
+      if (*passive == BR_THERMAL_UNKNOWN || deci < *passive) *passive = deci;
+    } else if ((!strcmp(type, "hot") || !strcmp(type, "critical")) && v >= 60000 && v < 150000) {
+      if (*hot == BR_THERMAL_UNKNOWN || deci < *hot) *hot = deci;
+    }
+  }
+}
+
+// The median of n values (the lower of the two middle ones for an even n); BR_THERMAL_UNKNOWN for none. Sorts v.
+static int32_t median(int32_t *v, unsigned n)
+{
+  if (!n) return BR_THERMAL_UNKNOWN;
+  for (unsigned i = 1; i < n; i++)
+    for (unsigned j = i; j > 0 && v[j - 1] > v[j]; j--) { int32_t x = v[j]; v[j] = v[j - 1]; v[j - 1] = x; }
+  return v[(n - 1) / 2];
+}
+
 int br_thermal_find(const char *root, br_thermal_sensors *s)
 {
   memset(s, 0, sizeof *s);
   snprintf(s->root, sizeof s->root, "%.*s", (int)sizeof s->root - 1, root ? root : "");
   char dir[200];
   snprintf(dir, sizeof dir, "%s/sys/class/thermal", s->root);
+  int32_t passive[BR_THERMAL_MAX_ZONES], hot[BR_THERMAL_MAX_ZONES];
+  unsigned npassive = 0, nhot = 0;
   DIR *d = opendir(dir);
   if (d) {
     struct dirent *e;
@@ -196,9 +252,19 @@ int br_thermal_find(const char *root, br_thermal_sensors *s)
       snprintf(z->type, sizeof z->type, "%.*s", (int)sizeof z->type - 1, type);
       z->group = (uint8_t)g;
       s->nzone++;
+      if (g <= 2) {                             // the SoC's zones: cpu, gpu, ddr
+        int32_t p, h;
+        snprintf(path, sizeof path, "%s/%.40s", dir, e->d_name);
+        zone_trips(path, &p, &h);
+        if (p != BR_THERMAL_UNKNOWN) passive[npassive++] = p;
+        if (h != BR_THERMAL_UNKNOWN) hot[nhot++] = h;
+      }
     }
     closedir(d);
   }
+  s->trip_first = median(passive, npassive);
+  s->trip_hot = median(hot, nhot);
+  s->trip_zones = npassive;
   br_thermal_raw raw;
   br_thermal_read(s, &raw);
   bool any = raw.soc != BR_THERMAL_UNKNOWN || raw.ap != BR_THERMAL_UNKNOWN || raw.battery != BR_THERMAL_UNKNOWN || raw.lrp != BR_THERMAL_UNKNOWN;
@@ -446,13 +512,15 @@ static void deci_text(char *out, size_t size, int32_t v)
 
 static void say_level(const br_thermal_state *s, const br_thermal_state *was)
 {
-  char skin[16], soc[16], battery[16];
+  char skin[16], soc[16], held[16], battery[16];
   deci_text(skin, sizeof skin, s->raw.skin);
   deci_text(soc, sizeof soc, s->raw.soc);
+  deci_text(held, sizeof held, s->soc_held);
   deci_text(battery, sizeof battery, s->raw.battery);
-  br_log(1, "thermal: %s (was %s; by%s%s%s): case %s, SoC %s (%s), battery %s", br_thermal_level_name(s->level), br_thermal_level_name(was->level),
+  br_log(1, "thermal: %s (was %s; by%s%s%s): case %s, SoC %s (%s; %s for %u s), battery %s", br_thermal_level_name(s->level),
+         br_thermal_level_name(was->level),
          s->reason & BR_THERMAL_BY_SKIN ? " case" : "", s->reason & BR_THERMAL_BY_SOC ? " SoC" : "", s->reason & BR_THERMAL_BY_BATTERY ? " battery" : "",
-         skin, soc, s->raw.soc_zone[0] ? s->raw.soc_zone : "-", battery);
+         skin, soc, s->raw.soc_zone[0] ? s->raw.soc_zone : "-", held, BR_THERMAL_SOC_SAMPLES * BR_THERMAL_POLL_MS / 1000u, battery);
 }
 
 // With the lock held.
@@ -520,6 +588,7 @@ br_thermal *br_thermal_open(const br_thermal_options *options)
 {
   br_thermal *t = calloc(1, sizeof *t);
   if (!t) return NULL;
+  t->sensors.trip_first = t->sensors.trip_hot = BR_THERMAL_UNKNOWN;     // the HAL backend reads no trips
   if (br_hw_select(BR_HW_THERMAL, options ? options->backend : BR_HW_UNSET) == BR_HW_TREBLE) {
     char why[256];
     br_thermal_raw first;
@@ -538,8 +607,15 @@ br_thermal *br_thermal_open(const br_thermal_options *options)
     free(t);
     return NULL;
   }
+  // The limits: the caller's; else the defaults, the SoC's raised to the phone's own trips (the files backend: the HAL
+  // has no trips here), then the environment's, which win.
+  bool from_trips = false;
   if (options && options->limits) t->limits = *options->limits;
-  else { br_thermal_limits_default(&t->limits); if (!options) limits_from_env(&t->limits); }
+  else {
+    br_thermal_limits_default(&t->limits);
+    if (!t->hal) from_trips = br_thermal_limits_from_trips(&t->limits, t->sensors.trip_first, t->sensors.trip_hot);
+    if (!options) limits_from_env(&t->limits);
+  }
   const char *cap = options ? NULL : getenv("ONEIOS_THERMAL_CAP");
   t->cap_off = cap && !strcmp(cap, "0");
   t->poll_ms = options && options->poll_ms ? options->poll_ms : BR_THERMAL_POLL_MS;
@@ -576,6 +652,14 @@ br_thermal *br_thermal_open(const br_thermal_options *options)
   else br_log(1, "thermal: on: %u zones; case %s (%s), SoC %s (%s), battery %s; %s; read every %u ms%s", t->sensors.nzone, skin,
          raw.lrp != BR_THERMAL_UNKNOWN ? "lrp" : "ap thermistor", soc, raw.soc_zone[0] ? raw.soc_zone : "-", battery,
          br_thermal_level_name(t->now.level), t->poll_ms, t->cap_off ? "; ONEIOS_THERMAL_CAP=0: xnuhost does not hold itself back" : "");
+  char first[16], hot[16], heavy[16], trapping[16];
+  deci_text(first, sizeof first, t->sensors.trip_first);
+  deci_text(hot, sizeof hot, t->sensors.trip_hot);
+  deci_text(heavy, sizeof heavy, t->limits.soc[0]);
+  deci_text(trapping, sizeof trapping, t->limits.soc[1]);
+  br_log(1, "thermal: the SoC rule: heavy from %s, trapping from %s, on the lowest of the last %u readings (%u s)%s; the kernel's "
+         "trips: first passive %s, hot %s (the median of %u SoC zones)", heavy, trapping, BR_THERMAL_SOC_SAMPLES,
+         BR_THERMAL_SOC_SAMPLES * t->poll_ms / 1000u, from_trips ? ", raised to the kernel's trips" : "", first, hot, t->sensors.trip_zones);
   return t;
 }
 

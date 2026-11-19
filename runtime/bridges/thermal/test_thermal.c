@@ -42,6 +42,18 @@ static void zone(unsigned n, const char *type, long milli)
   put(rel, text);
 }
 
+// trip_point_<i>_temp and _type of zone n
+static void trip(unsigned n, unsigned i, long milli, const char *type)
+{
+  char rel[128], text[32];
+  snprintf(rel, sizeof rel, "/sys/class/thermal/thermal_zone%u/trip_point_%u_temp", n, i);
+  snprintf(text, sizeof text, "%ld\n", milli);
+  put(rel, text);
+  snprintf(rel, sizeof rel, "/sys/class/thermal/thermal_zone%u/trip_point_%u_type", n, i);
+  snprintf(text, sizeof text, "%s\n", type);
+  put(rel, text);
+}
+
 static br_thermal_raw raw_with(int32_t skin, int32_t soc, int32_t battery)
 {
   br_thermal_raw r;
@@ -89,23 +101,39 @@ static void test_rules(void)
   r = raw_with(439, 500, 300);
   br_thermal_decide(&l, &r, &s, &prev);
   CHECK(prev.level == BR_THERMAL_MODERATE);
-  // the SoC rule alone
-  r = raw_with(350, 955, 300);
-  br_thermal_decide(&l, &r, &prev, &s);
-  CHECK(s.level == BR_THERMAL_HEAVY && s.reason == BR_THERMAL_BY_SOC && s.skin_level == BR_THERMAL_NOMINAL);
+  // the SoC rule alone, on the lowest of its last BR_THERMAL_SOC_SAMPLES (3) readings: one core's spike to 105.5 C is
+  // nothing for iOS (the readings before it were 50 C), the third reading in a row over the threshold is
   r = raw_with(350, 1055, 300);
+  br_thermal_decide(&l, &r, &prev, &s);
+  CHECK(s.level == BR_THERMAL_NOMINAL && s.soc_level == BR_THERMAL_NOMINAL && s.soc_held == 500 && s.soc_n == 3);
   br_thermal_decide(&l, &r, &s, &prev);
-  CHECK(prev.level == BR_THERMAL_TRAPPING && prev.cap == 0);           // the SoC at 105 C: the kernel's own trips, no step
+  CHECK(prev.level == BR_THERMAL_NOMINAL && prev.soc_held == 500);
+  br_thermal_decide(&l, &r, &prev, &s);
+  CHECK(s.level == BR_THERMAL_TRAPPING && s.reason == BR_THERMAL_BY_SOC && s.soc_held == 1055 && s.cap == 0);   // 15 s at 105 C: the kernel's own trips, no step
   r = raw_with(350, 1010, 300);
-  br_thermal_decide(&l, &r, &prev, &s);
-  CHECK(s.level == BR_THERMAL_TRAPPING);                   // held to 100 C
-  r = raw_with(350, 990, 300);
   br_thermal_decide(&l, &r, &s, &prev);
-  CHECK(prev.level == BR_THERMAL_HEAVY);                   // below 100, above 90
-  // two rules at one level: both named
-  r = raw_with(445, 950, 300);
+  CHECK(prev.level == BR_THERMAL_TRAPPING && prev.soc_held == 1010);  // held to 100 C
+  r = raw_with(350, 990, 300);
   br_thermal_decide(&l, &r, &prev, &s);
-  CHECK(s.level == BR_THERMAL_HEAVY && s.reason == (BR_THERMAL_BY_SKIN | BR_THERMAL_BY_SOC));
+  CHECK(s.level == BR_THERMAL_HEAVY);                      // below 100, above 90
+  // falling needs one reading: 70 C ends HEAVY at once, and rising again needs three readings over 95 C
+  r = raw_with(350, 700, 300);
+  br_thermal_decide(&l, &r, &s, &prev);
+  CHECK(prev.level == BR_THERMAL_NOMINAL && prev.soc_held == 700);
+  r = raw_with(350, 960, 300);
+  br_thermal_decide(&l, &r, &prev, &s);
+  br_thermal_decide(&l, &r, &s, &prev);
+  CHECK(prev.level == BR_THERMAL_NOMINAL && prev.soc_held == 700);
+  br_thermal_decide(&l, &r, &prev, &s);
+  CHECK(s.level == BR_THERMAL_HEAVY && s.reason == BR_THERMAL_BY_SOC && s.skin_level == BR_THERMAL_NOMINAL && s.soc_held == 960);
+  // a missing SoC reading keeps its window and its level
+  r = raw_with(350, BR_THERMAL_UNKNOWN, 300);
+  br_thermal_decide(&l, &r, &s, &prev);
+  CHECK(prev.soc_level == BR_THERMAL_HEAVY && prev.soc_n == 3 && prev.soc_seen[0] == 960 && prev.soc_held == 960);
+  // two rules at one level: both named
+  r = raw_with(445, 955, 300);
+  br_thermal_decide(&l, &r, &prev, &s);
+  CHECK(s.level == BR_THERMAL_HEAVY && s.reason == (BR_THERMAL_BY_SKIN | BR_THERMAL_BY_SOC) && s.soc_held == 955);
   // the battery
   r = raw_with(350, 500, 505);
   br_thermal_decide(&l, &r, NULL, &s);
@@ -129,9 +157,9 @@ static void test_rules(void)
   r = raw_with(485, 500, 300);
   br_thermal_decide(&l, &r, &s, &prev);
   CHECK(prev.level == BR_THERMAL_SLEEPING && prev.cap == BR_THERMAL_CAP_CRITICAL);   // held to 48 C
-  r = raw_with(475, 1060, 300);                                                // the case at 47.5 C, the SoC at 106 C
+  r = raw_with(475, 1060, 300);                                                // the case at 47.5 C, the SoC at 106 C once
   br_thermal_decide(&l, &r, &prev, &s);
-  CHECK(s.level == BR_THERMAL_TRAPPING && s.cap == 0);                         // all cores: the SoC is the kernel's
+  CHECK(s.level == BR_THERMAL_TRAPPING && s.reason == BR_THERMAL_BY_SKIN && s.cap == 0);   // all cores: the SoC is the kernel's
   br_thermal_state at = { 0 };
   at.skin_level = BR_THERMAL_TRAPPING; at.soc_level = BR_THERMAL_TRAPPING; at.battery_level = BR_THERMAL_HEAVY;
   CHECK(br_thermal_cap_for(&at) == 0);
@@ -146,6 +174,54 @@ static void test_rules(void)
   CHECK(br_thermal_changed(&a, &b, BR_THERMAL_REPORT_MS));
   b.level = BR_THERMAL_HEAVY;
   CHECK(br_thermal_changed(&a, &b, 0));
+}
+
+static void test_trips(void)
+{
+  br_thermal_limits l;
+  // the S25 Ultra (SM8750, 2026-11-19): the kernel's first passive trip 105 C, hot 125 C: HEAVY 115, TRAPPING 120 C
+  br_thermal_limits_default(&l);
+  CHECK(br_thermal_limits_from_trips(&l, 1050, 1250) && l.soc[0] == 1150 && l.soc[1] == 1200 && l.soc_hyst == 50);
+  // no trips: the defaults stay
+  br_thermal_limits_default(&l);
+  CHECK(!br_thermal_limits_from_trips(&l, BR_THERMAL_UNKNOWN, 1250) && l.soc[0] == 950 && l.soc[1] == 1050);
+  // never lower than what was there: a first trip at 80 C keeps 95 and 105 C
+  CHECK(!br_thermal_limits_from_trips(&l, 800, BR_THERMAL_UNKNOWN) && l.soc[0] == 950 && l.soc[1] == 1050);
+  // no hot trip: TRAPPING 15 C over the first passive one
+  br_thermal_limits_default(&l);
+  CHECK(br_thermal_limits_from_trips(&l, 1000, BR_THERMAL_UNKNOWN) && l.soc[0] == 1100 && l.soc[1] == 1150);
+  // a hot trip too close to the first passive one: 15 C over the first passive one, still above HEAVY
+  br_thermal_limits_default(&l);
+  CHECK(br_thermal_limits_from_trips(&l, 1050, 1100) && l.soc[0] == 1150 && l.soc[1] == 1200);
+  // The S25 Ultra's session of 2026-11-19 10:30 (logs/pa3q-s2: the SoC readings of its thermal lines, in order, the CPU
+  // floors pinned at their tops, the case at 37-46 C): with the S24's 95/105 C and one reading the level changed 20 times
+  // in 8 minutes, 5 of them into TRAPPING (iOS's "too hot" screen); on the phone's trips the SoC rule stays NOMINAL.
+  static const int32_t s2[] = { 915, 1019, 1035, 1042, 1050, 1054, 1046, 872, 795, 977, 892, 861, 923, 776, 1035, 791, 1038,
+                                683, 1038, 1042, 1054, 961, 795, 1038, 1035, 1050, 977, 1035, 1038, 1054, 961, 1054, 1042 };
+  br_thermal_limits_default(&l);
+  br_thermal_limits_from_trips(&l, 1050, 1250);
+  br_thermal_state s, prev;
+  unsigned changes = 0;
+  for (unsigned i = 0; i < sizeof s2 / sizeof s2[0]; i++) {
+    br_thermal_raw r = raw_with(400, s2[i], 320);
+    br_thermal_decide(&l, &r, i ? &prev : NULL, &s);
+    changes += i && s.soc_level != prev.soc_level;
+    CHECK(s.soc_level == BR_THERMAL_NOMINAL && s.cap == 0);
+    prev = s;
+  }
+  CHECK(changes == 0);
+  // with the S24's limits the window alone already holds the spikes back: fewer changes than readings over 95 C
+  br_thermal_limits_default(&l);
+  unsigned over = 0;
+  changes = 0;
+  for (unsigned i = 0; i < sizeof s2 / sizeof s2[0]; i++) {
+    br_thermal_raw r = raw_with(400, s2[i], 320);
+    br_thermal_decide(&l, &r, i ? &prev : NULL, &s);
+    changes += i && s.soc_level != prev.soc_level;
+    over += s2[i] >= 950;
+    prev = s;
+  }
+  CHECK(changes < over / 2);
 }
 
 // The S24 Ultra: cpu0-1 A520 (policy0, 2.27 GHz), cpu2-4 A720 (policy2, 3.15), cpu5-6 A720 (policy5, 2.96), cpu7 X4 (policy7, 3.40).
@@ -226,9 +302,17 @@ static void test_sysfs(void)
   zone(9, "cpu-hw-trip-1", 105000);
   put("/sys/class/sec/sec-ap-thermistor/temperature", "362\n");
   put("/sys/class/power_supply/battery/temp", "331\n");
+  // The S25 Ultra's trips: a CPU zone (135 C placeholder, 105, 118, 125 hot), a cluster with the hot trip only, the GPU
+  // (105, 125 hot), the DDR (100, 125 hot); the crystal's trips are not the SoC's.
+  trip(1, 0, 135000, "passive"); trip(1, 1, 105000, "passive"); trip(1, 2, 118000, "passive"); trip(1, 3, 125000, "hot");
+  trip(2, 0, 135000, "passive"); trip(2, 1, 125000, "hot");
+  trip(3, 0, 135000, "passive"); trip(3, 1, 105000, "passive"); trip(3, 2, 125000, "hot");
+  trip(4, 0, 100000, "passive"); trip(4, 1, 125000, "hot");
+  trip(5, 0, 70000, "passive");
   br_thermal_sensors s;
   CHECK(br_thermal_find(base, &s) == 0);
   CHECK(s.nzone == 6);                     // the two hardware trips are excluded
+  CHECK(s.trip_first == 1050 && s.trip_hot == 1250 && s.trip_zones == 3);       // the median of 105, 105, 100 C
   for (unsigned i = 0; i < s.nzone; i++)
     CHECK(strncmp(s.zone[i].type, "cpu-hw-trip-", sizeof("cpu-hw-trip-") - 1) != 0);
   br_thermal_raw r;
@@ -440,6 +524,7 @@ int main(void)
   if (mkdir(base, 0755) && errno != EEXIST) { perror(base); return 1; }
   test_parse();
   test_rules();
+  test_trips();
   test_masks();
   test_sysfs();
   test_worker();

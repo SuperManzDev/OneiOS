@@ -76,12 +76,40 @@ until its reading falls a hysteresis below the threshold.
 | Rule | light | moderate | heavy | trapping | sleeping | hysteresis | Override (degrees C) |
 |---|---|---|---|---|---|---|---|
 | case (lrp) | 39 | 42 | 44 | 46 | 50 | 2 | `ONEIOS_THERMAL_SKIN=39,42,44,46,50` |
-| SoC | | | 95 | 105 | | 5 | `ONEIOS_THERMAL_SOC=95,105` |
+| SoC (sustained: the lowest of the last 3 readings, 15 s) | | | 95, raised to the kernel's first passive trip + 10 | 105, raised to its hot trip - 5 | | 5 | `ONEIOS_THERMAL_SOC=95,105` |
 | battery | | | 45 | 50 | | 2 | `ONEIOS_THERMAL_BATTERY=45,50` |
 
 The case thresholds are a guess on Samsung's scale above, not Samsung's own policy (that lived in system_server and is
 not readable). Apple's meaning of the names [F, `ProcessInfo.ThermalState` documentation]: serious (heavy here) is
 "the system reduces performance", critical (trapping and above) is "the device needs to cool down".
+
+### The SoC rule on the phone's own trips, on heat that lasts (2026-11-19, the S25 Ultra)
+
+The SoC rule's 95 and 105 C were written for the S24 Ultra (SM8650), whose kernel throttles the X4 from 90 C. On the
+S25 Ultra (SM8750, pa3q) the kernel's **first passive trip is 105 C** (24 of its 25 CPU, GPU and DDR zones: `105000
+passive`, then 118 and 120 passive and **125 hot**; DDR 100; each also has a 135 C passive trip that is a placeholder),
+so a SoC at 105 C is the kernel starting to do its job, and the rule told iOS TRAPPING there, iOS's "too hot" screen.
+In the phone's session of 2026-11-19 10:30 (`logs/pa3q-s2`, the CPU floors pinned at their tops by the hand-made
+switch script then staged) the level changed **20 times in 8 minutes, 5 of them into TRAPPING**, on one reading each
+of the hottest of about 30 junction sensors, which swings by 20-35 C between two polls (68.3 -> 103.8 -> 68.3 C), while
+the case read 37-46 C; the owner saw the "too hot" screen come and go for a few seconds at a time. Two changes:
+
+- **The phone's trips** (`br_thermal_limits_from_trips`): `br_thermal_find` reads `trip_point_N_type` and `_temp` of
+  the SoC zones (cpu, gpu, ddr; read only) and takes the median over the zones of each one's lowest passive trip from
+  60 to 129.9 C and of its lowest hot or critical trip from 60 to 149.9 C. HEAVY is 10 C over the first passive trip,
+  TRAPPING 5 C under the hot one (15 C over the first passive one when there is no hot trip, or it is too close), never
+  lower than the defaults: 115 and 120 C on the S25 Ultra. An S24 with its first passive trip at 90 C would get 100 C
+  and 105 C [not read on an S24: its trips are not in these notes]. The environment's `ONEIOS_THERMAL_SOC` still wins.
+- **Heat that lasts** (`BR_THERMAL_SOC_SAMPLES`): the SoC rule reads the lowest of the last 3 SoC readings (15 s at
+  the 5 s poll), `soc_held`: it rises only when all three are over a threshold and falls at the first reading under
+  its hysteresis. A missing reading keeps the window and the level. The case and battery rules are as before (their
+  sensors move slowly).
+
+Replayed on the session's SoC readings (`test_trips`), the rule on the S25 Ultra's trips stays nominal throughout; with
+the S24's limits the window alone changes the level less than half as often as there are readings over 95 C. Line at
+the start: `thermal: the SoC rule: heavy from 115.0 C, trapping from 120.0 C, on the lowest of the last 3 readings (15
+s), raised to the kernel's trips; the kernel's trips: first passive 105.0 C, hot 125.0 C (the median of 25 SoC zones)`;
+each level line now ends with the sustained value: `SoC 103.8 C (cpu-1-1-1; 98.1 C for 15 s)`. Not yet run on the phone.
 
 ## xnuhost's step
 
@@ -189,6 +217,11 @@ reset stops the reports; the reads go on.
 `make -C runtime/bridges/thermal test` (Linux; on a Mac in the container: `runtime/host-tests.sh`, part `bridges`): the
 limits parser, each rule and its hysteresis, the steps' CPUs and pins on the S24 Ultra's topology and on a one-kind host, the
 sysfs reader on a fake tree (an off zone, no `lrp`), the worker's two listeners. 88 checks with the merge of hw-backend (79 on fix-ram-locked's own, 2026-11-15: the step at the case or the cell at 50 C only, none at "heavy" or for the SoC, its hysteresis, the worker's cap listener at 50 C).
+145 checks since the SoC rule's trips and window (2026-11-19, Linux x86_64 with ASan and UBSan, 0 failed): one spike is
+nothing, the third reading over a threshold is, one reading under the hysteresis ends it, a missing reading keeps the
+window; `br_thermal_limits_from_trips` on the S25 Ultra's trips, without trips, with a first trip under the defaults,
+without or with a close hot trip; the S25 Ultra's trips on a fake tree (the median of 105, 105 and 100 C, the 135 C
+placeholders and the crystal's trip left out); the session of 2026-11-19 10:30 replayed.
 
 ## On the phone
 

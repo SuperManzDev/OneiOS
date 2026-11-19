@@ -15,6 +15,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/syscall.h>
 
 #define FORMAT_BGRA_8888 XHD_BUFFER_BGRA_8888    // HAL_PIXEL_FORMAT_BGRA_8888: the guest's 8-bit bytes as they are
 #define FORMAT_RGBX_8888 XHD_BUFFER_RGBX_8888
@@ -128,6 +129,23 @@ static double seconds_since(const struct timespec *t0)
   return (double)(t.tv_sec - t0->tv_sec) + (double)(t.tv_nsec - t0->tv_nsec) / 1e9;
 }
 
+// The copy loop's thread at the top clock while it runs: uclamp.min 1024 (sched_setattr(2), Linux 5.3; KEEP_POLICY
+// and KEEP_PARAMS: SCHED_OTHER and its nice stay, no realtime thread). Each frame is one copy of the damage into the
+// layer's buffer (about 1 ms for 1080x2340 at the top clock) between the buffer queue's vsync-paced lock and post; with
+// the phone's CPU floors left to the governor in a session (the switch's clocks_tops writes cpuinfo_min_freq), the copy
+// must not wait for its ramp. Idle (poll) costs nothing. 0 or -errno.
+static int copy_loop_clamp(void)
+{
+#if defined(__linux__) && defined(SYS_sched_setattr)
+  struct { uint32_t size, policy; uint64_t flags; int32_t nice; uint32_t priority; uint64_t runtime, deadline, period;
+           uint32_t util_min, util_max; } attr = { .size = 56, .flags = 0x18u | 0x20u, .util_min = 1024 };
+  _Static_assert(sizeof attr == 56, "struct sched_attr, SCHED_ATTR_SIZE_VER1");
+  return syscall(SYS_sched_setattr, 0, &attr, 0) ? -errno : 0;
+#else
+  return -ENOSYS;
+#endif
+}
+
 // ready_path: SESSION/ready (--session), or NULL (--socket): the first post waits for it (xhd_hold_first). Until the
 // first post the layer has no buffer and the OneOS boot screen under it shows.
 JNIEXPORT jint JNICALL Java_OneiOSDisplay_nRun(JNIEnv *env, jclass type, jlong handle, jobject surface, jint format, jint dataspace,
@@ -138,6 +156,9 @@ JNIEXPORT jint JNICALL Java_OneiOSDisplay_nRun(JNIEnv *env, jclass type, jlong h
   const struct xhd_frame *f = &c->frame;
   ANativeWindow *window = ANativeWindow_fromSurface(env, surface);
   if (!window) { fprintf(stderr, "oneios-display: no native window for the layer\n"); return -1; }
+  int clamp = copy_loop_clamp();
+  if (clamp) fprintf(stderr, "oneios-display: the copy loop keeps the governor's clock: uclamp.min not set (%s)\n", strerror(-clamp));
+  else fprintf(stderr, "oneios-display: the copy loop at uclamp.min 1024 while it runs\n");
   ANativeWindow_setBuffersGeometry(window, (int32_t)f->width, (int32_t)f->height, format);
   set_dataspace(window, dataspace);
   char ready_file[600] = "";

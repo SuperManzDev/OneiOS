@@ -2310,6 +2310,13 @@ The sensors have two backends since 2026-11-15 (section 7e): samsung, the files 
 treble, the thermal HAL (`android.hardware.thermal.IThermal/default`, `getTemperatures`). The levels and the step are
 the same for both.
 
+**The SoC rule since 2026-11-19 (the S25 Ultra):** on the kernel's own trips (the samsung backend reads the SoC zones'
+`trip_point_N_*`: HEAVY 10 C over the median first passive trip, TRAPPING 5 C under the hot one, never under 95/105 C;
+115/120 C on the SM8750, whose first passive trip is 105 C) and on heat that lasts (the lowest of the last three
+readings, 15 s). On the S25 Ultra's session 2 the old rule had iOS in TRAPPING ("too hot") five times in 8 minutes on
+single junction spikes while the case was at 37-46 C. Details and tests: `runtime/bridges/thermal/README.md`, "The SoC
+rule on the phone's own trips, on heat that lasts". Not yet run on a phone.
+
 ### "It runs damn hot, why" (9f6dc38 session, 2026-11-14; fix-thermal-log)
 
 Measured from outside at about +6060 s: `/proc/vmstat` pswpin +12190 and pswpout +10291 pages in 5 s (zram

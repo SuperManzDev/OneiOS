@@ -130,7 +130,8 @@ guest is still iPhone18,2 iOS 27.0.1.
 - 2026-11-19: on the phone the installed app is OneOS 0.5.14 (versionCode 143), older than the fork (its
   `oneios_root.sh` 32450 bytes `6c635500...`, the fork's 37161 `7c118c76...`; the app runs only the root script whose
   hash its build pins). So `app stage-scripts` was not used (it would stage the fork's newer trio beside the old
-  app). Instead the staged 0.5.14 `oneios_switch.sh` got the same one gate line (`SM-S938*:pa3q:SM8750`; the
+  app). Instead the staged `oneios_switch.sh` (taken then for 0.5.14's; it was a hand-made variant of it, see the
+  entry of session 2 below) got the same one gate line (`SM-S938*:pa3q:SM8750`; the
   original kept at `/data/local/tmp/oneios_switch.sh.orig-0.5.14` and in the owner's `HakiOS/stage-backup/`). Then
   `oneios-tool phone status`: `ready 0 no iOS image set is staged`: the gate passes; the image set is what is left.
   The app re-sends its own scripts when it stages (the `script` verb): re-apply the line, or install the fork's APK
@@ -209,3 +210,63 @@ guest is still iPhone18,2 iOS 27.0.1.
   of the guest's own at +341 s** (the Apple logo, 1440x3120). Ran 19 minutes with SpringBoard, backboardd and the
   daemons up: 0 panics, 0 `sheng-exc`. So the clang 22 kernel boots with PAC under qemu; the phone's own parts
   (KGSL, panel, HALs, timing) are not shown by it.
+- 2026-11-19: **session 1 on the phone** (USB, KernelSU root, battery 85% charging, 26 C; the staged hand-made switch
+  script with the pa3q gate line (session 2 below), runtime 0.1.9-dev, image set 27.0.1 24A446; `oneios-tool phone switch` at 10:24:46). Way back armed on
+  `/dev/input/event0` + `event4`; `/dev/watchdog` busy (softdog not written); zygote stopped, system_server gone,
+  surfaceflinger kept; xnuhost at 10:25:08 (takeover, 4 GiB locked). Darwin kernel at +2.7 s, `BSD root: disk7s1` at
+  +5 s, launchd at +20 s, backboardd opened the framebuffer at +31 s, **first frame with content at +33 s** (qemu:
+  +341 s). Touch `sec_touchscreen` event8, backlight and touch-IC wake: samsung backends. Thermal bridge: 29 zones,
+  nominal throughout. One `drm2kgsl: virgl_fence_set_fd: failed err=-16` (EBUSY) at +32 s. 0 panics.
+  **Ended early by the coordinator at +75 s** with `phone return`: the CPU zones read 93-104 C (`cpu-1-1-1` 104.2 C,
+  case 28 C) because that script's `clocks_tops` writes each policy's `scaling_min_freq` to `cpuinfo_max_freq` (3.53 / 4.47 GHz
+  pinned, GPU 1200 MHz; the fork's writes `cpuinfo_min_freq`). Return **in place**, Enforcing, 42 s;
+  One UI's clocks written back; 76 C a minute later. Logs: `logs/pa3q-s1/`. The owner: the phone was cool to the hand
+  (the cpu-* zones are junction temperatures; the case read 28 C), so session 2 ran until the owner returned.
+- 2026-11-19: **session 2 on the phone** (10:29:44 to the owner's Volume Up + Volume Down at 10:38:55; same stage as
+  session 1). First frame with content at +24 s, `stage=backboardd-up` +18 s, SpringBoard busy at +74 s (122 % in
+  `oneios-cpu`), then the home screen, widgets, Spotlight, Settings and Photos in use; touch works. The owner: it works,
+  not smooth: stutters at times, smooth at others; iOS's "too hot" screen for a few seconds at a time, then usable
+  again; the volume keys "maybe" did nothing in iOS (not yet read in the log). **The return by the keys worked**
+  (`watcher: return asked (keys: Volume Up + Volume Down down for 3 s (polled))`), in place, Enforcing, 40 s. USB:
+  `cable 0` at 10:31:32 (the phone off the cable; adb came back after the return). 0 panics.
+  What the logs show (`logs/pa3q-s2/`):
+  - **The staged session scripts were not the fork's.** The `oneios_switch.sh` staged on 2026-11-19 02:42 (and its
+    `.orig-0.5.14`) is a hand-made variant from the owner's earlier iOS 16.5 trials (its boot screen says "Starting
+    iOS 16.5"; with `stage_ios16.sh` and an `oneios_return.sh` of 2026-11-14): `scaling_governor=performance` and
+    every policy's floor at its top, `vm.dirty_ratio=50`, `dirty_background_ratio=20` (not restored by the return:
+    still 50/20 in One UI after it), `renice -20` of xnuhost, no cpuset step, the boot screen's hand-off without
+    `first frame posted` (the boot screen ran under iOS's layer to the return), and a fixed command line: `--ram
+    4096M --width 1080 --height 2340 --scale 3 --hz 120 --display shm --gpu 3d --set wifi=sim`, a keybagd text fixup
+    that 24A446 does not match (not applied), and boot arguments with `ool_port_array_enforced=0`,
+    `oneios-legacy-bootstrap-replies=1` and `oneios-ubt=SpringBoard,backboardd` (none of them in this repository).
+    Copies: `logs/pa3q-scripts-before-s3/`.
+  - **Heat and the "too hot" screen**: the SoC rule took one reading of the hottest junction sensor (`cpu-1-1-1`,
+    swinging 68-105 C between polls with the floors pinned), and its S24 thresholds (95/105 C) sit at this kernel's
+    first passive trip (105 C): 20 level changes in 8 minutes, 5 into TRAPPING (iOS's "too hot" screen), while the case
+    read 37-46 C and the battery 25-40 C. The thermal bridge's fix: `runtime/bridges/thermal/README.md`, "The SoC rule
+    on the phone's own trips".
+  - **Frames**: up to 1202 flushes in 10 s (120 fps) while something moves, GPU time 0.7-5.4 ms a frame (`gpu: N s
+    level`), submit-to-retired mean 2.1-2.6 ms, max 11-23 ms; the scanout copy mean 0.7-1.8 ms, max up to 20.6 ms;
+    blob creations up to 13-20 ms on the fast lane's side of the device mutex. 1-15 frames over budget per 10 s.
+  - **Memory**: the guest's 4096 MiB (xnuhost's own fit said 7063 MiB) ran with 27-43 MiB free and a compressor of up
+    to 606 MiB (1 jetsam kill); host page tables up to 655 MiB, 16 % of the guest, where `ram=auto` counts 8 %.
+  - First-boot work: `lsd`, `iconservicesagent`, widgets, `IntelligencePlatform` (80-99 % for a minute), Spotlight.
+- 2026-11-19: **staged for session 3** (fixes of the above, host tests only, nothing run on the phone yet):
+  - `oneios-tool app stage-scripts`: the fork's `oneios_switch.sh` `564270b5...`, `oneios_return.sh` `94c19e0e...`,
+    `bin/oneios_root.sh` `7c118c76...` (YumikoHayamato/OneOS `d928cdc`), replacing the hand-made trio. The installed app
+    is still 0.5.14: start sessions with `oneios-tool phone switch`, not with the app (its stage would send its own
+    scripts again).
+  - The image set's `overlay/userland/xnuhost.conf` (`profiles/pa3q/`, staged with `oneios-tool phone manifest
+    profiles/pa3q --stage`; `20265acd...`): `width=1080 height=2340 hz=120 wifi=sim ram-pagetable-percent=16` beside
+    roottweak's `scale=3`, what the hand-made command line kept that the fork's lacks, and the page tables as measured.
+    `ram=auto` then gives (MemAvailable - 768 - 256) / 1.16: about 6.4 GiB for 8.65 GiB at the start.
+  - Runtime 0.1.10-dev (`runtime/package.sh 0.1.10-dev`, `11e5f688...`, 777,384 bytes): the thermal bridge's SoC rule
+    on the kernel's trips and on 15 s of heat; the fast lane's thread and the display helper's copy loop at
+    uclamp.min 1024 (`docs/gpu.md`, `runtime/display/README.md`); xnuhost takes `wifi=` and `bluetooth=` from the image
+    set's `xnuhost.conf` (`docs/booter.md`). Host tests: thermal 145, bridges 362, display 133 + 10, xnuhost 14,079
+    checks with 1 failure that is this PC's (`test_ramfix`'s `memfd_held(fd) == 3 * 4096`: the PC's shmem THP is
+    `within_size`, so the test memfd gets 2 MiB pages).
+  - What session 3 should show: `thermal: the SoC rule: heavy from 115.0 C, trapping from 120.0 C`, `memory: the
+    guest gets ... (ram=auto)`, `clocks: .../policy0/scaling_min_freq ... -> 384000` and `policy6/... -> 1017600` (the hardware's floors) in `switch.log`, `gpu: the
+    queue's thread ... at uclamp.min 1024`, `oneios-display: the copy loop at uclamp.min 1024`, the boot screen ended
+    at `first frame posted`, `wifi: sim`.

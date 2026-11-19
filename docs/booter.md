@@ -991,6 +991,13 @@ the PC) is a stand-in actuator (`runtime/bridges/haptics/haptic.c`) that takes, 
 makes a bridge device that serves only the stand-ins (with `bluetooth=sim` one device serves both). Each played
 effect is logged for the first 8, then at 16, 32, ...; `haptics: counters: ...` at those points and at the end
 ([hardware.md](hardware.md) section 5).
+`wifi=` and `bluetooth=` of the image set's `xnuhost.conf` (or of the userland hook's
+`overlay/userland/xnuhost.conf`) apply when the command line has none, which is the OneOS fork's case: until
+2026-11-19 both were parsed there and dropped (the defaults' `auto` was already in place; `config.c`, the flags
+`wifi_given` and `bluetooth_given` as for `ram=`), so a session could not be given `wifi=sim` by its image set.
+Test: `test_xnuhost` (the fork's command line with an image set's `wifi=sim` and `bluetooth=virtual`, and the
+command line's `wifi=off` winning).
+
 The network (`wifi=` in `xnuhost.conf`, `--set wifi=...`): `auto`, the default, makes the phone's wlan0 the guest's
 en0 (`br_wlan_prepare`, [hardware.md](hardware.md) section 3): the `net` window's virtio-net device carries wlan0's
 address in its configuration, its frames go to and from wlan0 by AF_PACKET, and the guest driver's station messages
