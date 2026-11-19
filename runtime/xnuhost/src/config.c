@@ -101,6 +101,7 @@ int xh_config_set(xh_config *c, const char *key, const char *value)
   else if (!strcmp(key, "kernel")) return copy(c->kernel, sizeof c->kernel, value);
   else if (!strcmp(key, "identity")) return copy(c->identity, sizeof c->identity, value);
   else if (!strcmp(key, "boot-args")) return copy(c->boot_args, sizeof c->boot_args, value);
+  else if (!strcmp(key, "boot-args-add")) return copy(c->boot_args_add, sizeof c->boot_args_add, value);
   else if (!strcmp(key, "display")) return copy(c->display, sizeof c->display, value);
   else if (!strcmp(key, "display-format")) {
     ok = !strcmp(value, "bgrx") || !strcmp(value, "rgba16f");
@@ -246,6 +247,41 @@ static int native_impact_boot_arg(char *args, size_t capacity)
   return 0;
 }
 
+// Whether `args` has a boot argument named `name` (its first `n` bytes): a word equal to it, or one that starts with
+// it and then '='.
+static bool boot_arg_named(const char *args, const char *name, size_t n)
+{
+  for (const char *p = args; *p;) {
+    while (*p == ' ') p++;
+    if (!*p) break;
+    size_t len = strcspn(p, " ");
+    if (len >= n && !strncmp(p, name, n) && (len == n || p[n] == '=')) return true;
+    p += len;
+  }
+  return false;
+}
+
+// boot-args-add: each of its words is added to `args` unless `args` names that argument already, so what the command
+// line or the image set wrote in boot-args wins (a profile adds e.g. oneios-disable-jobs= without repeating the
+// defaults). -1 when the result does not fit.
+static int add_boot_args(char *args, size_t capacity, const char *add)
+{
+  for (const char *p = add; *p;) {
+    while (*p == ' ') p++;
+    if (!*p) break;
+    size_t len = strcspn(p, " "), name = strcspn(p, "= ");
+    if (!boot_arg_named(args, p, name < len ? name : len)) {
+      size_t at = strlen(args), gap = at ? 1 : 0;
+      if (at + gap + len >= capacity) return -1;
+      if (gap) args[at++] = ' ';
+      memcpy(args + at, p, len);
+      args[at + len] = 0;
+    }
+    p += len;
+  }
+  return 0;
+}
+
 static void usage(void)
 {
   fputs("usage: xnuhost --image DIR [--kernel FILE] [--data DIR] [--session DIR] [--runtime DIR]\n"
@@ -357,6 +393,11 @@ int xh_config_finish(xh_config *c)
     strcpy(c->boot_args, "debug=0x14e serial=3 -v kt_fixed_zones=120 -no_slto_panic ml-timeout-lock-panic-scale=40 tlto_us=0 "
            "sheng-smp=1 armcpu-self-ipi=1 armcpu-spi-ipi=1 use_contiguous_hint=0 interrupt-masked-debug-mode=0 "
            "sched_preemption_disable_debug_mode=0 wdt=-1 native-source-storage=1 vgpu-3d=1 droidvm-gpu-metal=1");
+  if (!*c->boot_args_add) strcpy(c->boot_args_add, from_image.boot_args_add);
+  if (add_boot_args(c->boot_args, sizeof c->boot_args, c->boot_args_add)) {
+    fprintf(stderr, "xnuhost: boot-args-add does not fit beside the guest boot args (%zu bytes at most)\n", sizeof c->boot_args - 1);
+    return -1;
+  }
   if (c->haptics_native_impacts && native_impact_boot_arg(c->boot_args, sizeof c->boot_args)) {
     fprintf(stderr, "xnuhost: haptics-native-impacts=1 conflicts with the guest boot args or they are too long\n");
     return -1;

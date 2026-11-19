@@ -122,6 +122,20 @@ phone); a Data store made from an older seed gets it enabled by the kernel (host
 vphone keeps it on the iPhone because SpringBoard reconnects to it every second without it. It is kept. If
 it crash-loops without a baseband, `--disable com.apple.CommCenter` (with its two helpers) is the fallback.
 
+**A profile's own list, for the Data store already on a phone** (2026-11-19). A new seed makes every Data store start
+over (section 6), so a change of policy for a store that exists goes through the kernel at boot: hosted 0053 writes
+`oneios-disable-jobs=LABEL[,...]` into the store's `disabled.plist` before launchd (one `oneios-jobs:` line per label;
+at most 255 bytes, and axassetsd, its default, must stay in the list) and 0044 turns labels on again
+(`oneios-enable-jobs=com.apple.analyticsd,LABEL...`, analyticsd being its default). A profile sets it with xnuhost's
+`boot-args-add` (`docs/booter.md` section 1), which adds it to the default boot arguments without repeating them. The
+Galaxy S25 Ultra (`profiles/pa3q/overlay/userland/xnuhost.conf`): axassetsd, `com.apple.searchd` and
+`com.apple.spotlight.IndexAgent` (Spotlight's indexer: search finds nothing new while they are off) and
+`com.apple.PerfPowerServices` (power telemetry; iOSPlus10's `bringup-26` group, the label [U] on 27.0.1: if the
+`oneios-cpu` lines still show the process, the label is another). Why: session 6 had all eight vCPUs busy for about
+100 s after the first frame (`docs/SM8750_PORT.md`). Left on: biomed and chronod (many clients; the widgets), and the
+Maps widget's work (GeneralMapsWidget 108 %, geod 90 %, MapKit's snapshot service 34 %, locationd 31 % in one 10 s
+line) goes away when the owner removes the widget. Not yet run on the phone.
+
 On a sealed root, a disabled job marked `DisableAllowed = false` may still run (launchd has the line
 `Ignoring disabled state because DisableAllowed=false`). The iPhone's `V54` file marks the same five as
 vphone's iPad guest of 24A446: analyticsd, OTATaskingAgent, diagnosticextensionsd, mobile.softwareupdated and

@@ -581,6 +581,7 @@ static void test_virtio_gpu(void)
 // ---- virtio-gpu 3D: the device against a recording renderer, driven by generated command streams --------------------
 #include "gpu3d.h"
 #include <errno.h>
+#include <stdatomic.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <errno.h>
@@ -597,6 +598,9 @@ static struct {
   uint32_t host_blob[4]; unsigned nhost;             // HOST3D blobs: pool slot i
   unsigned hints; uint32_t hint_ctx; uint8_t hint[3]; // the guest's hints (gpu3d.h hint): how many, the last one
 } fake;
+// The slow lane's giving way (the lanes' second test): an app's blob 0x6100 is held while fake_yield_hold, 0x6101 and
+// 0x6102 take 20 ms each; fake_yield_made counts the three, and the render server's "yield!!!" submission records it.
+static atomic_int fake_yield_hold, fake_yield_in, fake_yield_made, fake_yield_saw = -1;
 static unsigned fake_capset_count(xh_gpu3d *b) { (void)b; return 1; }
 static bool fake_capset_info(xh_gpu3d *b, unsigned i, uint32_t *id, uint32_t *version, uint32_t *size) { (void)b; if (i) return false; *id = 6; *version = 0; *size = 64; return true; }
 static size_t fake_capset(xh_gpu3d *b, uint32_t id, uint32_t version, void *out, size_t max)
@@ -620,6 +624,7 @@ static int fake_submit(xh_gpu3d *b, uint32_t ctx, const void *commands, size_t s
 {
   (void)b; (void)ctx;
   if (size >= 4 && !memcmp(commands, "\xad\xde\0\0", 4)) return -EINVAL;
+  if (size >= 8 && !memcmp(commands, "yield!!!", 8)) atomic_store(&fake_yield_saw, atomic_load(&fake_yield_made));
   fake.submits++;
   fake.last_size = size;
   memcpy(fake.last, commands, size < sizeof fake.last ? size : sizeof fake.last);
@@ -633,12 +638,17 @@ static int fake_submit_fence(xh_gpu3d *b, uint32_t ctx, uint32_t ring, uint64_t 
   if (ring == 0) b->retire(b->dev, ctx, ring, fence);
   return 0;
 }
-static volatile int fake_blob_held;                  // the lanes' test: blob 0x5105 is made only once this is 0
+static atomic_int fake_blob_held;                    // the lanes' test: blob 0x5105 is made only once this is 0
 static int fake_create_blob(xh_gpu3d *b, uint32_t ctx, uint32_t res, uint32_t mem, uint32_t flags, uint64_t blob_id, uint64_t size, const xh_gpu_entry *entries, unsigned n)
 {
   (void)b;
   if (blob_id == 0xbad) return -EINVAL;
   while (blob_id == 0x5105 && fake_blob_held) usleep(1000);
+  if (blob_id >= 0x6100 && blob_id <= 0x6102) {      // the giving way test: 0x6100 held, then 20 ms each
+    if (blob_id == 0x6100) { atomic_store(&fake_yield_in, 1); while (atomic_load(&fake_yield_hold)) usleep(500); }
+    else usleep(20000);
+    atomic_fetch_add(&fake_yield_made, 1);
+  }
   fake.blobs++;
   fake.blob_ctx = ctx; fake.blob_mem = mem; fake.blob_flags = flags; fake.blob_id = blob_id; fake.blob_size = size;
   fake.nentries = n;
@@ -1082,6 +1092,40 @@ static void test_virtio_gpu3d(void)
     xh_virtio_gpu_idle(dev);
     CHECK(ra[0] == 0x1100 && (uint16_t)(used0[1] - seen) == 2);
     d.used_seen[0] = used0[1];
+    // The slow lane gives way: with two more of an app's blobs queued behind the one in progress, the render server's
+    // submission runs after the one in progress, not after all three (`cmd` is a plain mutex: the slow lane locked it
+    // again before the woken queue thread ran). Four chains of two descriptors at once, the queue's 8, placed by hand.
+    {
+      struct vdesc *desc = xh_ram(d.queue_pa[0], 0x1000);
+      uint16_t *avail = xh_ram(d.queue_pa[0] + 0x1000, 0x1000), seen2 = d.used_seen[0];
+      for (unsigned i = 0; i < 3; i++) {
+        uint32_t *c = xh_ram(GUEST_PA + 0x37000 + i * 0x100, 0x100);
+        memset(c, 0, 0x100); memset((uint8_t *)c + 0x80, 0xee, 24);
+        c[0] = 0x10c; c[4] = 40; c[6] = 700 + i; c[7] = 2; c[10] = 0x6100 + i; c[12] = 16384;          // the app's blobs
+        desc[2 * i] = (struct vdesc){ GUEST_PA + 0x37000 + i * 0x100, 14 * 4, 1, (uint16_t)(2 * i + 1) };
+        desc[2 * i + 1] = (struct vdesc){ GUEST_PA + 0x37000 + i * 0x100 + 0x80, 24, 2, 0 };
+      }
+      memset(cb, 0, 4096); memset(rb, 0xee, 64);
+      cb[0] = 0x207; cb[4] = 41; cb[6] = 8; memcpy(&cb[8], "yield!!!", 8);                                // the render server's
+      desc[6] = (struct vdesc){ GUEST_PA + 0x35000, 10 * 4, 1, 7 };
+      desc[7] = (struct vdesc){ GUEST_PA + 0x36000, 24, 2, 0 };
+      atomic_store(&fake_yield_hold, 1);
+      avail[2 + d.avail[0] % 8] = 0; avail[1] = ++d.avail[0];                                             // the first blob, held
+      W(&d, 0x50, 0);
+      for (int i = 0; i < 2000 && !atomic_load(&fake_yield_in); i++) usleep(1000);
+      CHECK(atomic_load(&fake_yield_in) == 1);
+      for (unsigned c = 1; c < 4; c++) { avail[2 + d.avail[0] % 8] = (uint16_t)(2 * c); avail[1] = ++d.avail[0]; }
+      W(&d, 0x50, 0);
+      usleep(50000);                                                                                      // the queue's thread takes them
+      atomic_store(&fake_yield_hold, 0);
+      xh_virtio_gpu_idle(dev);
+      int saw = atomic_load(&fake_yield_saw);
+      CHECK(rb[0] == 0x1100 && atomic_load(&fake_yield_made) == 3 && saw >= 1 && saw <= 2);
+      CHECK((uint16_t)(used0[1] - seen2) == 4);
+      for (unsigned i = 0; i < 3; i++) CHECK(((uint32_t *)xh_ram(GUEST_PA + 0x37000 + i * 0x100 + 0x80, 24))[0] == 0x1100);
+      d.used_seen[0] = used0[1];
+      printf("virtio-gpu 3D: the render server's submission ran after %d of an app's 3 queued blobs (the slow lane gave way)\n", saw);
+    }
     CLEAR(); cmd[0] = 0x201; cmd[4] = 40;
     CHECK(G(6, 24) == 1 && resp[0] == 0x1100);
     cmd[4] = 41;
@@ -2008,6 +2052,32 @@ static void test_config(const char *dir)
   fclose(f);
   xh_config_defaults(&c);
   CHECK(xh_config_args(&c, 3, argv_fork) == 0 && xh_config_finish(&c) == 0 && !strcmp(c.wifi, "auto") && !strcmp(c.bluetooth, "auto"));
+  // boot-args-add: added to the boot arguments, whichever gave them, each unless they name it; the command line's wins
+  f = fopen(path, "w");
+  fputs("# settings of this image\nboot-args=-v debug=0x8\nboot-args-add=oneios-disable-jobs=a,b -x\n", f);
+  fclose(f);
+  xh_config_defaults(&c);
+  CHECK(xh_config_args(&c, 3, argv_fork) == 0 && xh_config_finish(&c) == 0 && !strcmp(c.boot_args, "-v debug=0x8 oneios-disable-jobs=a,b -x"));
+  char *add_cli[] = { "xnuhost", "--image", image, "--set", "boot-args-add=oneios-disable-jobs=c" };
+  xh_config_defaults(&c);
+  CHECK(xh_config_args(&c, 5, add_cli) == 0 && xh_config_finish(&c) == 0 && !strcmp(c.boot_args, "-v debug=0x8 oneios-disable-jobs=c"));
+  char *named_cli[] = { "xnuhost", "--image", image, "--set", "boot-args=-x oneios-disable-jobs=z" };
+  xh_config_defaults(&c);
+  CHECK(xh_config_args(&c, 5, named_cli) == 0 && xh_config_finish(&c) == 0 && !strcmp(c.boot_args, "-x oneios-disable-jobs=z"));   // both named already
+  f = fopen(path, "w");
+  fputs("boot-args-add=oneios-disable-jobs=a,b\n", f);
+  fclose(f);
+  xh_config_defaults(&c);
+  CHECK(xh_config_args(&c, 3, argv_fork) == 0 && xh_config_finish(&c) == 0 && strstr(c.boot_args, "vgpu-3d=1 ") &&
+        strlen(c.boot_args) > 24 && !strcmp(c.boot_args + strlen(c.boot_args) - 24, " oneios-disable-jobs=a,b"));      // after the default
+  {
+    static char long_args[1100], set_long[1120];
+    memset(long_args, 'a', 1000); long_args[0] = '-'; long_args[1000] = 0;
+    snprintf(set_long, sizeof set_long, "boot-args=%s", long_args);
+    char *too_long[] = { "xnuhost", "--image", image, "--set", set_long };
+    xh_config_defaults(&c);
+    CHECK(xh_config_args(&c, 5, too_long) == 0 && xh_config_finish(&c) == -1);                                     // 1000 + 24 do not fit
+  }
   char *bad_wifi[] = { "xnuhost", "--image", image, "--set", "wifi=nat" };
   xh_config_defaults(&c);
   CHECK(xh_config_args(&c, 5, bad_wifi) == -1);

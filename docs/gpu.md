@@ -397,13 +397,33 @@ destroys the contexts and blobs on the device's thread and drops what was held.
 
 **Two lanes** (2026-11-12). The queue's thread serves the render server's contexts (named `xnu:backboardd` at
 `CTX_CREATE`), context creation and every command of no context (the display's flush, the 2D commands) at once; every
-other context's commands go, in their order, to a second thread, the slow lane. A mutex makes the two take turns at the
-device's tables and the renderer, so the render server's frame waits for at most one of an app's blobs (1-30 ms each on
-the phone, 64-102 per 10 s while Settings opened), not for all of them. A fast-lane command that names a resource the
+other context's commands go, in their order, to a second thread, the slow lane. A mutex (`cmd`) makes the two take
+turns at the device's tables and the renderer, meant so that the render server's frame waits for at most one of an
+app's blobs (1-30 ms each on the phone, 64-102 per 10 s while Settings opened), not for all of them; until 2026-11-19
+it did not hold (next paragraph). A fast-lane command that names a resource the
 slow lane has not made yet (an app's surface the render server attaches, the unref of an app's blob) waits for the slow
 lane's commands that came before it and runs again. A device reset drops the slow lane's chains of the old queue. Test:
 `test_virtio_gpu3d` (all its contexts are the slow lane's now, and one case holds an app's blob while the render
-server's submission is answered). Not yet run on the phone.
+server's submission is answered). Ran in the S25 Ultra's sessions of 2026-11-19 (runtime 0.1.8 to 0.1.12).
+
+**The render server's lane first** (2026-11-19, `virtio_gpu.c` `fast_lock`, `slow_lock`). Two faults let an app's
+blobs hold the render server's frames back for more than one blob:
+1. The queue's thread took `cmd` only to choose a command's lane (it reads the context table), so while the slow lane
+   made a blob the queue's thread could not even hand the next command on, and every command behind it waited.
+2. `cmd` is a plain mutex: the slow lane, with a queue of an app's commands, unlocked it and locked it again before the
+   queue's thread it had just woken could run, blob after blob (session 6 made 311-2458 blobs per 10 s in its first
+   minutes, at a mean of 352-1217 us and up to 13-27 ms each, `gpu: 10 s host` lines).
+
+Now the lane is chosen under its own lock (`lanes`, which the writers of the context table hold too, inside `cmd`),
+and the slow lane gives way before each of its commands while the queue's thread waits for `cmd` (`fast_waiting`;
+`slow_yield` and `turn_cv` under `pl`): a frame waits for at most the blob in progress. A lasting line, every 10 s
+while the render server's lane runs commands: `gpu: 10 s: the render server's lane: N commands, K waited over 1 ms for
+an app's command (longest X us); the app lane gave way Y times`. Test: `test_virtio_gpu3d`'s second lanes case (an
+app's blob held, two more queued behind it, then the render server's submission): the submission runs after 1 of the 3
+blobs; with the giving way taken out, after all 3 (3 runs of 3 on the PC). ThreadSanitizer: no report on the new state
+(what it reports in that test is the older case's polling of guest memory, as a guest would after the used ring).
+Not changed: the cost of a blob itself (the udmabufs are about a quarter of it on the phone, then drm2kgsl's import and
+bind, under `cmd`), and the time an app takes to open. Not yet run on the phone.
 
 **Display.** `SET_SCANOUT_BLOB` makes a guest blob the scanout; `RESOURCE_FLUSH` copies its rows from the guest's
 pages to the display (a CPU copy per frame: crosvm's zero-copy import to the compositor is not done here).

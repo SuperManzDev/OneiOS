@@ -2347,6 +2347,8 @@ SpringBoard about 70 %. Two new lines say where the heat goes at the next boot, 
   0053; keep axassetsd, the default, in the list). It writes the Data store's `disabled.plist`, so it stays for later
   boots until `oneios-enable-jobs=com.apple.analyticsd,com.apple.searchd,com.apple.spotlight.IndexAgent` (0044) turns
   them on again. Cost while off: search finds nothing new (apps, settings, mail, notes are not indexed). Not run.
+  In the Galaxy S25 Ultra's profile since 2026-11-19 (xnuhost's `boot-args-add`, with PerfPowerServices:
+  `docs/userland.md` section 4); not yet run on the phone.
 
 ### The phone in a session [F, the phone, 2026-11-12]
 

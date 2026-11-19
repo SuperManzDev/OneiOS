@@ -369,3 +369,20 @@ guest is still iPhone18,2 iOS 27.0.1.
   and freedreno's library validation, the AGX user client, two GPU contexts) for about 800 ms; meanwhile 235 GPU blobs
   in 10 s at a mean of 981 us each, and the render server's submit calls up to 3.8 ms (they share the device's mutex
   with the slow lane's blob creations).
+- 2026-11-19: **two quick fixes for the lag of the first minutes, after session 6** (host tests only; not yet run on
+  the phone).
+  - **The GPU's two lanes, fixed** (`runtime/xnuhost/src/virtio_gpu.c`, `docs/gpu.md` "The render server's lane
+    first"): the queue's thread took the device's mutex just to choose a command's lane, and the slow lane, with a queue
+    of an app's blobs, locked that plain mutex again before the woken queue thread ran, so the render server's next
+    command could wait for every queued blob, not one (session 6: 311-2458 blobs per 10 s, up to 13-27 ms each). Now
+    the lane is chosen under its own lock and the slow lane gives way while the render server's lane waits: at most the
+    blob in progress. The host test shows it (1 of 3 queued blobs before the submission; 3 of 3 without the giving way).
+    On the phone, the new line: `gpu: 10 s: the render server's lane: N commands, K waited over 1 ms for an app's
+    command (longest X us); the app lane gave way Y times`, with the frames over budget of the `gpu:` level lines and
+    the owner's feel when apps open. Not changed: the cost of a blob, the time an app takes to open.
+  - **Background jobs off in the store already on the phone** (`profiles/pa3q/overlay/userland/xnuhost.conf`,
+    xnuhost's new `boot-args-add`, `docs/userland.md` section 4): `oneios-disable-jobs=` axassetsd, searchd,
+    spotlight.IndexAgent, PerfPowerServices through hosted 0053 (one `oneios-jobs:` line each at boot). Proof: the
+    `oneios-cpu` lines of the first 100 s without searchd and PerfPowerServices. The Maps widget's chain (the largest
+    optional one in session 6) needs the owner to remove the widget. The runtime has to be staged before this profile:
+    an older xnuhost refuses `boot-args-add` and does not start.

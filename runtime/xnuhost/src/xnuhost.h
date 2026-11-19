@@ -44,6 +44,9 @@ typedef struct {
   char  kernel[512];        // default <image>/kernel.kc
   char  identity[512];      // decoded device tree of the device, default <image>/identity.adt if present
   char  boot_args[1024];
+  // boot-args-add: boot arguments added to boot_args, whichever gave those (the command line, the image set, the
+  // default), each unless boot_args names it already; the command line's boot-args-add wins over the image set's.
+  char  boot_args_add[512];
   unsigned ncpu;
   // ram=SIZE or ram=auto (the default). Auto (xh_ram_auto) is resolved by xh_config_finish from ram_meminfo:
   // ram_bytes is then the guest's size and ram_auto_total/available what was read (both 0: not auto).
