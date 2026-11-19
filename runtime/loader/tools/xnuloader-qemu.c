@@ -108,6 +108,13 @@ int main(int argc, char **argv)
   fclose(r);
   xl_adt_node *tree = xl_machine_tree(&m, &err);
   if (!tree) { fprintf(stderr, "board: %s\n", err); return 1; }
+  // The console: XNU's PL011 driver (the board's oneios-board-pl011-console.patch) takes the node that /defaults
+  // serial-device names by its AAPL,phandle (pexpert/arm/pe_serial.c get_serial_device_phandle).
+  xl_adt_node *uart = xl_adt_find(tree, "arm-io/uart0"), *defaults = xl_adt_find(tree, "defaults");
+  if (!uart || !defaults || xl_adt_set_u32(uart, "AAPL,phandle", 0x10001) || xl_adt_set_u32(defaults, "serial-device", 0x10001)) {
+    fprintf(stderr, "board: no /arm-io/uart0 or /defaults for the console\n");
+    return 1;
+  }
 
   uint8_t *ram = calloc(1, window);
   if (!ram) { fprintf(stderr, "xnuloader-qemu: %u MiB: out of memory\n", ram_mib); return 1; }

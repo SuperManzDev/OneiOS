@@ -31,12 +31,28 @@ shut down (no bootloader unlock). Months of work; the GPU (Adreno 830, no XNU dr
   `LC_DYLD_CHAINED_FIXUPS` is neither rebased nor signed by `arm_slide_rebase_and_sign_image` (only `__thread_starts`
   are), so it boots as a kernel collection, as on an iPhone.
 - Its collection: `scripts/bg.sh prelink-vm env KERNEL=$PWD/out/kernel/current/xnu.macho OUT=$PWD/out/kernel/vm-24A446
-  kernel/prelink/build.sh` (never over the phone's `out/kernel/24A446`). The emit step now binds a leaf pair whose
-  native name the kernel lacks to that kernel's own function with the same instructions (`kernel/prelink/README.md`).
-  Not read yet: the run was going when work stopped on 2026-11-19.
+  kernel/prelink/build.sh` (never over the phone's `out/kernel/24A446`): 93 MB with Apple's iPhone18,2 kexts. The emit
+  step binds a leaf pair whose native name the kernel lacks to that kernel's own function with the same instructions
+  (`kernel/prelink/README.md`).
+- The whole loop in one job (about 8 minutes on this PC, most of it the kernel build):
+  `scripts/bg.sh native-bench bash -c 'LIBDISPATCH_PREFIX=/mnt/tkg-build/oneios/sysroot/usr kernel/build-linux.sh &&
+  KERNEL=$PWD/out/kernel/current/xnu.macho OUT=$PWD/out/kernel/vm-24A446 kernel/prelink/build.sh &&
+  KERNEL=$PWD/out/kernel/vm-24A446/kernel.kc scripts/qemu/boot-vm.sh 60'`.
+- The console: the board's `oneios-board-pl011-console.patch` compiles XNU's PL011 driver outside the hosted build
+  (`PL011_UART`; the BCM2837 config had no serial driver at all), and `xnuloader-qemu` gives `/arm-io/uart0` an
+  `AAPL,phandle` that `/defaults serial-device` names (`pe_serial.c` `get_serial_device_phandle`).
+- Second blocker, fixed: a data abort in `_Block_copy` from `IOService::setNotification` (a kext's
+  `addMatchingNotification` with a block). Apple's clang signs block descriptor pointers and stock clang does not; the
+  hosted kernel stripped the signature in hosted 0007, the standalone kernel did not. The hunk is now the board's
+  `oneios-kext-block-descriptors.patch` (both kernels; the hosted source is the same as before).
+- **Where it stands (2026-11-19, QEMU, 60 s):** Darwin 25.5.0 with Apple's kexts runs through BSD and IOKit start:
+  AMFI, Sandbox, the MAC framework, CoreAnalyticsHub, our board drivers (off: no bridge on virt), the network stack,
+  APFS (`com.apple.filesystems.apfs` 3288.2.1), and stops at `Waiting on <dict ...IOMedia ... Apple_HFS>`: the root
+  device. The kernel side of the bench is done; the next stage is a disk.
 
 ## Next
-1. Read `logs/prelink-vm.log`; boot the collection (`KERNEL=out/kernel/vm-24A446/kernel.kc scripts/qemu/boot-vm.sh`)
-   to the PL011 console.
-2. The S25's live FDT, read only, for the SM8750 machine tree.
+1. A root disk on the bench: a virtio-mmio block driver in the standalone kernel (Droid-VM's NativeVirtioBlock, not in
+   `board.toml` yet) and QEMU virt's virtio-mmio windows in `xnuloader-qemu`'s tree; then the OS image to launchd.
+2. The S25's live FDT, read only, for the SM8750 machine tree; how the phone gets its root (a RAM disk first: no UFS
+   writes).
 3. The Adreno 830's kernel side for XNU with Turnip (references: UniXNU's Adreno740, UniXNU-houji's A750 port).

@@ -34,3 +34,7 @@
 oneios-stock-clang-ptrauth.patch
 oneios-no-apple-iig.patch
 oneios-board-start.patch
+# The PL011 console of the standalone kernel on QEMU's virt board (not in the hosted kernel: XNU_HOSTED): docs/native.md.
+oneios-board-pl011-console.patch
+# Apple's kexts sign their block descriptors; a stock-clang kernel strips the signature (both kernels; was hosted 0007).
+oneios-kext-block-descriptors.patch

@@ -46,7 +46,9 @@ patched tree with one commit per patch, for writing patches), `kernel/tests/host
 2. `kernel/unixnu/profiles/os/ios-27.0.1-24A446/`: the OS profile, copied into that checkout at each build.
 3. `kernel/device/`: OneiOS as a UniXNU device repository: `board.toml`, `configs/oneios_defconfig`,
    `socs/linuxhost`, and the board series `patches/xnu-12377/series`: 18 of Droid-VM's iPadOS 27 patches, one of
-   xnu-linux-toolchain, three of ours.
+   xnu-linux-toolchain, five of ours (since 2026-11-19 also `oneios-board-pl011-console.patch`, the PL011 console
+   outside the hosted build, and `oneios-kext-block-descriptors.patch`, which strips the signature of a kext's block
+   descriptor for both kernels: it was hosted 0007's; `docs/native.md`).
 4. `kernel/patches/unixnu/`: our changes to the driver itself (two: keep the submodules we checked out;
    `0002`, stub the owner chain's `native_owner_boot_manifest_status` in the RELEASE reference, which Xcode's ld
    does not leave undefined).

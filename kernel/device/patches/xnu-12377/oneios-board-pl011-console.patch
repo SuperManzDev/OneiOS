@@ -1,0 +1,16 @@
+diff --git a/pexpert/pexpert/arm64/BCM2837.h b/pexpert/pexpert/arm64/BCM2837.h
+--- a/pexpert/pexpert/arm64/BCM2837.h
++++ b/pexpert/pexpert/arm64/BCM2837.h
+@@ -18,6 +18,12 @@
+ #define BCM2837
+ #define ARM_ARCH_TIMER
+ 
++/* OneiOS (board): the PL011 console (pexpert/arm/pe_serial.c) of the standalone kernel's QEMU bench (docs/native.md:
++ * the loader names /arm-io/uart0 in /defaults serial-device). The hosted kernel's console is the host's. */
++#if !defined(XNU_HOSTED) || !XNU_HOSTED
++#define PL011_UART
++#endif
++
+ #define __ARM_ARCH__              8
+ #define __ARM_VMSA__              8
+ #define __ARM_VFP__               4
