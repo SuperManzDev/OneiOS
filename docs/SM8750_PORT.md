@@ -333,3 +333,25 @@ guest is still iPhone18,2 iOS 27.0.1.
   waits`). Host tests: `test_imageset` 51 checks (20 runs, and ThreadSanitizer 3 runs: clean), `test_xnuhost` 14,079 with
   the PC's one THP failure, display mode, gpu policy 166, drm2kgsl 17, gpu leaks 956: 0 failed. Not yet run on the phone:
   session 5 says what the boot's gap and an app's start cost in each disk, and whether the guest's driver is next.
+- 2026-11-19: **session 5 on the phone** (12:29:26 to the coordinator's `phone return` at 12:37:08; battery 30.6 C, the
+  case 32.2 C at the start; runtime 0.1.12-dev, `ram=auto` 6144 MiB; `logs/pa3q-s5/`, with `host-memory-at-end.txt`).
+  - The boot: launchd to `stage=bootstat-up` 12.1 s (session 4: 11.5 s), so the read-ahead did not shorten it. The disk
+    lines say why: `disk systemos: 10 s: reads 7750 (3771 MiB) ... in requests 3273 ms (mean 422 us) ...; chunks checked:
+    2255 on the reads (2372 ms), 1570 ahead (4339 ms on the workers), 86 waits`, then `reads 77712 (1928 MiB) ... in
+    requests 2418 ms`: the disk was busy a third of the time, and the guest used 338 % of 800 (`kernel_task` 132 %, the
+    parallel code hash). What holds the hashers back is the guest's driver: it keeps its lock across the host's answer
+    *and* the copy out of its 1 MiB bounce buffer, so the hashing threads queue behind it. The fix is in
+    `OneiOSHostedDisk.cpp` (several requests in flight, the client's pages in the descriptors, completion by interrupt),
+    with a kernel build.
+  - After the boot, while the owner opened apps, **the host swapped at 82-122 MB/s in and 89-129 MB/s out** (host CPU
+    552-722 %, sys 347-410 %), and the case went 32 -> 46 C in two minutes: `thermal: trapping (was heavy; by case): case
+    46.0 C`, iOS's "too hot" screen, by the case this time. The host's memory at the end: MemAvailable 950 MiB, MemFree
+    460 MiB, Mlocked 6.3 GiB, AnonPages 2.5 MiB (the rest of the host's anonymous memory in swap: 820 MiB),
+    PageTables 610 MiB, SUnreclaim 1.2 GiB: `vm_area_struct` 2,811,940 (549 MiB), `vma_lock` 176 MiB, `maple_node` 85 MiB
+    (the iOS tasks' mappings: 2.8 million; xnuhost's own process 71,357), vmalloc 346 MiB; swappiness 130. In swap:
+    the camera provider HAL 186 MiB, the display helper (`app_process OneiOSDisplay`) 44 MiB, xnuhost 30 MiB, adbd,
+    audioserver, surfaceflinger 20-25 MiB each. Session 4 sat at the same edge (MemAvailable 1 GiB) without the storm.
+  - Fixes for session 6: the fork's session runs with `vm.swappiness` 20 and the return writes One UI's back
+    (YumikoHayamato/OneOS `81438a5`; staged: `oneios_switch.sh` `fab19cf9...`, `oneios_return.sh` `01b328c1...`), and
+    `profiles/pa3q`'s `ram-pagetable-percent=28` (the page tables and the mappings' slab, 23 % of the guest measured):
+    5632 MiB for MemAvailable 8.3-8.6 GiB, 512-768 MiB more for the host. Staged; not yet run.
