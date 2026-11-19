@@ -238,9 +238,67 @@ fn local_files(dir: &str) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// The script root runs for `stage image`: each file replaces the staged one, and its lines in image.sha256 and
-/// image.ids are written again.
+/// The script root runs for `stage image`. With an image already staged (`image/` and `image.conf`): each file
+/// replaces the staged one, and its lines in image.sha256 and image.ids are written again. With none: the first
+/// import, through oneios_root.sh begin/receive/finish image (what the OneOS app's import does), each pushed copy
+/// removed once it is received, so that /data needs room for the largest file only, not for the set twice.
 pub fn image_script(dir: &str) -> Result<String> {
+    let replace = image_replace_script(dir)?;
+    let import = image_import_script(dir)?;
+    Ok(format!(
+        "cd {STAGE} || exit 1\nif [ -d image ] && [ -f image.conf ]; then\n(\n{replace})\nelse\n(\n{import})\nfi\n"
+    ))
+}
+
+/// The first import of an image set: every file with its size and SHA-256 (manifest.json's; the manifest's own and
+/// any file it does not list computed here), then `finish image FILES FORMAT VERSION BUILD` from the manifest.
+pub fn image_import_script(dir: &str) -> Result<String> {
+    if !fs::metadata(dir).map(|m| m.is_dir()).unwrap_or(false) {
+        bail!("no folder {dir}");
+    }
+    let raw = fs::read(format!("{dir}/manifest.json")).with_context(|| format!("{dir} has no manifest.json"))?;
+    let m: serde_json::Value = serde_json::from_slice(&raw).with_context(|| format!("{dir}/manifest.json"))?;
+    let word = |key: &str| -> Result<String> {
+        let w = match m.get(key) {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Number(n)) => n.to_string(),
+            _ => bail!("manifest.json has no \"{key}\""),
+        };
+        plain(&w, &format!("manifest.json's {key}"))?;
+        Ok(w)
+    };
+    let (format, version, build) = (word("format")?, word("version")?, word("build")?);
+    let mut listed = BTreeMap::new();
+    for f in m.get("files").and_then(|f| f.as_array()).ok_or_else(|| anyhow!("manifest.json has no \"files\" list"))? {
+        if let (Some(p), Some(s)) = (f.get("path").and_then(|p| p.as_str()), f.get("sha256").and_then(|s| s.as_str())) {
+            listed.insert(p.to_string(), s.to_string());
+        }
+    }
+    let files = local_files(dir)?;
+    let mut script = format!("set -e; R=\"sh {STAGE}/bin/oneios_root.sh\"\n$R begin image\n");
+    for p in &files {
+        plain(p, "the file name")?;
+        let path = format!("{dir}/{p}");
+        let size = fs::metadata(&path).with_context(|| path.clone())?.len();
+        let sha = match listed.get(p) {
+            Some(s) => s.clone(),
+            None if p == "manifest.json" => sha256_of(&raw),
+            None => {
+                let mut f = fs::File::open(&path).with_context(|| path.clone())?;
+                let mut h = Sha256::new();
+                std::io::copy(&mut f, &mut h).with_context(|| path.clone())?;
+                oneios_common::hex(&h.finalize())
+            }
+        };
+        script += &format!("$R receive image {p} {size} {sha} 0644 < {TMP}/{p}; rm -f {TMP}/{p}\n");
+    }
+    script += &format!("$R finish image {} {format} {version} {build}\n", files.len());
+    script += &format!("cat {STAGE}/image.conf; rm -rf {TMP}\n");
+    Ok(script)
+}
+
+/// Replacing the files of a staged image set (image_script).
+fn image_replace_script(dir: &str) -> Result<String> {
     if !fs::metadata(dir).map(|m| m.is_dir()).unwrap_or(false) {
         bail!("no folder {dir}");
     }

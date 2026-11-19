@@ -187,3 +187,15 @@ guest is still iPhone18,2 iOS 27.0.1.
   services (bootstat, identity, thermal); both CDHashes are in `overlay/userland/owner-trust.json`.
   The local ld64 with libtapi (`ios-toolchain.sh --ld`) stopped at its libblocksruntime check (the libdispatch of
   the private sysroot is not in `ldconfig`): not needed while the runner builds the iOS code.
+- 2026-11-19: **staged on the owner's phone** (USB, root by dfroot). 23 GB of the owner's videos moved to the PC
+  first (sha256 checked on both sides before each delete): /data had 15 GB free, 36 GB after. `phone stage runtime`
+  0.1.9-dev: ok. `phone stage image` could only *replace* files of a staged set (`not staged: image/app.img`): the
+  first import was the OneOS app's. It now does that import itself when no set is staged (`image/` and
+  `image.conf` absent), through `oneios_root.sh begin/receive/finish image` with manifest.json's sizes and SHA-256,
+  removing each pushed copy once received (so /data needs room for the largest file, not the set twice). On the
+  phone: 23 files received, `finish image 27.0.1`, 17,898,693,361 bytes; `image-check`: manifest.json and its 22
+  files agree; `phone sums`: kernel.kc `fd1ff268a23c7631...` (the PC's); `phone status`: runtime 0.1.9-dev, image
+  27.0.1 24A446, **`ready 1`**; the pa3q gate line still in the staged `oneios_switch.sh`. 20 GB free on /data.
+  Not tested by tests/phone (its import checks need the fork checkout `app/`). On this PC two old tests fail
+  for reasons outside this change: sparse.rs's holes test, and tests/phone's `touch status` (it expects
+  English "No such file"; the PC's locale is Italian).
