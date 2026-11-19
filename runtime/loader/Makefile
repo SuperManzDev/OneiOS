@@ -1,7 +1,8 @@
-# The OneiOS loader library (libxnuloader.a), its tests and xnuloader-inspect.
+# The OneiOS loader library (libxnuloader.a), its tests, xnuloader-inspect and xnuloader-qemu.
 #   make            host build into build/host
 #   make test       host unit tests (generated fixtures, no Apple files)
 #   make android    cross-build for aarch64-linux-android into build/android
+# xnuloader-qemu places a standalone kernel for qemu-system-aarch64's virt board (scripts/qemu/boot-vm.sh, docs/native.md).
 include $(dir $(lastword $(MAKEFILE_LIST)))../host.mk
 ANDROID_CC ?= $(TOOLS)/aarch64-linux-android30-clang
 ANDROID_AR ?= $(TOOLS)/llvm-ar
@@ -10,7 +11,7 @@ CFLAGS += -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -Iinclude
 SRC := src/macho.c src/adt.c src/boot.c src/machine.c
 HDR := $(wildcard include/xnuloader/*.h) tests/fixture.h
 
-all: build/host/libxnuloader.a build/host/xnuloader-inspect
+all: build/host/libxnuloader.a build/host/xnuloader-inspect build/host/xnuloader-qemu
 
 build/host/%.o: src/%.c $(HDR)
 	@mkdir -p $(@D)
@@ -18,6 +19,8 @@ build/host/%.o: src/%.c $(HDR)
 build/host/libxnuloader.a: $(SRC:src/%.c=build/host/%.o)
 	$(AR) rcs $@ $^
 build/host/xnuloader-inspect: tools/xnuloader-inspect.c build/host/libxnuloader.a
+	$(CC) $(CFLAGS) $^ -o $@
+build/host/xnuloader-qemu: tools/xnuloader-qemu.c build/host/libxnuloader.a
 	$(CC) $(CFLAGS) $^ -o $@
 build/host/test_loader: tests/test_loader.c build/host/libxnuloader.a $(HDR)
 	$(CC) $(CFLAGS) -fsanitize=address,undefined tests/test_loader.c $(SRC) -o $@

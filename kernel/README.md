@@ -4,6 +4,7 @@ Owner: release-kernel. The XNU that xnuhost runs: **xnu-12377.121.6, arm64e with
 iPhone18,2 profile**, built from Apple's open source with UniXNU's and Droid-VM's patches.
 
 State (2026-11-10): **it compiles and links on this Linux PC in 91 s (clean, 20 cores), with the board's drivers of `drivers/` inside. It has never run.**
+2026-11-19: it builds again (`build-linux.sh` binds UniXNU's plutil) and has run under QEMU: `docs/native.md`.
 
 ## Build
 

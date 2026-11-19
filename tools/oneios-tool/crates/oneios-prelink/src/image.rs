@@ -27,6 +27,35 @@ pub fn u32_at(data: &[u8], at: usize) -> u32 {
 pub fn u64_at(data: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(data[at..at + 8].try_into().unwrap())
 }
+const BTI: [u32; 4] = [0xd503_245f, 0xd503_249f, 0xd503_24df, 0xd503_241f];
+const RET: [u32; 3] = [0xd65f_03c0, 0xd65f_0bff, 0xd65f_0fff];
+
+/// The instructions of a function that only computes registers and returns, from its first 48 bytes (BTI left out,
+/// every return form as `ret`), else None: a "leaf" of the known-good pairs (kernel/prelink/README.md), whose identity
+/// does not matter, so any function with the same instructions is the same function (the audit and emit steps).
+pub fn leaf_body(raw: &[u8]) -> Option<Vec<u32>> {
+    let mut body = Vec::new();
+    for i in 0..raw.len().min(48) / 4 {
+        let word = u32_at(raw, i * 4);
+        if BTI.contains(&word) {
+            continue;
+        }
+        if RET.contains(&word) {
+            body.push(0xd65f_03c0);
+            return Some(body);
+        }
+        // data processing on registers only; not ADR/ADRP (an address, which differs between kernels)
+        if !matches!((word >> 25) & 0xf, 0b1000 | 0b1001 | 0b0101 | 0b1101) || word & 0x1f00_0000 == 0x1000_0000 {
+            return None;
+        }
+        body.push(word);
+        if body.len() > 8 {
+            return None;
+        }
+    }
+    None
+}
+
 pub fn put32(data: &mut [u8], at: usize, value: u32) {
     data[at..at + 4].copy_from_slice(&value.to_le_bytes());
 }
@@ -193,6 +222,11 @@ impl<'a> Image<'a> {
 
     pub fn read_of(&self, va: u64, length: u64) -> Result<&'a [u8]> {
         self.read(va, length).ok_or_else(|| anyhow!("Unbacked address {va:#x}"))
+    }
+
+    /// `leaf_body` of the function at `va` (its first 48 bytes must be backed).
+    pub fn leaf(&self, va: u64) -> Option<Vec<u32>> {
+        self.read(va, 48).and_then(leaf_body)
     }
 
     pub fn section(&self, va: u64) -> Option<&Section> {
@@ -546,4 +580,27 @@ pub fn unhex(text: &str) -> Result<u64> {
     let t = text.trim();
     let t = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
     u64::from_str_radix(t, 16).map_err(|_| anyhow!("not a hex address: {text}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::leaf_body;
+
+    fn bytes(words: &[u32]) -> Vec<u8> {
+        words.iter().flat_map(|w| w.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn leaf_bodies() {
+        // OSObject::Dispatch's original: mov w0, #0x2c7; movk w0, #0xe000, lsl #16; ret (kIOReturnUnsupported)
+        let unsupported = vec![0x5280_58e0, 0x72bc_0000, 0xd65f_03c0];
+        assert_eq!(leaf_body(&bytes(&unsupported)), Some(unsupported.clone()));
+        // a BTI landing pad is left out, and retab counts as ret: the same body
+        assert_eq!(leaf_body(&bytes(&[0xd503_245f, 0x5280_58e0, 0x72bc_0000, 0xd65f_0fff])), Some(unsupported));
+        // a load, or an address (ADRP), is not a leaf
+        assert_eq!(leaf_body(&bytes(&[0xf940_0000, 0xd65f_03c0])), None);
+        assert_eq!(leaf_body(&bytes(&[0x9000_0000, 0xd65f_03c0])), None);
+        // no return within the 48 bytes read
+        assert_eq!(leaf_body(&bytes(&[0x5280_58e0; 12])), None);
+    }
 }

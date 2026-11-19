@@ -44,8 +44,6 @@ use oneios_common::pyjson::{self, Value};
 use rayon::prelude::*;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-const BTI: [u32; 4] = [0xd503_245f, 0xd503_249f, 0xd503_24df, 0xd503_241f];
-const RET: [u32; 3] = [0xd65f_03c0, 0xd65f_0bff, 0xd65f_0fff];
 const STUB: &str = "_unixnu_fileset_unmapped";
 const KERNEL: &str = "com.apple.kernel";
 
@@ -71,29 +69,9 @@ pub struct Args {
     draft: Option<String>,
 }
 
-/// The instructions of a function that only computes registers and returns (BTI left out), else None.
+/// The instructions of a function that only computes registers and returns (image.rs `leaf_body`), else None.
 fn leaf(image: &Image, va: u64) -> Option<Vec<u32>> {
-    let raw = image.read(va, 48)?;
-    let mut body = Vec::new();
-    for i in 0..12 {
-        let word = u32_at(raw, i * 4);
-        if BTI.contains(&word) {
-            continue;
-        }
-        if RET.contains(&word) {
-            body.push(0xd65f_03c0);
-            return Some(body);
-        }
-        // data processing on registers only; not ADR/ADRP (an address, which differs between kernels)
-        if !matches!((word >> 25) & 0xf, 0b1000 | 0b1001 | 0b0101 | 0b1101) || word & 0x1f00_0000 == 0x1000_0000 {
-            return None;
-        }
-        body.push(word);
-        if body.len() > 8 {
-            return None;
-        }
-    }
-    None
+    image.leaf(va)
 }
 
 struct Original<'a> {

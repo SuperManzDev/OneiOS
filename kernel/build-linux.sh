@@ -33,12 +33,15 @@ stage_tool
 # checks for xcrun there; doconf wants /bin/csh. UniXNU's installer writes the three as root and installs tcsh; here
 # the build runs in a mount namespace where /usr/bin has those files (bubblewrap: a temporary overlay, nothing on disk changes). A machine that already
 # has the shims there (CI: sudo install) needs no namespace.
+# plutil is always UniXNU's, as in build-hosted.sh: a Linux /usr/bin/plutil is GNUstep's (Arch: gnustep-base), which
+# cannot convert xnu's Kernel.framework Info.plist ("non-NSData data argument passed to method") and stops installhdrs
+# (this PC, 2026-11-19). So the namespace is skipped only where /usr/bin/plutil is that shim itself.
 run_build() {
-  if [ -x /usr/bin/xcrun ] && [ -x /usr/bin/plutil ] && [ -x /usr/bin/codesign ] && [ -x /bin/csh ]; then "$@"; return; fi
+  if [ -x /usr/bin/xcrun ] && [ -x /usr/bin/codesign ] && [ -x /bin/csh ] && cmp -s /usr/bin/plutil "$TOOLCHAIN/unixnu/usrbin/plutil"; then "$@"; return; fi
   [ "$(readlink -f /bin)" = /usr/bin ] || [ -x /bin/csh ] || { echo "build-linux: /bin is not /usr/bin here and there is no /bin/csh: install tcsh" >&2; return 1; }
-  command -v bwrap >/dev/null || { echo "build-linux: /usr/bin has no xcrun, plutil, codesign and there is no bubblewrap (install bubblewrap, or as root: install -m755 $TOOLCHAIN/unixnu/usrbin/* /usr/bin/)" >&2; return 1; }
-  local binds=() shim
-  for shim in xcrun plutil codesign csh; do
+  command -v bwrap >/dev/null || { echo "build-linux: /usr/bin has no xcrun, UniXNU's plutil and codesign, and there is no bubblewrap (install bubblewrap, or as root: install -m755 $TOOLCHAIN/unixnu/usrbin/* /usr/bin/)" >&2; return 1; }
+  local binds=(--ro-bind "$TOOLCHAIN/unixnu/usrbin/plutil" /usr/bin/plutil) shim
+  for shim in xcrun codesign csh; do
     [ -e "/usr/bin/$shim" ] || binds+=(--ro-bind "$TOOLCHAIN/unixnu/usrbin/$shim" "/usr/bin/$shim")
   done
   bwrap --dev-bind / / --overlay-src /usr/bin --tmp-overlay /usr/bin "${binds[@]}" -- "$@"

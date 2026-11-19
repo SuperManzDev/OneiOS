@@ -453,3 +453,13 @@ the HMACs), `prelink audit` 3 s, the record and the chunk hashes 1 s.
 - `prelink record` fails when `OUT` resolves outside the repository it runs from (a worktree with `out` as a symbolic
   link): `work/kernel.kc` is complete by then.
 - The phone run of the Mac collection: "On the phone (2026-11-12, prelink)" above.
+
+### Leaf pairs in a kernel without the name (2026-11-19)
+
+A known-good pair with `"leaf": true` names one function whose body only computes registers and returns; the audit
+already takes any function with the same instructions (`image.rs` `leaf_body`, shared by both steps now). When the
+kernel being prelinked has no function of that name, emit binds the original to that kernel's lowest function with the
+same body (`known_good_leaf` in the report) instead of stopping. Why: the standalone kernel (`kernel/build-linux.sh`,
+`docs/native.md`) has no `OneiOSHostedDisk`, whose `doEjectMedia` two leaves name (OSObject's Dispatch originals, which
+return kIOReturnUnsupported). The hosted build is unchanged: its kernel has the names. Unit test: `cargo test -p
+oneios-prelink leaf_bodies`.

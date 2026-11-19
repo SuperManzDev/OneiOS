@@ -966,6 +966,24 @@ fn load_side(payload: &Value, kind: &str) -> Result<Side> {
     Ok(out)
 }
 
+/// The kernel's leaf functions by their body (image.rs `leaf_body`): the lowest address of each body, with its name
+/// (the smallest of the names defined there) when it has one.
+fn leaf_index(native: &Image, names: &HashMap<String, u64>) -> Result<HashMap<Vec<u32>, (u64, Option<String>)>> {
+    let mut by_address: HashMap<u64, &str> = HashMap::new();
+    for (name, address) in names {
+        by_address.entry(*address).and_modify(|e| if name.as_str() < *e { *e = name }).or_insert(name);
+    }
+    let mut starts = native.function_starts()?;
+    starts.sort_unstable();
+    let mut index = HashMap::new();
+    for va in starts {
+        if let Some(body) = native.leaf(va) {
+            index.entry(body).or_insert_with(|| (va, by_address.get(&va).map(|n| n.to_string())));
+        }
+    }
+    Ok(index)
+}
+
 fn row(items: &[(&str, Value)]) -> Value {
     Value::Dict(items.iter().map(|(k, v)| (k.to_string(), v.clone())).collect())
 }
@@ -1027,7 +1045,7 @@ pub fn run(args: Args) -> Result<()> {
     let (mut functions, mut data) = (load_side(&payload, "functions")?, load_side(&payload, "data")?);
     let list = |record: &Value, key: &str| -> Vec<Value> { record.get(key).and_then(Value::as_list).map(<[Value]>::to_vec).unwrap_or_default() };
     let was = |previous: &Option<(u64, Option<String>)>| -> Value { previous.as_ref().and_then(|p| p.1.clone()).into() };
-    let mut applied: IndexMap<&str, Vec<Value>> = ["functions", "functions_absent", "data", "data_inferred", "sites", "aligned", "known_good", "known_good_replaced", "known_good_absent", "stub_list"].into_iter().map(|k| (k, Vec::new())).collect();
+    let mut applied: IndexMap<&str, Vec<Value>> = ["functions", "functions_absent", "data", "data_inferred", "sites", "aligned", "known_good", "known_good_replaced", "known_good_absent", "known_good_leaf", "stub_list"].into_iter().map(|k| (k, Vec::new())).collect();
     for path in &args.aligned {
         let record = pyjson::load(path)?;
         for pair in list(&record, "data") {
@@ -1077,6 +1095,10 @@ pub fn run(args: Args) -> Result<()> {
         if known.get("kernelcache_sha256").and_then(Value::as_str) != Some(reviewed_sha) {
             bail!("the known-good pairs are for another kernelcache");
         }
+        // A leaf pair names one function with the original's instructions, and any function with those is as right (the
+        // audit's rule): a kernel without that name gets its own lowest such function (README "Known-good pairs": the
+        // standalone kernel of kernel/build-linux.sh has no OneiOSHostedDisk, whose doEjectMedia two leaves name).
+        let mut same_body: Option<HashMap<Vec<u32>, (u64, Option<String>)>> = None;
         for kind in ["functions", "data"] {
             let side = if kind == "functions" { &mut functions } else { &mut data };
             for entry in list(&known, kind) {
@@ -1087,6 +1109,18 @@ pub fn run(args: Args) -> Result<()> {
                         let previous = side.shift_remove(orig);
                         applied["known_good_absent"].push(row(&[("original", orig.into()), ("native", full.into()), ("was", was(&previous))]));
                         continue;
+                    }
+                    if kind == "functions" && offset.is_empty() && truthy(entry.get("leaf")) {
+                        let index = match same_body {
+                            Some(ref index) => index,
+                            None => same_body.insert(leaf_index(&native, &names)?),
+                        };
+                        if let Some((address, own)) = original.leaf(unhex(orig)?).and_then(|body| index.get(&body)) {
+                            let previous = side.insert(orig.to_string(), (*address, own.clone()));
+                            applied["known_good_leaf"].push(row(&[("original", orig.into()), ("native", full.into()), ("bound", hex(*address).into()),
+                                                                 ("bound_name", own.clone().into()), ("was", was(&previous))]));
+                            continue;
+                        }
                     }
                     bail!("{name} (known-good pair of {orig}) is not in this kernel");
                 };
