@@ -44,11 +44,25 @@ const xh_imageset_file *xh_imageset_role(const xh_imageset *set, const char *rol
 
 // ---- chunk verification of a read-only image ----
 typedef struct xh_verify xh_verify;
+// What the checks cost since the last xh_verify_stats_take: chunks checked on a read's own thread (a vCPU) and their
+// nanoseconds, chunks checked ahead by the read-ahead workers, waits of a read for a chunk another thread was checking,
+// and chunks that failed (on a read, ahead).
+typedef struct {
+  uint64_t sync_chunks, sync_ns, ahead_chunks, ahead_ns, waits, wait_ns, failed, ahead_failed;
+} xh_verify_stats;
 // Reads and checks the hash list of `file` (its SHA-256 is the manifest's). NULL with *error set.
 xh_verify *xh_verify_open(const xh_imageset *set, const xh_imageset_file *file, const char **error);
 // Checks every chunk that [offset, offset + length) touches and that was not checked before, by
-// reading it whole from fd. 0 = all good; -1 = a chunk differs or cannot be read.
+// reading it whole from fd. A chunk another thread is checking is waited for. 0 = all good; -1 = a chunk differs or
+// cannot be read (it stays unchecked: the next read checks it again).
 int  xh_verify_range(xh_verify *v, int fd, uint64_t offset, uint64_t length);
+// Read-ahead (2026-11-19): queues chunks first .. first + chunks - 1 that nobody has checked or queued for the
+// read-ahead workers (three threads, started at the first call; a queue of 64), which check them as a read would.
+// Returns how many were queued (0 when the queue is full or no worker could start).
+unsigned xh_verify_ahead(xh_verify *v, int fd, uint64_t first, unsigned chunks);
+uint32_t xh_verify_chunk(const xh_verify *v);
+void xh_verify_stats_take(xh_verify *v, xh_verify_stats *out);
+// Drops this image's queued read-ahead jobs and waits for the ones at work, then frees it.
 void xh_verify_close(xh_verify *v);
 // The list's SHA-256: what the kernel publishes as the identity of a verified disk.
 const uint8_t *xh_verify_digest(const xh_verify *v);

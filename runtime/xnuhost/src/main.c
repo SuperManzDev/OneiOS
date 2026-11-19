@@ -558,14 +558,17 @@ static int boot(void)
   xh_gic_map();
   xh_uart_init(XL_BOARD_UART);
   if (image_set_open()) return -1;
+  xh_blk_set_ahead((unsigned)config.disk_ahead);
   for (unsigned i = 0; i < config.ndisk; i++) {
     xh_blk *disk = xh_blk_open(&config.disk[i], &error);
     if (!disk) { LOGE("disk %s: %s (%s)", config.disk[i].path, error, strerror(errno)); return -1; }
     if (image_set_disk(i, disk)) return -1;
+    xh_blk_set_name(disk, disk_identity[i].role ? disk_identity[i].role : config.disk[i].data_store ? "data" : "disk");
     if (!xh_virtio_blk_create(XL_BOARD_VIRTIO + ndev * XL_BOARD_VIRTIO_SIZE, XL_BOARD_VIRTIO_SPI + ndev, disk)) return -1;
-    LOGI("disk %u: %s, %llu MiB, %s%s%s%s", ndev, config.disk[i].path, (unsigned long long)(xh_blk_bytes(disk) >> 20),
+    LOGI("disk %u: %s, %llu MiB, %s%s%s%s%s", ndev, config.disk[i].path, (unsigned long long)(xh_blk_bytes(disk) >> 20),
          config.disk[i].data_store ? "Data store" : config.disk[i].writable ? "writable" : "read-only",
-         disk_identity[i].role ? ", role " : "", disk_identity[i].role ? disk_identity[i].role : "", disk_identity[i].verified ? ", chunks verified" : "");
+         disk_identity[i].role ? ", role " : "", disk_identity[i].role ? disk_identity[i].role : "", disk_identity[i].verified ? ", chunks verified" : "",
+         disk_identity[i].verified && config.disk_ahead ? ", read ahead" : "");
     kinds[ndev++] = config.disk[i].data_store ? XL_DEV_DATA_STORE : XL_DEV_BLOCK;
   }
   xh_virtio *input = xh_virtio_input_create(XL_BOARD_VIRTIO + ndev * XL_BOARD_VIRTIO_SIZE, XL_BOARD_VIRTIO_SPI + ndev);

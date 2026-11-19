@@ -320,3 +320,16 @@ guest is still iPhone18,2 iOS 27.0.1.
   50-57 fps for UniXNU's Metal on Vulkan (Turnip, the kind of path NativeAdrenoMetal is); 120 not reached. Scion-Project
   (a HakiOS fork): iOS 27 on the Galaxy S9, its README's own states "built, not yet run" and "iOS 27 can hang". UniXNU
   ran iOS 26 natively on a Surface Duo (UEFI). vphone-cli: iOS 27 as a VM on Apple Silicon Macs only.
+- 2026-11-19: **the boot's 11 s and the disks** (session 4's log): from launchd's first line to `dyld cache mapped
+  system-wide` 11.3 s with nothing else logged; that is dyld registering the shared cache's files, which the guest reads
+  and hashes whole (kernel patch 0014, all vCPUs taking megabytes in rising order: 5.8 GiB), while its disk driver
+  (`OneiOSHostedDisk.cpp`) sends one request at a time per disk and xnuhost answers inside the notify, checking each
+  chunk's 1 MiB and SHA-256 at its first read. The owner's go for an asynchronous disk; the full one needs the guest's
+  driver changed too (interrupt completion, several requests, no bounce copy: a kernel build, whose tree and toolchain
+  are gone with the tmpfs). First, host only (runtime 0.1.12-dev): **the read-ahead** (`imageset.c` `xh_verify_ahead`,
+  `disk-ahead=8`: three threads check the next 8 chunks after a sequential read, the guest's read of them is a page-cache
+  copy; a read waits for a chunk being checked instead of checking it twice; a failed chunk stays unchecked) and **a
+  statistics line per disk** (`disk ROLE: 10 s: reads ..., in requests T ms ...; chunks checked: on the reads, ahead,
+  waits`). Host tests: `test_imageset` 51 checks (20 runs, and ThreadSanitizer 3 runs: clean), `test_xnuhost` 14,079 with
+  the PC's one THP failure, display mode, gpu policy 166, drm2kgsl 17, gpu leaks 956: 0 failed. Not yet run on the phone:
+  session 5 says what the boot's gap and an app's start cost in each disk, and whether the guest's driver is next.

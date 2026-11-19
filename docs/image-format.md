@@ -191,6 +191,14 @@ offset  size  field
 The list's own SHA-256 is in the manifest, so one hash of a few hundred KiB at start vouches for every
 chunk read later. `scripts/image/verify.sh` checks each image against its list.
 
+xnuhost checks a chunk the first time any read touches it (`runtime/xnuhost/src/imageset.c` `xh_verify_range`: the
+whole chunk is read and hashed), once per session. Since 2026-11-19 it also checks ahead: after a sequential read of a
+verified image the next `disk-ahead` chunks (8) are queued for three read-ahead threads (`xh_verify_ahead`), which do
+the same check, so that the guest's read of them is a page-cache copy; a read that meets a chunk being checked waits
+for that check. A chunk that fails (on a read or ahead) is not marked, and the guest's read of it fails, as before.
+Why: the guest reads and hashes all 5.8 GiB of iOS 27's shared cache at every boot (kernel patch 0014), through one
+request at a time per disk, so each first read of a chunk was a 1 MiB read and its hash on a waiting vCPU.
+
 ## 5. Data seed (`data.seed`)
 
 The guest's Data volume has to be APFS, made by Apple's own APFS code: iOS 27 uses case-sensitive volumes

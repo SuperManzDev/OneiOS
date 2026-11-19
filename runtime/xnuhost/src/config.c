@@ -25,6 +25,7 @@ void xh_config_defaults(xh_config *c)
   c->ram_giveback = c->ram_prefault = c->ram_lock = -1;
   c->ram_session_reserve = c->ram_unlock_below = c->ram_gpu_reserve = -1;
   c->ram_fit_on = c->ram_pagetable_percent = c->ram_huge = -1;
+  c->disk_ahead = -1;
   c->return_graceful_ms = -1;
   c->ready_content_wait = -1;
   strcpy(c->display, "shm");
@@ -130,6 +131,7 @@ int xh_config_set(xh_config *c, const char *key, const char *value)
   else if (!strcmp(key, "ram-huge")) { bool on; if (flag(value, &on)) return -1; c->ram_huge = on; }
   else if (!strcmp(key, "ram-gpu-reserve")) { uint64_t v = xh_parse_size(value, &ok); ok = ok && v < (1ull << 40); if (ok) c->ram_gpu_reserve = (int64_t)v; }
   else if (!strcmp(key, "ram-pagetable-percent")) { ok = number(value, 0, 50, &c->ram_pagetable_percent); }
+  else if (!strcmp(key, "disk-ahead")) { ok = number(value, 0, 64, &c->disk_ahead); }
   else if (!strcmp(key, "ram-unlock-below")) { uint64_t v = xh_parse_size(value, &ok); ok = ok && v < (1ull << 40); if (ok) c->ram_unlock_below = (int64_t)v; }
   else if (!strcmp(key, "return-graceful-ms")) { ok = number(value, 0, 120000, &c->return_graceful_ms); }
   else if (!strcmp(key, "ready-content-wait")) { ok = number(value, 0, 480, &c->ready_content_wait); }
@@ -440,6 +442,8 @@ int xh_config_finish(xh_config *c)
   if (c->ram_huge < 0) c->ram_huge = from_image.ram_huge < 0 ? 1 : from_image.ram_huge;
   if (c->ram_gpu_reserve < 0) c->ram_gpu_reserve = from_image.ram_gpu_reserve < 0 ? (int64_t)XH_RAM_GPU_RESERVE : from_image.ram_gpu_reserve;
   if (c->ram_pagetable_percent < 0) c->ram_pagetable_percent = from_image.ram_pagetable_percent < 0 ? XH_RAM_PAGETABLE_PERCENT : from_image.ram_pagetable_percent;
+  // The read-ahead of the verified images (blk.c, imageset.c xh_verify_ahead): 8 chunks after a sequential read.
+  if (c->disk_ahead < 0) c->disk_ahead = from_image.disk_ahead < 0 ? 8 : from_image.disk_ahead;
   // What the host can hold for the guest without swapping it (2026-11-14, fix-ram-fit): MemAvailable now, after the fork
   // stopped One UI's zygote and before the guest takes anything (oneos/interface.md 4), less what the session needs
   // outside the guest: the iOS tasks' page tables (a share of the guest's RAM), KGSL's own memory, and a headroom.

@@ -150,6 +150,49 @@ int main(void)
     xh_verify_close(v);
   }
   close(fd);
+
+  // read-ahead (xh_verify_ahead, 2026-11-19): the workers check the chunks, the read that follows checks nothing itself
+  xh_verify *ahead = os ? xh_verify_open(&set, os, &error) : NULL;
+  fd = open(path, O_RDWR);
+  CHECK(ahead != NULL && fd >= 0);
+  if (ahead && fd >= 0) {
+    xh_verify_stats st, sum;
+    CHECK(xh_verify_chunk(ahead) == CHUNK);
+    CHECK(xh_verify_ahead(ahead, fd, 0, 8) == 3);                       // three chunks: it stops at the image's end
+    CHECK(xh_verify_ahead(ahead, fd, 0, 8) == 0);                       // queued, at work or checked: never twice
+    memset(&sum, 0, sizeof sum);
+    for (int i = 0; i < 400 && sum.ahead_chunks < 3; i++) {
+      usleep(5000);
+      xh_verify_stats_take(ahead, &st);
+      sum.ahead_chunks += st.ahead_chunks; sum.sync_chunks += st.sync_chunks; sum.ahead_failed += st.ahead_failed;
+    }
+    CHECK(sum.ahead_chunks == 3 && sum.sync_chunks == 0 && sum.ahead_failed == 0);
+    CHECK(xh_verify_range(ahead, fd, 0, IMAGE) == 0);
+    xh_verify_stats_take(ahead, &st);
+    CHECK(st.sync_chunks == 0 && st.ahead_chunks == 0 && st.failed == 0 && st.waits == 0);   // all of it was checked ahead
+    // a changed chunk fails ahead and stays unchecked: the read of it fails, and passes once it is as listed again
+    xh_verify *again = xh_verify_open(&set, os, &error);
+    uint8_t changed = (uint8_t)~image[CHUNK + 5];
+    CHECK(pwrite(fd, &changed, 1, CHUNK + 5) == 1);
+    CHECK(again && xh_verify_ahead(again, fd, 1, 1) == 1);
+    memset(&sum, 0, sizeof sum);
+    for (int i = 0; again && i < 400 && !sum.ahead_failed; i++) {
+      usleep(5000);
+      xh_verify_stats_take(again, &st);
+      sum.ahead_failed += st.ahead_failed; sum.ahead_chunks += st.ahead_chunks;
+    }
+    CHECK(sum.ahead_failed == 1 && sum.ahead_chunks == 0);
+    CHECK(again && xh_verify_range(again, fd, CHUNK, 512) == -1);
+    CHECK(pwrite(fd, &image[CHUNK + 5], 1, CHUNK + 5) == 1);
+    CHECK(again && xh_verify_range(again, fd, CHUNK, 512) == 0);
+    // a close with jobs queued: it drops them and waits for the ones at work (with ASan: no use after the free)
+    xh_verify *closing = xh_verify_open(&set, os, &error);
+    CHECK(closing && xh_verify_ahead(closing, fd, 0, 3) == 3);
+    xh_verify_close(closing);
+    xh_verify_close(again);
+    xh_verify_close(ahead);
+  }
+  if (fd >= 0) close(fd);
   // a hash list that is not the manifest's
   list[40] ^= 1;
   put("os.img.hashes", list, sizeof list);

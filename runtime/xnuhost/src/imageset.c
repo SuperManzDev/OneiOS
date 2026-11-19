@@ -12,6 +12,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
 
 #define FAIL(text) do { *error = (text); goto bad; } while (0)
@@ -325,13 +326,19 @@ static uint8_t *listed(const xh_imageset *set, const char *path, size_t limit, s
 }
 
 // ---- chunk verification -------------------------------------------------------------------------
+// A chunk's state (one byte each, under the image's lock). A chunk that fails its check goes back to UNCHECKED, so
+// the next read checks it again (and fails again while it differs).
+enum { CHUNK_UNCHECKED = 0, CHUNK_QUEUED = 1, CHUNK_CHECKING = 2, CHUNK_CHECKED = 3 };
 struct xh_verify {
   uint8_t *list;                // the hash list file
   uint64_t size, count;         // of the image
   uint32_t chunk;
   uint8_t  digest[32];
-  uint8_t *done;                // one bit per verified chunk (under lock)
+  uint8_t *state;               // CHUNK_* per chunk (under lock)
   pthread_mutex_t lock;
+  pthread_cond_t changed;       // a chunk left CHUNK_CHECKING
+  unsigned queued;              // read-ahead jobs of this image queued or at work (under the pool's lock)
+  xh_verify_stats stats;        // under lock
 };
 
 static uint32_t le32(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
@@ -343,6 +350,7 @@ xh_verify *xh_verify_open(const xh_imageset *set, const xh_imageset_file *file, 
   xh_verify *v = calloc(1, sizeof *v);
   if (!v) { *error = "out of memory"; return NULL; }
   pthread_mutex_init(&v->lock, NULL);
+  pthread_cond_init(&v->changed, NULL);
   if (!*file->hashes) FAIL("the image has no chunk hash list");
   if (!(v->list = listed(set, file->hashes, 64 << 20, &size, error))) goto bad;
   if (size < 32 || memcmp(v->list, "OIHL1\0\0\0", 8) || le32(v->list + 12) != 1) FAIL("the chunk hash list is not oneios-hash-list-1 with SHA-256");
@@ -352,17 +360,53 @@ xh_verify *xh_verify_open(const xh_imageset *set, const xh_imageset_file *file, 
   if (v->chunk < 4096 || v->chunk > (16u << 20) || (v->chunk & 511) || v->size != file->size ||
       v->count != (v->size + v->chunk - 1) / v->chunk || v->count > (size - 32) / 32 || size != 32 + v->count * 32) FAIL("the chunk hash list does not describe its image");
   memcpy(v->digest, xh_imageset_find(set, file->hashes)->sha256, 32);
-  v->done = calloc(1, (size_t)(v->count + 7) / 8 + 1);
-  if (!v->done) FAIL("out of memory");
+  v->state = calloc(1, (size_t)v->count + 1);
+  if (!v->state) FAIL("out of memory");
   return v;
 bad:
   xh_verify_close(v);
   return NULL;
 }
 
+static uint64_t verify_now_ns(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;
+}
+
+// Reads chunk c whole into buffer (at least v->chunk bytes) and compares its SHA-256 with the list's. 0 or -1.
+static int check_chunk(const xh_verify *v, int fd, uint64_t c, uint8_t *buffer)
+{
+  uint64_t at = c * v->chunk, want = v->size - at < v->chunk ? v->size - at : v->chunk;
+  uint8_t digest[32];
+  xh_sha256 sha;
+  for (uint64_t have = 0; have < want;) {
+    ssize_t n = pread(fd, buffer + have, (size_t)(want - have), (off_t)(at + have));
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) return -1;
+    have += (uint64_t)n;
+  }
+  xh_sha256_init(&sha);
+  xh_sha256_update(&sha, buffer, (size_t)want);
+  xh_sha256_final(&sha, digest);
+  return memcmp(digest, v->list + 32 + c * 32, 32) ? -1 : 0;
+}
+
+// A thread's buffer for one chunk; NULL when there is no memory.
+static uint8_t *chunk_buffer(uint8_t **buffer, uint32_t *size, uint32_t chunk)
+{
+  if (*size < chunk) {
+    uint8_t *larger = realloc(*buffer, chunk);
+    if (!larger) return NULL;
+    *buffer = larger; *size = chunk;
+  }
+  return *buffer;
+}
+
 // Several vCPUs read at once (the guest hashes the shared cache on all of them): the chunk is read and hashed
-// outside the lock, in a buffer of the calling thread; the lock covers only the bits. Two threads that meet on
-// one unchecked chunk both check it.
+// outside the lock, in a buffer of the calling thread; the lock covers only the states. A chunk that another
+// thread (a vCPU, or a read-ahead worker) is checking is waited for, not checked twice.
 int xh_verify_range(xh_verify *v, int fd, uint64_t offset, uint64_t length)
 {
   static __thread uint8_t *buffer;
@@ -371,32 +415,118 @@ int xh_verify_range(xh_verify *v, int fd, uint64_t offset, uint64_t length)
   if (offset >= v->size || length > v->size - offset) return -1;
   for (uint64_t c = offset / v->chunk; c <= (offset + length - 1) / v->chunk; c++) {
     pthread_mutex_lock(&v->lock);
-    bool done = v->done[c / 8] & (1u << (c % 8));
+    if (v->state[c] == CHUNK_CHECKING) {
+      uint64_t t0 = verify_now_ns();
+      v->stats.waits++;
+      while (v->state[c] == CHUNK_CHECKING) pthread_cond_wait(&v->changed, &v->lock);
+      v->stats.wait_ns += verify_now_ns() - t0;
+    }
+    if (v->state[c] == CHUNK_CHECKED) { pthread_mutex_unlock(&v->lock); continue; }
+    if (!chunk_buffer(&buffer, &buffer_size, v->chunk)) { pthread_mutex_unlock(&v->lock); return -1; }
+    v->state[c] = CHUNK_CHECKING;                     // unchecked or queued: this thread checks it now
     pthread_mutex_unlock(&v->lock);
-    if (done) continue;
-    if (buffer_size < v->chunk) {
-      uint8_t *larger = realloc(buffer, v->chunk);
-      if (!larger) return -1;
-      buffer = larger; buffer_size = v->chunk;
-    }
-    uint64_t at = c * v->chunk, want = v->size - at < v->chunk ? v->size - at : v->chunk;
-    uint8_t digest[32];
-    xh_sha256 sha;
-    for (uint64_t have = 0; have < want;) {
-      ssize_t n = pread(fd, buffer + have, (size_t)(want - have), (off_t)(at + have));
-      if (n < 0 && errno == EINTR) continue;
-      if (n <= 0) return -1;
-      have += (uint64_t)n;
-    }
-    xh_sha256_init(&sha);
-    xh_sha256_update(&sha, buffer, (size_t)want);
-    xh_sha256_final(&sha, digest);
-    if (memcmp(digest, v->list + 32 + c * 32, 32)) return -1;
+    uint64_t t0 = verify_now_ns();
+    int r = check_chunk(v, fd, c, buffer);
     pthread_mutex_lock(&v->lock);
-    v->done[c / 8] |= (uint8_t)(1u << (c % 8));
+    v->state[c] = r ? CHUNK_UNCHECKED : CHUNK_CHECKED;
+    if (r) v->stats.failed++;
+    else { v->stats.sync_chunks++; v->stats.sync_ns += verify_now_ns() - t0; }
+    pthread_cond_broadcast(&v->changed);
     pthread_mutex_unlock(&v->lock);
+    if (r) return -1;
   }
   return 0;
+}
+
+// ---- read-ahead: the chunks after a sequential read, checked on xnuhost's own threads ----
+// The guest's disk driver (kernel/patches/oneios-hosted/storage/OneiOSHostedDisk.cpp) sends one request at a time and
+// xnuhost answers it inside the vCPU's notify, so each first read of a chunk was a 1 MiB read and its SHA-256 on the
+// vCPU, one after the other: 5.8 GiB of shared cache at every boot (the guest's parallel code hash, kernel patch 0014,
+// takes the megabytes in rising order, so the reads are nearly sequential). The workers check the next chunks while
+// the guest's request is served; its read of them is then a page-cache copy. Same checks: a chunk that fails is back
+// to UNCHECKED, and the guest's own read checks it again and fails.
+#define AHEAD_THREADS 3
+#define AHEAD_QUEUE   64
+static struct {
+  pthread_mutex_t lock;
+  pthread_cond_t work, idle;
+  struct { xh_verify *v; int fd; uint64_t chunk; } job[AHEAD_QUEUE];
+  unsigned head, n, threads;
+  bool tried;
+} pool = { .lock = PTHREAD_MUTEX_INITIALIZER, .work = PTHREAD_COND_INITIALIZER, .idle = PTHREAD_COND_INITIALIZER };
+
+static void *ahead_worker(void *arg)
+{
+  (void)arg;
+  uint8_t *buffer = NULL;
+  uint32_t buffer_size = 0;
+  pthread_mutex_lock(&pool.lock);
+  for (;;) {
+    while (!pool.n) pthread_cond_wait(&pool.work, &pool.lock);
+    xh_verify *v = pool.job[pool.head].v;
+    int fd = pool.job[pool.head].fd;
+    uint64_t c = pool.job[pool.head].chunk;
+    pool.head = (pool.head + 1) % AHEAD_QUEUE;
+    pool.n--;
+    pthread_mutex_unlock(&pool.lock);
+    pthread_mutex_lock(&v->lock);
+    bool take = v->state[c] == CHUNK_QUEUED && chunk_buffer(&buffer, &buffer_size, v->chunk);
+    if (take) v->state[c] = CHUNK_CHECKING;
+    else if (v->state[c] == CHUNK_QUEUED) v->state[c] = CHUNK_UNCHECKED;     // no memory: the guest's read checks it
+    pthread_mutex_unlock(&v->lock);
+    if (take) {
+      uint64_t t0 = verify_now_ns();
+      int r = check_chunk(v, fd, c, buffer);
+      pthread_mutex_lock(&v->lock);
+      v->state[c] = r ? CHUNK_UNCHECKED : CHUNK_CHECKED;
+      if (r) v->stats.ahead_failed++;
+      else { v->stats.ahead_chunks++; v->stats.ahead_ns += verify_now_ns() - t0; }
+      pthread_cond_broadcast(&v->changed);
+      pthread_mutex_unlock(&v->lock);
+    }
+    pthread_mutex_lock(&pool.lock);
+    if (!--v->queued) pthread_cond_broadcast(&pool.idle);
+  }
+  return NULL;
+}
+
+unsigned xh_verify_ahead(xh_verify *v, int fd, uint64_t first, unsigned chunks)
+{
+  unsigned queued = 0;
+  if (!v || !chunks) return 0;
+  pthread_mutex_lock(&pool.lock);
+  if (!pool.tried) {
+    pool.tried = true;
+    for (unsigned i = 0; i < AHEAD_THREADS; i++) {
+      pthread_t thread;
+      if (pthread_create(&thread, NULL, ahead_worker, NULL) == 0) { pthread_detach(thread); pool.threads++; }
+    }
+  }
+  for (uint64_t c = first; pool.threads && c < v->count && c < first + chunks && pool.n < AHEAD_QUEUE; c++) {
+    pthread_mutex_lock(&v->lock);
+    bool take = v->state[c] == CHUNK_UNCHECKED;
+    if (take) v->state[c] = CHUNK_QUEUED;
+    pthread_mutex_unlock(&v->lock);
+    if (!take) continue;
+    unsigned at = (pool.head + pool.n) % AHEAD_QUEUE;
+    pool.job[at].v = v; pool.job[at].fd = fd; pool.job[at].chunk = c;
+    pool.n++;
+    v->queued++;
+    queued++;
+  }
+  if (queued) pthread_cond_broadcast(&pool.work);
+  pthread_mutex_unlock(&pool.lock);
+  return queued;
+}
+
+uint32_t xh_verify_chunk(const xh_verify *v) { return v->chunk; }
+
+void xh_verify_stats_take(xh_verify *v, xh_verify_stats *out)
+{
+  pthread_mutex_lock(&v->lock);
+  *out = v->stats;
+  memset(&v->stats, 0, sizeof v->stats);
+  pthread_mutex_unlock(&v->lock);
 }
 
 const uint8_t *xh_verify_digest(const xh_verify *v) { return v->digest; }
@@ -404,7 +534,19 @@ const uint8_t *xh_verify_digest(const xh_verify *v) { return v->digest; }
 void xh_verify_close(xh_verify *v)
 {
   if (!v) return;
-  free(v->list); free(v->done);
+  // Its jobs out of the queue, then the ones at work waited for: no worker touches it once it is freed.
+  pthread_mutex_lock(&pool.lock);
+  unsigned kept = 0;
+  for (unsigned i = 0; i < pool.n; i++) {
+    unsigned from = (pool.head + i) % AHEAD_QUEUE;
+    if (pool.job[from].v == v) { v->queued--; continue; }
+    pool.job[(pool.head + kept++) % AHEAD_QUEUE] = pool.job[from];
+  }
+  pool.n = kept;
+  while (v->queued) pthread_cond_wait(&pool.idle, &pool.lock);
+  pthread_mutex_unlock(&pool.lock);
+  free(v->list); free(v->state);
+  pthread_cond_destroy(&v->changed);
   pthread_mutex_destroy(&v->lock);
   free(v);
 }

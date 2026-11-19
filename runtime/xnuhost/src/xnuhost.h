@@ -68,6 +68,7 @@ typedef struct {
   int   ram_huge;           // ram-huge=0|1 (1): 2 MiB host pages for the RAM where the host allows them (fix-ram-hugepages)
   int64_t ram_gpu_reserve;  // ram-gpu-reserve=SIZE (256 MiB): KGSL's own memory and the GPU's host buffers
   int   ram_pagetable_percent;   // ram-pagetable-percent=N (8): the iOS tasks' page tables, % of the guest's RAM
+  int   disk_ahead;         // disk-ahead=N (8; 0 to 64, 0 = off): chunks of a verified image checked ahead after a sequential read
   uint64_t ram_fit, ram_fit_available;   // what fits and the MemAvailable it came from (both 0: not known)
   // The most RAM that can be held locked beside the session's needs, in 256 MiB steps: ram_fit rounded down when the lock
   // is expected to work (ram_lock_expected), else 0. The one figure a mode that puts more behind the locked part (iOS's
@@ -579,6 +580,12 @@ int      xh_blk_read(xh_blk *b, uint64_t offset, void *buffer, uint64_t length);
 int      xh_blk_write(xh_blk *b, uint64_t offset, const void *buffer, uint64_t length);
 int      xh_blk_flush(xh_blk *b);
 void     xh_blk_close(xh_blk *b);
+// The name in the disk's statistics line (its role); the read-ahead's depth for every verified image (disk-ahead=,
+// chunks checked after a sequential read; 0 = none); one request's type (virtio-blk's: 0 read, 1 write, 4 flush),
+// bytes and nanoseconds, with a `disk NAME: 10 s: ...` line every 10 s while requests come.
+void     xh_blk_set_name(xh_blk *b, const char *name);
+void     xh_blk_set_ahead(unsigned chunks);
+void     xh_blk_account(xh_blk *b, unsigned type, uint64_t bytes, uint64_t ns);
 
 // virtio-mmio transport, version 2, split queues (virtio.c)
 #define XH_VIRTIO_QUEUES 4

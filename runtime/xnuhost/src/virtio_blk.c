@@ -4,6 +4,7 @@
 #include "xnuhost.h"
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define F_RO (1ull << 5)
 #define F_BLK_SIZE (1ull << 6)
@@ -19,6 +20,8 @@ static int64_t blk_handle(xh_virtio *dev, unsigned queue, uint16_t head, xh_viov
   // header (readable, 16 bytes), data parts, status (writable, 1 byte, last)
   if (n < 2 || iov[0].writable || iov[0].length != sizeof req || !iov[n - 1].writable || iov[n - 1].length < 1) return 0;
   memcpy(&req, iov[0].data, sizeof req);
+  struct timespec t0;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
   uint8_t status = S_OK;
   uint64_t offset = req.sector * 512, written = 0;
   if (req.sector > UINT64_MAX / 512) status = S_IOERR;
@@ -45,6 +48,11 @@ static int64_t blk_handle(xh_virtio *dev, unsigned queue, uint16_t head, xh_viov
   if (trace < 0) trace = getenv("XNUHOST_BLKLOG") != NULL;
   if (trace) LOGI("blk %p: type %u sector %llu, %u parts, %llu bytes, status %u", (void *)disk, req.type, (unsigned long long)req.sector, n - 2, (unsigned long long)(offset - req.sector * 512), status);
   iov[n - 1].data[0] = status;
+  // The request's cost for the disk's statistics line (blk.c): the guest's vCPU waited for all of it.
+  struct timespec t1;
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  uint64_t ns = (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000000u + (uint64_t)t1.tv_nsec - (uint64_t)t0.tv_nsec;
+  if (req.sector <= UINT64_MAX / 512) xh_blk_account(disk, req.type, offset - req.sector * 512, ns);
   return (int64_t)written + 1;
 }
 

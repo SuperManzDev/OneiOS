@@ -15,9 +15,61 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
-struct xh_blk { int fd; uint64_t bytes; bool writable; xh_verify *verify; };
+struct xh_blk {
+  int fd; uint64_t bytes; bool writable; xh_verify *verify;
+  char name[16];                // the disk's role (main.c), for its statistics line
+  uint64_t last_end;            // where the last read ended: a read that starts near it is sequential (the read-ahead)
+  // Since the last statistics line; one request at a time (virtio_blk.c answers under the device's lock).
+  struct { uint64_t since, reads, read_bytes, writes, write_bytes, flushes, busy_ns, max_ns; } io;
+};
+
+// Chunks checked ahead after a sequential read of a verified image (disk-ahead=, xh_blk_set_ahead; 0 = none).
+static unsigned ahead_chunks = 8;
+void xh_blk_set_ahead(unsigned chunks) { ahead_chunks = chunks > 64 ? 64 : chunks; }
+void xh_blk_set_name(xh_blk *b, const char *name) { snprintf(b->name, sizeof b->name, "%s", name && *name ? name : "?"); }
+
+static uint64_t blk_now_ns(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;
+}
+
+// One request's cost (virtio_blk.c), and every 10 s while requests come one line:
+//   disk systemos: 10 s: reads 4821 (4712 MiB), writes 0 (0 MiB), flushes 0; in requests 8123 ms (mean 1685 us, max 12345
+//   us); chunks checked: 300 on the reads (450 ms), 4100 ahead (5900 ms on the workers), 120 waits (80 ms)
+// "in requests" is the time the guest's vCPUs spent in this disk's requests (its driver sends one at a time and waits).
+void xh_blk_account(xh_blk *b, unsigned type, uint64_t bytes, uint64_t ns)
+{
+  uint64_t now = blk_now_ns();
+  if (!b->io.since) b->io.since = now;
+  if (type == 0) { b->io.reads++; b->io.read_bytes += bytes; }
+  else if (type == 1) { b->io.writes++; b->io.write_bytes += bytes; }
+  else if (type == 4) b->io.flushes++;
+  b->io.busy_ns += ns;
+  if (ns > b->io.max_ns) b->io.max_ns = ns;
+  if (now - b->io.since < 10000000000ull) return;
+  uint64_t n = b->io.reads + b->io.writes + b->io.flushes;
+  char checks[256] = "";
+  if (b->verify) {
+    xh_verify_stats s;
+    xh_verify_stats_take(b->verify, &s);
+    snprintf(checks, sizeof checks, "; chunks checked: %llu on the reads (%llu ms), %llu ahead (%llu ms on the workers), %llu waits (%llu ms)%s",
+             (unsigned long long)s.sync_chunks, (unsigned long long)(s.sync_ns / 1000000), (unsigned long long)s.ahead_chunks,
+             (unsigned long long)(s.ahead_ns / 1000000), (unsigned long long)s.waits, (unsigned long long)(s.wait_ns / 1000000),
+             s.failed || s.ahead_failed ? ", some chunks FAILED their check" : "");
+  }
+  LOGI("disk %s: %llu s: reads %llu (%llu MiB), writes %llu (%llu MiB), flushes %llu; in requests %llu ms (mean %llu us, max %llu us)%s",
+       b->name[0] ? b->name : "?", (unsigned long long)((now - b->io.since) / 1000000000u), (unsigned long long)b->io.reads,
+       (unsigned long long)(b->io.read_bytes >> 20), (unsigned long long)b->io.writes, (unsigned long long)(b->io.write_bytes >> 20),
+       (unsigned long long)b->io.flushes, (unsigned long long)(b->io.busy_ns / 1000000), (unsigned long long)(n ? b->io.busy_ns / n / 1000 : 0),
+       (unsigned long long)(b->io.max_ns / 1000), checks);
+  memset(&b->io, 0, sizeof b->io);
+  b->io.since = now;
+}
 
 #define DATA_DEFAULT_BYTES (32ull << 30)      // sparse: costs what the guest writes
 
@@ -105,6 +157,17 @@ int xh_blk_read(xh_blk *b, uint64_t offset, void *buffer, uint64_t length)
     if (n < 0 && errno == EINTR) continue;
     if (n <= 0) return -1;
     done += (uint64_t)n;
+  }
+  // A read that starts within 2 MiB of where the last one ended is sequential (the guest's vCPUs take the shared
+  // cache's megabytes in rising order, a little out of turn): the next chunks are checked ahead (imageset.c,
+  // xh_verify_ahead), so the guest's read of them is a page-cache copy. A random read queues nothing.
+  if (b->verify && ahead_chunks && length) {
+    uint64_t end = offset + length, window = 2ull << 20;
+    if (b->last_end && offset + window >= b->last_end && offset <= b->last_end + window) {
+      uint64_t chunk = xh_verify_chunk(b->verify);
+      (void)xh_verify_ahead(b->verify, b->fd, (end - 1) / chunk + 1, ahead_chunks);
+    }
+    b->last_end = end;
   }
   return 0;
 }
