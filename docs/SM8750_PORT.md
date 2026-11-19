@@ -355,3 +355,17 @@ guest is still iPhone18,2 iOS 27.0.1.
     (YumikoHayamato/OneOS `81438a5`; staged: `oneios_switch.sh` `fab19cf9...`, `oneios_return.sh` `01b328c1...`), and
     `profiles/pa3q`'s `ram-pagetable-percent=28` (the page tables and the mappings' slab, 23 % of the guest measured):
     5632 MiB for MemAvailable 8.3-8.6 GiB, 512-768 MiB more for the host. Staged; not yet run.
+- 2026-11-19: **session 6 on the phone** (12:46:00 to the coordinator's `phone return` at 12:54:16; battery and case
+  33.5 C at the start; `logs/pa3q-s6/`). `swappiness: 130 -> 20` in `switch.log` and `20 -> 130 (One UI's)` in
+  `return.log` (read back: 130); `ram=auto` 5888 MiB (MemAvailable 8611 MiB). **No swap storm**: host MemAvailable
+  2488 -> 1361 MiB in the first 90 s (session 5: 1908 -> 1067), swap 0-0.25 MB/s (session 5: up to 122 MB/s each way).
+  Still hot in the first minutes: the case 33.5 -> 44.0 C in 75 s (heavy, by the case), host CPU 419-698 % (sys
+  231-389 %): for about 100 s after the first frame iOS keeps all eight vCPUs busy (`oneios-cpu` all 764-799 %:
+  iconservicesagent 112-122 %, SpringBoard 39-89 %, backboardd 22-82 %, GeneralMapsWidget 108 % with geod 90 %,
+  Spotlight, chronod, PerfPowerServices, biomed), then 157 %. The owner: a slight improvement, still too much lag.
+  Touch to the guest's next frame (`input: touch: ... the guest's next frame X ms after the touch-down`, 22 touches):
+  min 27, median 53, p90 95, max 768 ms; the touch reaches iOS's event driver 0.2-0.5 ms after the scan (max 3 ms),
+  so the time is iOS's own work under the hosted costs. The 768 ms one: PosterBoard bringing up Metal (the plug-in's
+  and freedreno's library validation, the AGX user client, two GPU contexts) for about 800 ms; meanwhile 235 GPU blobs
+  in 10 s at a mean of 981 us each, and the render server's submit calls up to 3.8 ms (they share the device's mutex
+  with the slow lane's blob creations).
