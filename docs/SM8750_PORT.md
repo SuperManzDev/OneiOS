@@ -136,3 +136,16 @@ guest is still iPhone18,2 iOS 27.0.1.
   The app re-sends its own scripts when it stages (the `script` verb): re-apply the line, or install the fork's APK
   (needs a GitHub token with `read:packages` for tribalfs' packages, and an uninstall of the 0.5.14 signature).
 
+- 2026-11-19: **the owner's PC (Garuda, KDE X11), section 0 of `docs/building.md`.** `/` has about 280 MB free and
+  is not to be used: the checkout is on `/mnt/tkg-build` (an ext4 image, loop-mounted from the NTFS games disk,
+  ntfs-3g/FUSE) and the bulky parts (`inputs/`, NDK r28c, build-tools 35.0.0, JDK 17, pacman downloads) on
+  `/mnt/giochi/Linux/oneios`. rustup 1.98.0 with `rust-src`, the pinned `ipsw` CLI. The missing Arch packages (tmux,
+  cmake, ninja, qemu-user, dash, meson, python-mako, android-tools, libdispatch, plus jsoncpp, protobuf, abseil-cpp)
+  are extracted, not installed, into a private sysroot `/mnt/tkg-build/oneios/sysroot` (`. sysroot/env.sh`;
+  wrappers in `~/.local/bin`); the local pacman sync db was stale, so the packages come from a freshly fetched
+  core/extra index. apfs-fuse `66b86bd` built from source into the same sysroot (needs `-include cstdint` with
+  current GCC). mksh not installed (optional). xtool and the Xcode `.xip`: at section 9.
+  **A desktop freeze**: `cargo build --release` of `oneios-tool` with the target on the loop image over ntfs-3g
+  stalled I/O until only the mouse moved (no OOM, no panic). Heavy builds on this PC: `CARGO_TARGET_DIR` (and other
+  build trees) on `/tmp` (tmpfs, 20 GB), `nice -n 19 ionice -c3`, few jobs; the result copied back. Built that way:
+  3 min 23 s, `-j4`.
