@@ -127,4 +127,12 @@ guest is still iPhone18,2 iOS 27.0.1.
   `oneios-s25-ultra` `d928cdc` adds `SM-S938*:pa3q:SM8750`; `app/` points at it. `oneios-tool` (built static,
   musl) runs from the owner's PC over wireless adb: `phone status` said `ready 0 unsupported device: SM-S938B (pa3q,
   SM8750)` before the new script was staged.
+- 2026-11-19: on the phone the installed app is OneOS 0.5.14 (versionCode 143), older than the fork (its
+  `oneios_root.sh` 32450 bytes `6c635500...`, the fork's 37161 `7c118c76...`; the app runs only the root script whose
+  hash its build pins). So `app stage-scripts` was not used (it would stage the fork's newer trio beside the old
+  app). Instead the staged 0.5.14 `oneios_switch.sh` got the same one gate line (`SM-S938*:pa3q:SM8750`; the
+  original kept at `/data/local/tmp/oneios_switch.sh.orig-0.5.14` and in the owner's `HakiOS/stage-backup/`). Then
+  `oneios-tool phone status`: `ready 0 no iOS image set is staged`: the gate passes; the image set is what is left.
+  The app re-sends its own scripts when it stages (the `script` verb): re-apply the line, or install the fork's APK
+  (needs a GitHub token with `read:packages` for tribalfs' packages, and an uninstall of the 0.5.14 signature).
 
