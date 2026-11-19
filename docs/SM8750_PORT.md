@@ -175,3 +175,15 @@ guest is still iPhone18,2 iOS 27.0.1.
   `.github/workflows/metal-plugin.yml` (manual) on GitHub's `xcode-27` runner (Xcode 27.2): the SystemOS member and the
   iOS 27 stubs are made on the runner and deleted there; the only output, the bundle, gpuaddon and build record, is
   encrypted with the repository secret `METAL_ARTIFACT_KEY` (the key file stays on the owner's PC) and kept one day.
+- 2026-11-19: **the Metal plug-in and the guest helpers, from GitHub's macOS runner** (`metal-plugin.yml`, run
+  44462716584, third try: before it, `oneios-tool` did not build on macOS since `fab228e` (`sched_getscheduler`,
+  fixed in `af5df8a`), and Mesa's meson wanted Python's `packaging` (`b6da3cc`)). Xcode 27.2, SDK iPhoneOS27.2, stubs
+  from 24A446's SystemOS (4723 stubs, cache UUID `77BC8C63...`): `NativeAdrenoMetal` 18,894,656 bytes, CDHash
+  `74d4b44d...`; `libvulkan_freedreno.dylib` 16,871,920 bytes, CDHash `eb4b82da...`; macho-check passed. Helpers
+  (run 44469915441, `[helpers-only]`): oneios-init `66c1359c...`, bootstat, seed, mg, thermal. Both artifacts were
+  deleted from GitHub after the download. The SystemOS step takes about 25 minutes on the runner, the plug-in about
+  25. **Image set with both** (no dropbear, no camera plug-in): 22 files, 17,898,683,607 bytes, archive sha256
+  `e535905f...26182fe`; the hook placed the plug-in in `/private/var/oneios/addons/Extensions` and oneios-init's
+  services (bootstat, identity, thermal); both CDHashes are in `overlay/userland/owner-trust.json`.
+  The local ld64 with libtapi (`ios-toolchain.sh --ld`) stopped at its libblocksruntime check (the libdispatch of
+  the private sysroot is not in `ldconfig`): not needed while the runner builds the iOS code.
