@@ -127,17 +127,41 @@ draws with the CPU (as on the PC under xnuhost, `docs/gpu.md`).
   not drawn after 12 more minutes; chronod aborted once (EXC_CRASH). Ended at 40 minutes by a mistake of the bench's
   (killing the `timeout` that holds QEMU kills QEMU too: give a long timeout from the start).
 
-- Run 7 (6 vCPUs, a 3 h limit): launchd 13 minutes after the start, backboardd at t=271 s, the logo 18 minutes after
-  launchd; then all six vCPUs 65-80 % busy for SpringBoard's first start (and lsd, which builds the LaunchServices
-  database of a new store: 6 to 11 minutes on the phone).
-- Touch and keys (prepared, not run yet): `xnuloader-qemu --input tablet,keyboard` (boot-vm.sh `INPUT=tablet,keyboard`)
-  puts QEMU's virtio-tablet-device and virtio-keyboard-device on the transports after the GPU as `/arm-io/input-N`;
-  Droid-VM's virtio-input transport takes an absolute pointer as one finger while its button is down (the VNC client's
-  mouse), and the native kernel links the hosted `hid` archive (NativeHidInput's touch screen and keys).
+- Run 7 (6 vCPUs, a 3 h limit, stopped by hand after 1 h 50 min): launchd 13 minutes after the start, backboardd at
+  t=271 s, the logo 18 minutes after launchd, and nothing else for an hour while all six vCPUs were 65-80 % busy. iOS's
+  own log, read from a copy of the store (`oneios-tool ioslog health` / `show --proc`, no mount): no hang, no watchdog,
+  no jetsam, one crash (chronod); SpringBoard took the display (`FBSDisplayConfiguration ... Main; mode: "414x896@2x
+  60Hz sRGB SDR"`) and bootstrapped PosterBoard, then went quiet; and **rapportd logged 1.54 million lines in 14 minutes**
+  (`DiscoveryCache: After pruning 0 records, 0 records remain cached`, between Bonjour browses that mDNSResponder never
+  answers: `kDNSServiceErr_Timeout`). Without a network interface rapportd spins and logd_helper with it. The bench now
+  turns off rapportd and analyticsd with the phone's four (`oneios-disable-jobs=`, hosted 0053); the lasting answer is
+  a network on the bench.
+- Touch and keys: `xnuloader-qemu --input tablet,keyboard` (boot-vm.sh `INPUT=tablet,keyboard`) puts QEMU's
+  virtio-tablet-device and virtio-keyboard-device on the transports after the GPU as `/arm-io/input-N`; Droid-VM's
+  virtio-input transport takes an absolute pointer as one finger while its button is down (the VNC client's mouse), and
+  the native kernel links the hosted `hid` archive. Run 8: `droidvm input /arm-io/input-0: QEMU Virtio Tablet, pointer`,
+  `input-1: QEMU Virtio Keyboard, keyboard`, `touch screen: Digitizer/Touch Screen, Built-In, DisplayIntegrated published
+  on the event service`, both event drivers attached.
+- The CPU report runs without a GPU now: `oneios-cpu: 10 s: kernel_task[0] 298%, launchd[1] 6%, ...` (the kernel's
+  threads hashing the shared cache for launchd's dyld).
+- **Run 8 (rapportd and analyticsd off, touch and keys): the lock screen.** launchd 11 minutes after the start, the
+  logo, and 18 minutes after launchd **iOS 27's lock screen** (the date and clock, the battery, the home indicator; the
+  date is 31 December 1969 in Pacific time: no RTC), drawn by SpringBoard with the CPU
+  (`logs/native-qemu/2026-11-20-run8-lock-screen.png`). `oneios-cpu` then: iconservicesagent, chronod, backboardd and
+  SpringBoard. A swipe sent as VNC pointer events reached backboardd (the touch screen's event service has one user
+  client, backboardd) and the lock screen answered with **"Swipe up to open"**; the unlock itself did not happen within
+  the run: the clock went away and the screen stayed on the date, with backboardd and BackgroundShortcutRunner taking
+  most of the six vCPUs and spindump running (an hour under QEMU is a few minutes of a phone). The run was stopped at
+  2 h 25 min; its unified log was not on the store yet (logd had not written it out).
+- Touching from a script: boot-vm.sh gives QEMU a QMP socket too (`qmp.sock`), and `scripts/qemu/touch.sh OUT tap X Y`
+  / `swipe X1 Y1 X2 Y2 [MS]` sends the tablet's absolute events through it (QEMU's monitor has only relative ones).
 
 ## Next
-1. The display past the boot video: backboardd's and SpringBoard's frames drawn by the CPU; touch through VNC; the RTC
-   (virt's PL031) for the clock.
+1. On the bench: the unlock and the Home screen (more time, or less work: the display's size, the jobs that a bench has
+   no use for), a network (QEMU's virtio-net: mDNSResponder, rapportd and the others have nothing to talk to), the RTC
+   (virt's PL031) for the clock, and the CPU report's idle time (`hosted_processors_idle_mach` from XNU's own processor
+   idle counters, so that `all` is bounded by the CPUs). The bench's speed is QEMU's (TCG on x86): it proves the paths,
+   not the frame rate.
 2. The S25's live FDT, read only, for the SM8750 machine tree; how the phone gets its root (a RAM disk first: no UFS
    writes); the phone's ID registers (FEAT_LVA: the assertion above).
 3. The Adreno 830's kernel side for XNU with Turnip (references: UniXNU's Adreno740, UniXNU-houji's A750 port).

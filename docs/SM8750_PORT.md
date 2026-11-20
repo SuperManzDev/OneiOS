@@ -402,3 +402,9 @@ guest is still iPhone18,2 iOS 27.0.1.
   `xnuloader-qemu --image`) mounts the image set's root, formats and fills the Data store from the seed and runs
   **launchd** and its boot tasks (20th). On the way: the prelink no longer applies the hosted rewrites to a native
   kernel's kexts, sheng's IPI recovery and the one-kind-of-CPU topology as under xnuhost, QEMU's CPU a Cortex-A710.
+- 2026-11-20: **the native kernel's display and touch on the PC** (`docs/native.md`, "The display on the bench"): the
+  hosted kernel's display, GPU transport (its control queue now as long as the device takes) and touch archives on
+  QEMU's virtio-gpu, tablet and keyboard. backboardd draws the Apple logo, then SpringBoard **iOS 27's lock screen**,
+  with the CPU (no 3D); a swipe through VNC reaches backboardd and the lock screen shows "Swipe up to open". Under QEMU
+  an hour is minutes of a phone: the unlock did not finish in the run. Found with iOS's own log read from the store:
+  rapportd spinning without a network (1.5 million log lines in 14 minutes), turned off on the bench.

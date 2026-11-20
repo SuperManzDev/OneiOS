@@ -21,7 +21,7 @@
 #                               and virtio-keyboard-device, for the kernel's touch screen and keys (the hid archive)
 # Out: OUT (out/qemu/vm) serial.log (the kernel's console on the PL011), qemu.log (QEMU's -d log, the first 64 MB), and
 # xnuloader-qemu's layout files; monitor.sock, QEMU's monitor while it runs (scripts/qemu/shot.sh takes a picture of the
-# display). A guest restart ends the run (-no-reboot). QEMU comes from the project's sysroot
+# display), and qmp.sock, its QMP socket (scripts/qemu/touch.sh taps and swipes on the tablet). A guest restart ends the run (-no-reboot). QEMU comes from the project's sysroot
 # (/mnt/tkg-build/oneios/sysroot, QEMU_SYSROOT=; Arch's qemu-system-aarch64 extracted there, never installed to /), and
 # its modules from there too (QEMU_MODULE_DIR: virtio-gpu-device is qemu-hw-display-virtio-gpu's module).
 set -euo pipefail
@@ -64,7 +64,7 @@ echo "boot-vm: $SECS s of QEMU $(LD_LIBRARY_PATH=$SYSROOT/usr/lib "$QEMU" --vers
 set +e
 # QEMU's own log (-d) goes to stderr, here into the pipe; when head has its 64 MB QEMU gets SIGPIPE and stops.
 QEMU_MODULE_DIR=$SYSROOT/usr/lib/qemu LD_LIBRARY_PATH=$SYSROOT/usr/lib timeout "$SECS" "$QEMU" "${args[@]}" "${display[@]}" -no-reboot \
-  -monitor "unix:$OUT/monitor.sock,server=on,wait=off" \
+  -monitor "unix:$OUT/monitor.sock,server=on,wait=off" -qmp "unix:$OUT/qmp.sock,server=on,wait=off" \
   -serial "file:$OUT/serial.log" -d "$debug" 2>&1 >/dev/null | head -c 64000000 > "$OUT/qemu.log"
 code=${PIPESTATUS[0]}
 set -e
