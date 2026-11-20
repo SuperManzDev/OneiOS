@@ -9,6 +9,7 @@ pub mod adb;
 pub mod app;
 pub mod cpu;
 pub mod cycle;
+pub mod hw;
 pub mod local;
 pub mod log;
 pub mod phone;
@@ -82,6 +83,14 @@ pub enum Command {
         /// Where the trace goes (default oneios-cpu.pftrace)
         #[arg(long, value_name = "FILE")]
         out: Option<String>,
+    },
+    /// The hardware as the phone's kernel was given it, read only, for the native path: the device tree
+    /// (/sys/firmware/fdt), /proc's cmdline, cpuinfo, meminfo, iomem, partitions, interrupts, the CPUs' MIDR, the
+    /// panel's connector and the partitions' names, into DIR. Named files only; refused during a session
+    Hw {
+        /// The folder for the files (fdt.dtb, iomem.txt, ..., hw.txt)
+        #[arg(long, value_name = "DIR", default_value = "phone-hw")]
+        out: String,
     },
     /// Only during a session: the panel's level (/sys/class/backlight/panel0-backlight/brightness)
     Backlight {
@@ -258,6 +267,7 @@ pub fn main(cli: Cli) -> i32 {
         Command::Touch { command: TouchCommand::Status } => Adb::connect(serial).and_then(|adb| session::touch_status(&adb)),
         Command::Touch { command: TouchCommand::Wake } => Adb::connect(serial).and_then(|adb| session::touch_wake(&adb)),
         Command::Cpu { trace, out } => Adb::connect(serial).and_then(|adb| cpu::cpu(&adb, trace, out.as_deref())),
+        Command::Hw { out } => Adb::connect(serial).and_then(|adb| hw::hw(&adb, &out)),
         Command::Backlight { command: BacklightCommand::Status } => Adb::connect(serial).and_then(|adb| session::backlight_status(&adb)),
         Command::Backlight { command: BacklightCommand::Set { level } } => Adb::connect(serial).and_then(|adb| session::backlight_set(&adb, level)),
         Command::Stage { kind, dir } => Adb::connect(serial).and_then(|adb| phone::stage(&adb, &kind, &dir)),

@@ -52,6 +52,25 @@ run as root. **The port cannot start without a rooted S25 Ultra.**
 - **Backlight**: `panel` max 0; `panel0-backlight` max 12750 (now 1571). Same shape as the S26: the bridge's
   default ceiling would be 12750; a slider sweep (read only) is needed before any write (S26 method).
 - Memory: 11.4 GB, 16 GB zram swap, 3.2 GB available with One UI up.
+- **Live FDT and /proc, 2026-11-20** (`oneios-tool phone hw`, read only; the files stay in the git-ignored
+  `logs/pa3q-hw/`: they carry the handset's serial number). GICv3: GICD `0x16000000` (64 KiB), one GICR region
+  `0x16080000` (2 MiB, stride `0x40000`), ITS `0x16040000`. PSCI 1.0 by SMC. CPUs: MPIDR `0x000`..`0x500` (6 cores,
+  cluster 0, MIDR `0x514f0014`) and `0x10000`, `0x10100` (cluster 1, `0x513f0014`), REVIDR 0. Arch timer 19.2 MHz, PPIs
+  13/14/11/10 (sec phys, phys, virt = INTID 27, hyp). RAM: 22 ranges; the largest is **9 GiB in one piece at
+  `0x8_c000_0000`..`0xb_0000_0000`** (System RAM in iomem, no reserved hole in it). Splash: `cont_splash_region`
+  `0xfc800000` + 43 MiB. Panel: `nt37801` AMOLED, **command mode** DSI with DSC, `card0-DSI-1` 1440x3120 at
+  120/80/60/48/30/24/10 Hz (no scan-out without the DPU's kick or autorefresh). UFS: `ufshc@1d84000`, SPI 265.
+  Partitions to back up before a native test: `modemst1` sda1, `modemst2` sda2 (4 MiB each), `fsc` sda3, `persist`
+  sda5 (32 MiB), `efs` sda6, `sec_efs` sda7 (20 MiB each), `param` sda8, `steady` sda20, `fsg` sdd1 (4 MiB),
+  `uefivarstore` sdd13. Kernel config: `CONFIG_UH=y`, `CONFIG_RKP=y`, `CONFIG_KDP=y` (Samsung's hypervisor-backed
+  protections), `CONFIG_MODULE_SIG_PROTECT=y`, no kexec; VA 39 bits, PA 48 bits.
+- **Gunyah and AVF** (same read): `/dev/gunyah` `crw-rw-rw-` (`vendor_gunyah_dev`), no `/dev/kvm`;
+  `ro.boot.hypervisor.protected_vm.supported=true` and no `vm.supported` (protected VMs only, as on the other 8 Elite
+  phones); `feature:android.software.virtualization_framework`; AVF's `crosvm` 0.1.0 with `--hypervisor`,
+  `--protected-vm-without-firmware`, `--swiotlb`, `--serial`, `--gpu`, `--input`, `--vhost-user`, virtio over PCI only
+  (no virtio-mmio option); no `pvmfw.img` in the apex. Qualcomm's own `qcrosvm` runs the `trustedvm` since boot.
+  Modules: `kernelsu`, Qualcomm's `gh_*` and `gunyah_loader`, `gh_virt_wdt` (the watchdog of the VM One UI runs in).
+  `vm info` from root's shell fails (`virtmgr`: "Failed to remove memlock rlimit: Permission denied").
 
 ## 1. Workflow (the S26 method)
 

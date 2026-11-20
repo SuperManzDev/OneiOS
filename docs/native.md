@@ -9,8 +9,18 @@ shut down (no bootloader unlock). Months of work; the GPU (Adreno 830, no XNU dr
 - The SM8750's Oryon cores have no 16 KiB translation granule (ID_AA64MMFR0_EL1 TGran16 = 0, measured on a OnePlus 13
   by palazik/ios-dodge, `external/ios-dodge/NOTES.md`): 4 KiB pages. The standalone kernel carries UniXNU's native-4k
   patches (`out/kernel/current/series.txt`).
-- From ios-dodge (to verify on the S25's live FDT): GICv3 distributor 0x16000000, redistributors 0x16080000 with a
-  stride of 0x40000, the timer at 19.2 MHz, PSCI by SMC, a framebuffer console (no usable UART).
+- From ios-dodge, **verified on the S25's live FDT on 2026-11-20** (`oneios-tool phone hw`; the numbers are in
+  `docs/SM8750_PORT.md` section 0b): GICv3 distributor 0x16000000, redistributors 0x16080000 with a stride of
+  0x40000, the timer at 19.2 MHz (virtual timer INTID 27), PSCI by SMC, no usable UART. The S25 adds: 9 GiB of RAM in
+  one piece at 0x8_c000_0000, a **command-mode** panel (the bootloader's splash at 0xfc800000 is not scanned out by
+  itself), Samsung's hypervisor-backed protections in its kernel (`CONFIG_UH`, `RKP`, `KDP`) and no kexec.
+- Starting XNU alone needs Linux to hand the CPUs over (the bootloader is locked: no `fastboot boot`, which is how
+  ios-dodge, ios-sweet and ios-lemonadep start theirs). One UI runs as a VM of Qualcomm's Gunyah at EL2
+  (`gh_virt_wdt` is its watchdog), with Samsung's protections beside it: whether they let a kernel module load, turn
+  off Linux's MMU and set XNU's own TTBR1/TCR/SCTLR is unknown [U], and the first try that fails resets the phone.
+- **The same Gunyah runs protected VMs for Android** (AVF): `ro.boot.hypervisor.protected_vm.supported=true`,
+  `/dev/gunyah`, AVF's crosvm in the apex. XNU as such a guest runs at EL1 on the real cores with its own page tables,
+  and One UI stays up under it (see "A VM under Gunyah" below).
 - Safety (ios-dodge `RECOVERY.md`: ios-topaz lost its GPT to an iOS UFS driver that wrote LUN0): before any test on
   the phone, back up LUN0's GPT and the handset's unique partitions (Samsung's EFS and the modem's); iOS runs from
   RAM; XNU writes nothing to UFS until its driver is trusted.
@@ -156,12 +166,47 @@ draws with the CPU (as on the PC under xnuhost, `docs/gpu.md`).
 - Touching from a script: boot-vm.sh gives QEMU a QMP socket too (`qmp.sock`), and `scripts/qemu/touch.sh OUT tap X Y`
   / `swipe X1 Y1 X2 Y2 [MS]` sends the tablet's absolute events through it (QEMU's monitor has only relative ones).
 
+## A VM under Gunyah (2026-11-20)
+What the S25 says (read only, `docs/SM8750_PORT.md` section 0b): protected VMs only, `/dev/gunyah`, AVF's crosvm 0.1.0
+with `--hypervisor`, `--protected-vm-without-firmware` and `--swiotlb`, its virtio devices on PCI. What others ran on
+Gunyah [F, their reports]:
+- OnePlus 13 (8 Elite, kernel 6.6.126, unlocked): Debian and Windows guests under Droid-VM's crosvm build,
+  `--hypervisor gunyah --protected-vm-without-firmware --disable-sandbox`, virtio over PCI, a guest kernel with
+  `CONFIG_DMA_RESTRICTED_POOL` (the host reads no guest RAM outside the swiotlb pool), 2 MiB huge pages reserved by a
+  module against Android's fragmentation. AVF's own crosvm with a Debian kernel put that phone into Qualcomm's crash
+  dump mode (a forced restart). https://blog.lyc8503.net/en/post/android-virtualization-on-snapdragon/
+- Lenovo Legion Y700 gen 4 (SM8750, Android 15, unlocked): Debian under crosvm with `--protected-vm-without-firmware
+  --swiotlb 64` after `ulimit -l unlimited`. https://github.com/polygraphene/gunyah-on-sd-guide
+- Droid-VM's UniXNU guest (`external/UniXNU-droidvm/README.md`, "State"): XNU to the lock and Home screen under crosvm
+  on Gunyah on SM8650 and SM8850, 4 KiB pages, devices on virtio-mmio (Droid-VM's crosvm branch `wip/virtio-mmio`),
+  `--protected-vm-pseudo-unprotected`, which needs Droid-VM's host modules (`docs/plan.md` section 8). Phone resets
+  seen there: a vCPU stuck in the hypervisor with a device the guest did not know; a guest stuck in WFE killed from
+  the host (`tools/rig/pacprobe/README.md`).
+
+None of them is a Samsung: whether Samsung's Gunyah takes a VM made from root's shell is unknown [U]; the bootloader
+unlock of those phones is not what Gunyah asks for (root and `/dev/gunyah` are).
+
+What it would change: the bench's native kernel is already a guest of that shape (GICv3, PSCI, Droid-VM's virtio-mmio
+layout). Under crosvm it needs PSCI by HVC, the 19.2 MHz timer, every virtio buffer in the swiotlb pool (a protected
+VM's host sees nothing else), and either a virtio-pci transport (AVF's crosvm) or Droid-VM's crosvm (BSD-3, built for
+Android on the PC). The disk is the image set's files on /data served as virtio-blk, as on the bench: no UFS driver,
+no RAM disk, nothing written to UFS by XNU. One UI stays up under the VM, and the way back is `crosvm stop`, no
+reboot. The risk is the others': a guest that hangs in the hypervisor can reset the phone (One UI comes back, without
+the temporary root).
+
+The first test: a payload of a few instructions (Droid-VM's pacprobe is the model) under AVF's crosvm, 1 vCPU, 128
+MiB, no device but the serial port: it prints a line on the 8250 at 0x3f8, reads the ID registers (TGran16, VARange,
+PAC), never waits in WFE and powers off by PSCI by itself; a run still up after 20 s is stopped through
+`crosvm stop`. It answers whether Samsung's Gunyah runs our VM at all.
+
 ## Next
-1. On the bench: the unlock and the Home screen (more time, or less work: the display's size, the jobs that a bench has
+1. The owner's choice, with the facts above: the Gunyah VM (its first test needs the owner's go, the worst case being
+   a phone reset), or XNU alone, whose unknowns are the hand-off under Samsung's protections, the command-mode panel
+   with no display driver, and UFS behind file-based encryption (a RAM disk cannot hold the 16 GB image set).
+2. On the bench: the unlock and the Home screen (more time, or less work: the display's size, the jobs that a bench has
    no use for), a network (QEMU's virtio-net: mDNSResponder, rapportd and the others have nothing to talk to), the RTC
    (virt's PL031) for the clock, and the CPU report's idle time (`hosted_processors_idle_mach` from XNU's own processor
    idle counters, so that `all` is bounded by the CPUs). The bench's speed is QEMU's (TCG on x86): it proves the paths,
    not the frame rate.
-2. The S25's live FDT, read only, for the SM8750 machine tree; how the phone gets its root (a RAM disk first: no UFS
-   writes); the phone's ID registers (FEAT_LVA: the assertion above).
-3. The Adreno 830's kernel side for XNU with Turnip (references: UniXNU's Adreno740, UniXNU-houji's A750 port).
+3. The phone's ID registers (FEAT_LVA: the assertion above), from the first test's payload.
+4. The Adreno 830's kernel side for XNU with Turnip (references: UniXNU's Adreno740, UniXNU-houji's A750 port).

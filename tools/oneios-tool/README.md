@@ -1268,6 +1268,7 @@ oneios-tool phone touch wake                  # 2,0 then 2,1 to that node, then 
 oneios-tool phone backlight status            # the panel's level, max_brightness, One UI's own value (read only)
 oneios-tool phone backlight set N             # 1..max_brightness (12750); the return writes One UI's own value back
 oneios-tool phone cpu [--trace S] [--out F]   # cores, domains, top and capped clocks, cpusets, xnuhost's threads and uclamps (read only)
+oneios-tool phone hw [--out DIR]              # the hardware map: fdt.dtb, iomem, partitions, kernel.config, Gunyah/AVF (read only)
 oneios-tool phone pull-data OUT [--ioslog]    # data/data.img in chunks, each checked against the phone's sha256, zero runs as holes;
                                               #   run again after a stop and it goes on (OUT.part, OUT.part.progress)
                                               #   [--chunk MIB] [--retries 5] [--backoff 2] [--stall 120] [--verify chunk|end] [--restart]
@@ -1547,6 +1548,22 @@ What all of them keep:
 HAL writes when the panel comes on, and what the brightness bridge writes when iOS's level leaves 0,
 `runtime/bridges/brightness/README.md`), reads it back and prints it; status 1 when it does not read `1`. Only
 that one named node: the bridge's own search of `tsp*` folders is not repeated here.
+
+**`phone hw [--out DIR]`** (native path, 2026-11-20; `crates/oneios-phone/src/hw.rs`). Read only, refused during a session:
+the phone's hardware as its running kernel was given it, for XNU's machine tree on the phone (`docs/native.md`). Into DIR
+(default `phone-hw`): `fdt.dtb` (`/sys/firmware/fdt`, the flattened tree the bootloader handed Linux; checked for its
+magic; `dtc -I dtb -O dts` decompiles it, the sysroot has dtc), `cmdline.txt`, `version.txt`, `cpuinfo.txt`,
+`meminfo.txt`, `iomem.txt` (root: real addresses), `partitions.txt`, `interrupts.txt`, `cpuregs.txt` (MIDR and REVIDR of
+cpu0-7 by name), `drm.txt` (`/sys/class/drm/card0-DSI-1/{status,modes}`), `by-name.txt` (`ls -l /dev/block/by-name`: one
+folder of /dev, for the backups of the native path's safety rules), `props.txt`, `modules.txt` (`/proc/modules`),
+`hyp.txt` (`ls -lZ` of `/dev/gunyah`, `/dev/kvm`, `/dev/udmabuf` and AVF's `crosvm`, `vm`, `pvmfw.img` by name; the
+hypervisor's properties; the package manager's virtualization features), `avf.txt` (`vm info`, `crosvm version`,
+`crosvm run --help`: queries, no VM is made, 20 s each) and `config.gz` (`/proc/config.gz`, also unpacked to
+`kernel.config`); `hw.txt` lists what came. One script for the texts (each after a `=== NAME` line, each in a subshell
+whose stdin is /dev/null: `vm info` waited on the script's own stdin for ever on 2026-11-20), one `exec-out` per binary.
+Named files only (`hw::tests::the_script_reads_named_files_only`; 3 unit tests). Run on the S25 on 2026-11-20 (what it
+found: `docs/SM8750_PORT.md` section 0b); the files carry the handset's serial number, so they stay in the git-ignored
+`logs/`.
 
 **`phone cpu [--trace SECONDS] [--out FILE]`** (fix-host-overhead, 2026-11-15; `crates/oneios-phone/src/cpu.rs`). Read
 only, with or without a session: for each of cpu0-7 by name, the core (`regs/identification/midr_el1`), `cpu_capacity`,

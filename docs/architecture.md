@@ -92,7 +92,9 @@ capabilities, never grabbed). The audit table of every path, and each bridge's s
 
 ## What it is not
 
-- Not a VM: no hypervisor, no Gunyah (an unsigned guest is refused on this firmware), no bootloader unlock.
+- Not a VM: no hypervisor, no Gunyah, no bootloader unlock (xnuhost is a Linux process). The phone's Gunyah reports
+  protected VMs only (`ro.boot.hypervisor.protected_vm.supported=true`, read 2026-11-20); whether it runs ours is
+  open: `docs/native.md` "A VM under Gunyah".
 - Not an emulator: no instruction translation (that is the vphone app's QEMU path).
 - Not a secure store: no Secure Enclave, no passcode, no lock. The guest's key store is software with keys anyone can
   derive (`kernel/patches/oneios-hosted/keystore/README.md`); the Data store is as private as One UI keeps the file.
