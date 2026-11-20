@@ -386,3 +386,19 @@ guest is still iPhone18,2 iOS 27.0.1.
     `oneios-cpu` lines of the first 100 s without searchd and PerfPowerServices. The Maps widget's chain (the largest
     optional one in session 6) needs the owner to remove the widget. The runtime has to be staged before this profile:
     an older xnuhost refuses `boot-args-add` and does not start.
+- 2026-11-19: **session 7 on the phone** (runtime 0.1.13-dev with the two fixes and the profile; xnuhost 640.8 s to its
+  `exit 0` at 1205.0 s; `logs/pa3q-s7/`, local). The jobs: `oneios-jobs: com.apple.searchd: disabled in disabled.plist
+  (it was not)`, the same for spotlight.IndexAgent (axassetsd was already). The GPU's lanes: 51 reports, the render
+  server's longest wait for an app's command 1 us in most and 3.6-8.9 ms in the worst five (session 6: blobs of 13-27
+  ms each queued ahead of it), the app lane gave way 84 times. Thermal: `trapping (was heavy; by case): case 46.0 C,
+  SoC 104.6 C` 107 s after the start, and with it iOS's "too hot" state (about 10 fps). The owner, without the Maps
+  widget: more responsive, no heavy lag, 30-40 fps steady, 20 while an app opens, and slower and slower as apps are
+  opened and closed again until motion stops. What is left of the hosted lag is the trap path (more than half of the
+  CPU the host spends is Linux's), the thermal trap and backboardd's GPU buffers (about 9300 small mappable ones of its
+  own task, about 1.4 GiB, growing with each app open): the owner chose the native path (`docs/native.md`).
+- 2026-11-19 and 20: **the native path on the PC** (`docs/native.md`): XNU alone at EL1 under QEMU's virt board. The
+  plain kernel boots to the root-device wait (19th). The native kernel (`kernel/build-native.sh`: the hosted kernel's OS
+  layer without its host, hosted 0076; its disk driver checks every chunk it reads against the image set's hash lists;
+  `xnuloader-qemu --image`) mounts the image set's root, formats and fills the Data store from the seed and runs
+  **launchd** and its boot tasks (20th). On the way: the prelink no longer applies the hosted rewrites to a native
+  kernel's kexts, sheng's IPI recovery and the one-kind-of-CPU topology as under xnuhost, QEMU's CPU a Cortex-A710.

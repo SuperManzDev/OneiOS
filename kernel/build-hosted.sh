@@ -12,10 +12,21 @@
 # out/kernel/current-hosted/xnu.macho. The VM kernel's build (build-linux.sh, out/kernel/current) is not touched:
 # this one has its own output root and its own copy of the device repository (out/hosted-device: kernel/device as committed, with
 # the hosted series added to the board's patch series), so the two never share a work tree.
+#
+# ONEIOS_MACHINE=native (what kernel/build-native.sh sets): the native kernel instead, XNU alone at EL1 (docs/native.md).
+# The same series with CONFIG_XNU_ONEIOS_NATIVE=y and no hosted machine layer (configs/oneios_native_defconfig: 0076
+# opens the OS layer to it), the archives a machine without a host takes (storage, board, aes, keystore), the sealed
+# kernel without the hosted fixups. Its own trees: out/kernel-native, out/native-device, out/kernel/current-native
+# (NATIVE_OUT=NAME: each with -NAME). HOSTED_OUT is not asked for.
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 HOST=$(uname -s)
 case "$HOST" in Linux|Darwin) ;; *) echo "build-hosted: Linux or macOS only" >&2; exit 1 ;; esac
+MACHINE=${ONEIOS_MACHINE:-hosted}
+case "$MACHINE" in hosted|native) ;; *) echo "build-hosted: ONEIOS_MACHINE is hosted or native, not $MACHINE" >&2; exit 2 ;; esac
+if [ "$MACHINE" = native ]; then
+  SUFFIX=${NATIVE_OUT:+-$NATIVE_OUT}
+else
 # HOSTED_OUT=NAME: a second, independent work tree and output (out/kernel-hosted-NAME, out/hosted-device-NAME,
 # out/kernel/current-hosted-NAME), so that several people can build and edit at once. The default tree is the lead's.
 # It must be named: HOSTED_OUT=lead is the default tree (out/kernel-hosted, out/kernel/current-hosted), which is the
@@ -23,7 +34,8 @@ case "$HOST" in Linux|Darwin) ;; *) echo "build-hosted: Linux or macOS only" >&2
 [ -n "${HOSTED_OUT:-}" ] || { echo "build-hosted: set HOSTED_OUT=<your name> (your own work tree; 'lead' is the lead's)" >&2; exit 2; }
 [ "$HOSTED_OUT" != lead ] || HOSTED_OUT=
 SUFFIX=${HOSTED_OUT:+-$HOSTED_OUT}
-export KERNEL_OUT=$ROOT/out/kernel-hosted$SUFFIX KERNEL_DEFCONFIG=oneios_hosted_defconfig
+fi
+export KERNEL_OUT=$ROOT/out/kernel-$MACHINE$SUFFIX KERNEL_DEFCONFIG=oneios_${MACHINE}_defconfig
 . "$ROOT/kernel/lib/stage.sh"
 . "$ROOT/kernel/lib/host.sh"
 JOBS=${JOBS:-$(host_jobs)}
@@ -50,14 +62,14 @@ stage_sources
 
 # The device repository of this build: the committed one, the hosted defconfig, and the hosted series last.
 # (two levels below the repository, as kernel/device is: the board's archive script finds drivers/ from there)
-DEVICE=$ROOT/out/hosted-device$SUFFIX
+DEVICE=$ROOT/out/$MACHINE-device$SUFFIX
 # The archive scripts take their sources (drivers/, kernel/patches/oneios-hosted/*) from this checkout, named here:
 # found from DEVICE's resolved path they came from another checkout whenever out/ is a link into it (a worktree
 # whose out/ points at the shared checkout built that checkout's older drivers/ into its kernel: no touch).
 export ONEIOS_REPO=$ROOT
 rm -rf "$DEVICE"; mkdir -p "$DEVICE"
 git -C "$ROOT" archive HEAD kernel/device | tar -x -C "$DEVICE" --strip-components=2
-cp "$ROOT/kernel/device/configs/oneios_hosted_defconfig" "$DEVICE/configs/"
+cp "$ROOT/kernel/device/configs/oneios_${MACHINE}_defconfig" "$DEVICE/configs/"
 sed_i "s#^\.\./\.\./\.\./\.\./external/#$ROOT/external/#" "$DEVICE/patches/xnu-12377/series"
 python3 -I - "$DEVICE/board.toml" "${HOSTED_SERIES:-$ROOT/kernel/patches/oneios-hosted/series}" <<'PY'
 import re, sys
@@ -103,6 +115,19 @@ PY
 # scripts until 2026-11-13 (build-oneios-NAME.py, copied into the device repository); their output is frozen in
 # tools/oneios-tool/tests/kernelgen/golden.
 stage_tool
+if [ "$MACHINE" = native ]; then
+  # The native kernel's archives: the disks before the board's own entry, the software AES and the key store after it
+  # (oneios_native_defconfig force-loads all five itself). No GPU, display, HID, audio or Wi-Fi: those are the host's.
+  awk '/^[[:space:]]*"oneios-tool kernel gen board",?[[:space:]]*$/ {
+         match($0, /^[[:space:]]*/); pad = substr($0, 1, RLENGTH); n++
+         printf "%s\"oneios-tool kernel gen storage\",\n%s\"oneios-tool kernel gen board\",\n", pad, pad
+         printf "%s\"oneios-tool kernel gen aes\",\n%s\"oneios-tool kernel gen keystore\",\n", pad, pad
+         next }
+       { print }
+       END { exit n == 1 ? 0 : 1 }' "$DEVICE/board.toml" > "$DEVICE/board.toml.native" \
+    || { echo "build-hosted: board.toml archives have no single entry of the board's own" >&2; exit 1; }
+  mv "$DEVICE/board.toml.native" "$DEVICE/board.toml"
+else
 ENTRIES=()
 for name in storage board aes keystore net hid audio gpu display; do
   ENTRIES+=("oneios-tool kernel gen $name")
@@ -128,6 +153,7 @@ if 'CONFIG_XNU_NATIVE_LEGACY_DISPLAY' in text:
     raise SystemExit('build-hosted: the hosted defconfig already sets CONFIG_XNU_NATIVE_LEGACY_DISPLAY')
 open(config, 'w').write(text.rstrip('\n') + '\nCONFIG_XNU_NATIVE_LEGACY_DISPLAY=y\n')
 PY
+fi
 mkdir -p "$UNIXNU_OUT_DIR"
 [ -e "$UNIXNU_OUT_DIR/feeds" ] || [ ! -d "$ROOT/out/kernel/unixnu/feeds" ] || ln -s "$ROOT/out/kernel/unixnu/feeds" "$UNIXNU_OUT_DIR/feeds"
 
@@ -162,20 +188,23 @@ fi
 # whose HMAC field is empty: corecrypto's integrity self-test fails on it (-2074).
 SEALED=$WORK/tree/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped
 [ -f "$SEALED.crypto-hmac.json" ] || { echo "build-hosted: $SEALED was not sealed" >&2; exit 1; }
-mkdir -p "$ROOT/out/kernel/current-hosted$SUFFIX"
-cp "$SEALED" "$ROOT/out/kernel/current-hosted$SUFFIX/xnu.macho"
+CURRENT=$ROOT/out/kernel/current-$MACHINE$SUFFIX
+mkdir -p "$CURRENT"
+cp "$SEALED" "$CURRENT/xnu.macho"
+SEALED=$CURRENT/xnu.macho
+if [ "$MACHINE" = hosted ]; then
 # Post-link text fixes of the hosted layer (`oneios-tool kernel hosted-fixup`, kernel/hosted-fixup.py until 2026-11-13: a
 # vCPU's identity comes from xnuhost, not
 # MPIDR_EL1), on the copy; then the seal again, over the changed text (the build's own seal script, which takes
-# an already sealed kernel).
-SEALED=$ROOT/out/kernel/current-hosted$SUFFIX/xnu.macho
+# an already sealed kernel). The native kernel reads MPIDR_EL1 itself: it is booted as sealed.
 "$ONEIOS_TOOL" kernel hosted-fixup "$SEALED"
 ( cd "$WORK/tree" && UNIXNU_XNU_ARCH=arm64e python3 scripts/seal-source-crypto-kernel.py "$SEALED" )
+fi
 # XNU_FILESET_REFERENCE=1: the RELEASE reference of the prelink (kernel/prelink/build.sh REFERENCE=), next to the kernel.
 REF=$WORK/tree/build/xnu/fileset-reference/mach.release.bcm2837.unstripped.noctf
 if [ "${XNU_FILESET_REFERENCE:-0}" = 1 ]; then
   [ -f "$REF" ] || { echo "build-hosted: XNU_FILESET_REFERENCE=1 left no $REF" >&2; exit 1; }
-  cp "$REF" "$ROOT/out/kernel/current-hosted$SUFFIX/reference.macho"
-  echo "build-hosted: reference $ROOT/out/kernel/current-hosted$SUFFIX/reference.macho ($(file_size "$REF") bytes)"
+  cp "$REF" "$CURRENT/reference.macho"
+  echo "build-hosted: reference $CURRENT/reference.macho ($(file_size "$REF") bytes)"
 fi
-echo "build-hosted: $ROOT/out/kernel/current-hosted$SUFFIX/xnu.macho ($(file_size "$SEALED") bytes, sha256 $(sha256 "$SEALED" | cut -c1-16)...) in $(( $(date +%s) - T0 )) s on $HOST"
+echo "build-hosted: $CURRENT/xnu.macho ($MACHINE, $(file_size "$SEALED") bytes, sha256 $(sha256 "$SEALED" | cut -c1-16)...) in $(( $(date +%s) - T0 )) s on $HOST"

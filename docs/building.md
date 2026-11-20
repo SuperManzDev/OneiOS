@@ -176,6 +176,12 @@ scripts/bg.sh kernel-hosted env HOSTED_OUT=me kernel/build-hosted.sh
   `oneios-tool kernel port-legacy-display`).
 - The VM kernel (UniXNU's own board, not used by xnuhost): `scripts/bg.sh kernel kernel/build-linux.sh`; on a Mac,
   `kernel/build-macos.sh`. See [kernel/README.md](../kernel/README.md).
+- The **native** kernel (XNU alone at EL1, the native path of [native.md](native.md); first on QEMU's virt board):
+  `scripts/bg.sh kernel-native env LIBDISPATCH_PREFIX=/mnt/tkg-build/oneios/sysroot/usr kernel/build-native.sh`
+  -> `out/kernel/current-native/xnu.macho`. It is `build-hosted.sh` with `ONEIOS_MACHINE=native`: the same series
+  (0076 opens the OS layer to it), `oneios_native_defconfig`, the archives `storage board aes keystore`, no hosted
+  fixups; its own trees (`out/kernel-native`, `out/native-device`; `NATIVE_OUT=NAME` for another). On this PC: about
+  25 min from an empty tree, 2 min after a one-file change.
 
 The kernel links Apple's `corecrypto` under its Internal Use License: it is built locally and never released.
 
@@ -201,6 +207,12 @@ into those lists first (kernel/prelink/README.md, "Known-good pairs").
 
 A new kernel needs a new `kernel.kc`: every native address in it is that kernel's. The records list each kext left out
 and why, and the original functions still on the panic stub. Details: [kernel/prelink/README.md](../kernel/prelink/README.md).
+
+A native kernel's collection: `scripts/bg.sh prelink-native env KERNEL=$PWD/out/kernel/current-native/xnu.macho
+kernel/prelink/build.sh` -> `out/kernel/native-24A446/kernel.kc`. The script sees that the kernel has no hosted machine
+layer (`MACHINE=native`, or set it) and leaves Apple's kexts as they are: no step 3 (the hosted kernel's TPIDR_EL0,
+`ldr [x18]` and `smr_hash` rewrites are wrong at EL1), and never writes over the phone's `out/kernel/24A446`.
+Booting it on QEMU with the image set: [native.md](native.md), "The bench".
 
 ## 4. The runtime (xnuhost, helpers, phone tools)
 

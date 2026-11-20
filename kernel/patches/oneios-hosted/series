@@ -239,6 +239,16 @@
 # CLPC's hint (hostcall.h perf_hint: the class of the user thread a vCPU runs, for the host's uclamp and the GPU path);
 # hosted_processors_idle_mach for the oneios-cpu window's bound (gpu/cpu_window.h). README.md, "0075".
 0075-host-overhead-per-cpu-stats-perf-hint.patch
+# native-os-layer (2026-11-20): the hosted kernel's OS layer for the native kernel too (docs/native.md: XNU alone at EL1;
+# kernel/build-native.sh applies this whole series with CONFIG_XNU_ONEIOS_NATIVE=y and without CONFIG_XNU_HOSTED). Open
+# to it (#if XNU_HOSTED || XNU_ONEIOS_NATIVE): every block of kern_exec.c and oneios_hosted_root.c (the image set's root,
+# Data, seed and launch policy: 0004, 0012, 0032, 0035-0037, 0043, 0044, 0047, 0048, 0053, 0056, 0057, 0060, 0070), the
+# parallel code hash (0014), the boot manifest's /chosen (0010, 0011), the software AES and key store starts (0008,
+# 0022, their weak defaults in oneios_host.c), the Data volume's protection class off (0022) and the App cryptex's
+# authentication (0032) in kpi_vfs.c, the swap folder's log (0057) and iOS 27's shared region (0013). The host's own
+# calls in them stay hosted: the blocked-thread dump, the user backtraces, and the restart into a new seed (on a native
+# machine PEHaltRestart). makedefs passes -DXNU_ONEIOS_NATIVE=1. For the hosted kernel nothing compiles differently.
+0076-native-os-layer.patch
 # radio2: no numbered patch for the Wi-Fi: net/ is an archive of this build (kernel/build-hosted.sh,
 # oneios-tool kernel gen net), started by oneios_drivers_start's oneios_net_start (weak in drivers/bridge/OneiOSBridge.c).
 # net/README.md: IO80211Controller/IO80211Interface under the collection's original IOEthernetController and

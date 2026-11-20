@@ -1,6 +1,8 @@
 #!/bin/bash
 # Build OneiOS's kernel collection: the hosted XNU prelinked with the kexts of the iPhone18,2 iOS 27.0.1 kernelcache.
 #   scripts/bg.sh prelink kernel/prelink/build.sh
+#   KERNEL=out/kernel/current-native/xnu.macho kernel/prelink/build.sh   a native kernel (MACHINE=native, found by itself):
+#         Apple's kexts unchanged (no step 3), out/kernel/native-24A446 unless OUT= (docs/native.md)
 # Inputs  out/kernel/current-hosted/xnu.macho (kernel/build-hosted.sh; KERNEL=FILE for another),
 #         out/kernel-inputs/24A446/kernelcache.macho (scripts/image/kernel-inputs.sh),
 #         optionally REFERENCE=FILE, the RELEASE kernel of the same source with symbols
@@ -45,12 +47,21 @@ step() {
   esac
 }
 . "$ROOT/kernel/lib/host.sh"
-OUT=${OUT:-$ROOT/out/kernel/$BUILD}
-WORK=$OUT/work
-REFERENCE=${REFERENCE:-}
 for f in "$KERNEL" "$CACHE" "$XNUPRELINK/fileset_match.py"; do
   [ -f "$f" ] || { echo "prelink: $f is missing" >&2; exit 1; }
 done
+# MACHINE: hosted (the kernel runs as a process under xnuhost) or native (XNU alone at EL1: kernel/build-native.sh, or
+# build-linux.sh's plain kernel; docs/native.md). Unset: hosted when the kernel has the hosted machine layer (its
+# hosted_halt symbol), else native. A native kernel gets Apple's kexts as they are (no step 3) and, with no OUT, its
+# own folder: the phone's out/kernel/24A446 holds the hosted collection.
+if [ -z "${MACHINE:-}" ]; then
+  if grep -q -a _hosted_halt "$KERNEL"; then MACHINE=hosted; else MACHINE=native; fi
+fi
+case "$MACHINE" in hosted|native) ;; *) echo "prelink: MACHINE is hosted or native, not $MACHINE" >&2; exit 1 ;; esac
+if [ "$MACHINE" = native ]; then OUT=${OUT:-$ROOT/out/kernel/native-$BUILD}; else OUT=${OUT:-$ROOT/out/kernel/$BUILD}; fi
+WORK=$OUT/work
+REFERENCE=${REFERENCE:-}
+echo "prelink: a $MACHINE kernel, $KERNEL -> $OUT"
 sha() { sha256 "$1"; }
 want=$("$ONEIOS_TOOL" prelink pin "$PROFILE")
 [ "$(sha "$CACHE")" = "$want" ] || { echo "prelink: $CACHE is not the kernelcache the profile pins ($want)" >&2; exit 1; }
@@ -73,9 +84,20 @@ step merge-reviewed --reviewed "$OWN_REVIEWED" --native "$WORK/native.macho" --o
   $(ls "$HERE"/lead/reviewed-*-"$BUILD"-*.json "$HERE"/user/reviewed-*-"$BUILD"-*.json 2>/dev/null)
 # 2. Which kexts.
 step roots "$CACHE" "$WORK/select.json" "$PROFILE"
-# 3. The kexts for the hosted kernel: TPIDR_EL1 -> TPIDR_EL0, and what else a process cannot execute.
-rm -f "$WORK/kernelcache.hosted.macho"
-step hosted "$CACHE" "$WORK/kernelcache.hosted.macho" "$WORK/hosted.json" --closure "$WORK/select.json" ${X18:+--x18}
+# 3. The kexts for the hosted kernel: TPIDR_EL1 -> TPIDR_EL0, and what else a process cannot execute. Not for a native
+# kernel: at EL1 Apple's instructions are right as they are (the thread register, MPIDR_EL1, and smr_hash's orr that
+# restores bits 48..55 of a high kernel address: with the hosted rewrite APFS faulted on 0xff00fff0... at the Data
+# volume's first mount, 2026-11-20).
+rm -f "$WORK/kernelcache.hosted.macho" "$WORK/hosted.json"
+if [ "$MACHINE" = native ]; then
+  # The record step's report of this step, saying that nothing was rewritten.
+  printf '%s\n' '{' ' "convention": "native: Apple'"'"'s kexts as they are (XNU at EL1)",' ' "tpidr_el1_rewrites": [],' \
+    ' "mpidr_el1_rewrites": [],' ' "kernel_pointer_rewrites": [],' ' "kext_code_bytes_scanned": 0,' \
+    ' "privileged_instructions_total": {},' ' "privileged_instructions_by_kext": {},' ' "x18_checked": false,' \
+    ' "x18_instructions_by_kext": {}' '}' > "$WORK/hosted.json"
+else
+  step hosted "$CACHE" "$WORK/kernelcache.hosted.macho" "$WORK/hosted.json" --closure "$WORK/select.json" ${X18:+--x18}
+fi
 INPUT=$CACHE; [ -f "$WORK/kernelcache.hosted.macho" ] && INPUT=$WORK/kernelcache.hosted.macho
 # 4. The pairing of the original kernel with ours (reused while both inputs, the reference and XnuPrelink's matcher are
 # the same: a pairing from another XnuPrelink is refused by its emitter).

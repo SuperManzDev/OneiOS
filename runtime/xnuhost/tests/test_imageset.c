@@ -147,6 +147,16 @@ int main(void)
     CHECK(pwrite(fd, &image[IMAGE - 1], 1, IMAGE - 1) == 1);
     CHECK(xh_verify_range(v, fd, 2 * CHUNK, CHUNK / 2) == 0);
     CHECK(!memcmp(xh_verify_digest(v), xh_imageset_find(&set, "os.img.hashes")->sha256, 32));
+    // The list itself, as xnuloader-qemu puts it in the disk's node: the whole file, whose SHA-256 is the digest.
+    size_t list_size = 0;
+    const uint8_t *list = xh_verify_list(v, &list_size);
+    uint8_t list_digest[32];
+    xh_sha256 list_sha;
+    xh_sha256_init(&list_sha);
+    xh_sha256_update(&list_sha, list, list_size);
+    xh_sha256_final(&list_sha, list_digest);
+    CHECK(list && list_size == 32 + ((IMAGE + CHUNK - 1) / CHUNK) * 32 && !memcmp(list, "OIHL1\0\0\0", 8));
+    CHECK(!memcmp(list_digest, xh_verify_digest(v), 32));
     xh_verify_close(v);
   }
   close(fd);

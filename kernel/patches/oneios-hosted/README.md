@@ -1159,6 +1159,43 @@ unchanged M (no host map); perf hints H`. Built and booted on the PC (qemu-aarch
 2.6c); not run on the phone. On the phone: the 0075 line, the fill time per fill against before, `kernel maps` in the
 pmap line, and xnuhost's `perf:   queue:` and `thermal: 30 s: host CPU ... sys ...` lines.
 
+## 0076-native-os-layer.patch (native path, 2026-11-20)
+
+The native kernel (`kernel/build-native.sh`, `docs/native.md`: XNU alone at EL1) applies this whole series too, with
+`CONFIG_XNU_ONEIOS_NATIVE=y` and without `CONFIG_XNU_HOSTED` (`kernel/device/configs/oneios_native_defconfig`). Every
+other patch here is under `#if XNU_HOSTED`, so its machine layer stays out; 0076 opens to the native kernel the parts that
+are about iOS on the image set and not about the host (`#if XNU_HOSTED || XNU_ONEIOS_NATIVE`):
+
+| Where | What the native kernel gets |
+|---|---|
+| `bsd/kern/kern_exec.c` (all 20 blocks) | the OS and SystemOS volumes from the disks' nodes, the Data volume and its seed (0004), the boot manifest's AES start and `/chosen` mirror (0010), the systemos and App cryptex checks (0032, 0047), the staged apps, icons, lsd, LaunchServices store (0035-0037, 0043, 0060), the jobs enabled and disabled and the feature flags (0044, 0053, 0048), the swap folder (0057), the GPU addon and camera plug-in mounts (0031, 0056), the persisted log levels (0070) |
+| `bsd/kern/oneios_hosted_root.c` | the whole file (0004, 0012, 0032, 0047): Data format, seed unpack, cryptex views, launch policy |
+| `bsd/vfs/vfs_syscalls.c`, `bsd/vfs/kpi_vfs.c` | the kernel-path mkdir/symlink/unlink (0004); no protection class on the Data volume (0022); the App cryptex as authenticated (0032) |
+| `bsd/kern/ubc_subr.c` | the shared cache's code hash on every CPU (0014) |
+| `bsd/vm/vm_compressor_backing_file.c` | why a swap file cannot be opened (0057) |
+| `iokit/Kernel/IORegistryEntry.cpp`, `IOPlatformExpert.cpp` | the boot manifest mirrored onto the `/chosen` Image4 holds (0010); `/chosen` gets no nub (0011) |
+| `osfmk/mach/shared_region.h` | the 8 GiB shared region iOS 27's cache needs (0013) |
+| `osfmk/arm64/oneios_host.c` | the weak defaults of the GPU, AES and key store starts; the board's late start of the key store |
+| `osfmk/arm/cpu_common.c` | no clearing of a starting core's `SIGPdisabled` from another CPU (0006): under QEMU too a vCPU is a host thread, and the starting core's `assert_ml_cpu_signal_is_enabled(false)` failed (cpu 1, `cpu_signal` 0x8) |
+| `osfmk/arm64/machine_routines.c` | one kind of CPU is a non-standard topology (0016): QEMU's four vCPUs stopped launchd's first `workq_open` at `sched_clutch.c:6589` |
+| `osfmk/arm/model_dep.c` | the debugger's acknowledge timeout of 100000000 ticks (0017): every panic on the bench said "Debugger synchronization timed out" |
+| `makedefs/MakeInc.def` | `-DXNU_ONEIOS_NATIVE=1` from `XNU_ONEIOS_NATIVE=1` |
+
+What stays hosted inside the opened code: the blocked-thread dump when `newfs_apfs` hangs (0009's host debugging), the
+user backtraces (0026), the Metal plug-in's client list (no GPU archive in a native kernel: its file stays as the seed has
+it), and the restart into a first start when the Data volume holds another seed: `hosted_halt(XH_HALT_RESTART)` on a
+hosted kernel, `PEHaltRestart(kPERestartCPU)` on a native machine (under QEMU, `-no-reboot`: the run ends).
+
+The disks of a native kernel are the same class with the same nodes (`storage/OneiOSHostedDisk.cpp`, `#if !XNU_HOSTED`):
+the window is a device mapping instead of the host calls, and because no host checks the reads, the driver checks every
+chunk itself the first time it is read, against the hash list the loader puts in the node (`oneios,hash-list`, the image
+set's `*.hashes`), and calls the disk verified only when that list's SHA-256 is the node's `oneios,verified`. The loader
+is the root of trust there, as xnuhost is for a hosted kernel. The native build links the storage, software AES and key
+store archives (no GPU, display, HID, audio or Wi-Fi: those are the host's).
+
+For the hosted kernel nothing compiles differently: every changed condition is true there as before, and the added
+`#if XNU_HOSTED` lines keep the hosted code.
+
 ## 0049-wifi-association-event.patch (radio2, 2026-11-12)
 
 `kev_post_msg` (bsd/kern/kern_event.c) refuses an event that does not fit one mbuf without a cluster (`MLEN`), with

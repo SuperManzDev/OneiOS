@@ -45,14 +45,65 @@ shut down (no bootloader unlock). Months of work; the GPU (Adreno 830, no XNU dr
   `addMatchingNotification` with a block). Apple's clang signs block descriptor pointers and stock clang does not; the
   hosted kernel stripped the signature in hosted 0007, the standalone kernel did not. The hunk is now the board's
   `oneios-kext-block-descriptors.patch` (both kernels; the hosted source is the same as before).
-- **Where it stands (2026-11-19, QEMU, 60 s):** Darwin 25.5.0 with Apple's kexts runs through BSD and IOKit start:
-  AMFI, Sandbox, the MAC framework, CoreAnalyticsHub, our board drivers (off: no bridge on virt), the network stack,
-  APFS (`com.apple.filesystems.apfs` 3288.2.1), and stops at `Waiting on <dict ...IOMedia ... Apple_HFS>`: the root
-  device. The kernel side of the bench is done; the next stage is a disk.
+- 2026-11-19, QEMU, 60 s: Darwin 25.5.0 with Apple's kexts runs through BSD and IOKit start: AMFI, Sandbox, the MAC
+  framework, CoreAnalyticsHub, our board drivers (off: no bridge on virt), the network stack, APFS
+  (`com.apple.filesystems.apfs` 3288.2.1), and stops at `Waiting on <dict ...IOMedia ... Apple_HFS>`: the root device.
+
+## The native kernel and the image set's disks (2026-11-20)
+The plain kernel of `build-linux.sh` has no disks and none of what the hosted kernel does between the root mount and
+launchd. The **native kernel** has both, from the hosted kernel's own code:
+- `kernel/build-native.sh` (= `build-hosted.sh` with `ONEIOS_MACHINE=native`): the board's series and the whole hosted
+  series, with `CONFIG_XNU_ONEIOS_NATIVE=y` and without `CONFIG_XNU_HOSTED` (`kernel/device/configs/oneios_native_defconfig`),
+  so the hosted machine layer stays out; hosted `0076-native-os-layer.patch` opens to it what is about iOS on the image
+  set and not about the host (the root, Data, seed and launch policy of 0004 and the later blocks of `kern_exec.c`, the
+  boot manifest's `/chosen`, the parallel code hash, iOS 27's shared region, the AES and key store starts, one kind of
+  CPU, the debugger's acknowledge timeout; `kernel/patches/oneios-hosted/README.md` "0076"). The archives: `storage`,
+  `board`, `aes`, `keystore`. `out/kernel/current-native/xnu.macho`.
+- The disks: `OneiOSHostedDisk` (the hosted class, the same nodes) maps its virtio-mmio window, and since no host checks
+  the reads, checks every chunk of os, systemos and app against the image set's hash list when it is first read
+  ("oneios,hash-list" in the node; verified only when the list's SHA-256 is the node's "oneios,verified").
+- The collection: `kernel/prelink/build.sh` sees a native kernel (no `hosted_halt`) and leaves Apple's kexts as they are
+  (`out/kernel/native-24A446/kernel.kc`). Its step 3, the hosted rewrites, broke a native kernel twice: smr_hash's `orr`
+  turned into an `and` made APFS read `0xff00fff007ddd988` (`__smrh_empty` with bits 48..55 cleared) at the Data volume's
+  first mount, and `mrs MPIDR_EL1` became `ldr [x18]`.
+- The loader: `xnuloader-qemu ... --image DIR --data FILE` reads the image set as xnuhost does (its `imageset.c`: manifest,
+  hash lists, trust caches): the five disks on transports 0-4 (os, systemos, app, the seed read-only; the Data store
+  writable), each node with xnuhost's identity, `/chosen` root-matching on the OS volume, the four trust cache modules.
+  Modern virtio (`-global virtio-mmio.force-legacy=false`), and a Cortex-A710 (`pauth-impdef=on,sve=off,cntfrq=1 GHz`):
+  QEMU's `max` has FEAT_LVA, which the DEVELOPMENT kernel asserts no CPU has (`vm_sanitize.c:643`, at launchd's first
+  jobs).
+- The loop: `kernel/build-native.sh` (about 25 min from an empty tree, 2 min after a one-file change), then
+  `KERNEL=$PWD/out/kernel/current-native/xnu.macho kernel/prelink/build.sh` (1 min), then
+  `scripts/bg.sh qemu-native env KERNEL=$PWD/out/kernel/native-24A446/kernel.kc IMAGE=<image set> DATA=<store>
+  CPUS=4 RAM_MIB=2816 ARGS_ADD=oneios-data-wait=1800 OUT=$PWD/out/qemu/native scripts/qemu/boot-vm.sh 3600`. The
+  store (16 GiB, sparse, made by `boot-vm.sh`) is kept in RAM (`/tmp`); the image set stays where it is, read-only.
+
+Runs of 2026-11-20 (consoles in `logs/native-qemu/`, local):
+1. The disks start, all three images verified; the root (`Rave24A446.V54OS`) mounts and is accepted as a verified one;
+   the SystemCryptex over `/`; AES and Image4; `newfs_apfs` for the Data store, then APFS's data abort on the cleared
+   pointer above. Fixed in the prelink.
+2. cpu 1 stops at its start (`cpu_common.c:957`, `cpu_signal` 0x8 instead of `SIGPdisabled`): sheng's IPI recovery
+   cleared the flag from another vCPU, as it did under xnuhost (hosted 0006 turned it off; 0076 turns it off here too).
+   The others went on at 0.2 MB/s of disk.
+3. No stop until launchd: `newfs_apfs` (the first user process; its dyld hashed the shared cache, 5.8 GiB, at about
+   12 MB/s on 4 vCPUs) formatted the store, `seed verified: 6039 files (1252972721 bytes), 14818 folders`, the launch
+   policy ran (cryptex views, GPU addon, staged apps, jobs, features), **`load_init_program: /sbin/launchd`**, launchd
+   started `oneios-init` and `oneios-bootstat` (`ONEIOS-GUEST stage=bootstat-up`), then `sched_clutch.c:6589` (one
+   kind of CPU; hosted 0016, opened by 0076).
+4. The store's second start (mounted as it is, no seed): launchd in about a minute; `hello, launchd`, `Darwin
+   Bootstrapper Version 7.0.0`, and its boot tasks run (exclaves-boot, fsck, mount-phase-1, data-protection,
+   detect-installed-roots, boot mode `main`, mount-phase-2, init-with-data-volume, MSUEarlyBootTask, MobileAssetEarlyBootTask,
+   fips, ...), then `vm_sanitize.c:643` (the CPU model, above).
+5. **The Cortex-A710 (about 15 minutes, stopped by hand): no panic.** launchd's 60 boot tasks (keybag, usermanagerd,
+   dirs_cleaner, ...), then its daemons: 51 programs in all, among them runningboardd, configd, logd, amfid, keybagd,
+   powerd, thermalmonitord, locationd, CommCenter, bluetoothd, sharingd, containermanager, symptomsd, driverkitd and
+   **backboardd** (`ONEIOS-GUEST stage=backboardd-up t=176`: 176 s after `oneios-bootstat`); no crash on the console.
+   Not seen: SpringBoard (backboardd has no display here). The clock is at 1970 (no RTC on the machine tree).
+   logd_helper used 88 % of a vCPU for 100 s (`caught burning CPU`).
 
 ## Next
-1. A root disk on the bench: a virtio-mmio block driver in the standalone kernel (Droid-VM's NativeVirtioBlock, not in
-   `board.toml` yet) and QEMU virt's virtio-mmio windows in `xnuloader-qemu`'s tree; then the OS image to launchd.
+1. A display on the bench, for backboardd and SpringBoard (QEMU's ramfb or virtio-gpu 2D through a scanout like
+   UniXNU's GopFramebuffer), and the RTC (virt's PL031) for the clock.
 2. The S25's live FDT, read only, for the SM8750 machine tree; how the phone gets its root (a RAM disk first: no UFS
-   writes).
+   writes); the phone's ID registers (FEAT_LVA: the assertion above).
 3. The Adreno 830's kernel side for XNU with Turnip (references: UniXNU's Adreno740, UniXNU-houji's A750 port).

@@ -66,6 +66,10 @@ void xh_verify_stats_take(xh_verify *v, xh_verify_stats *out);
 void xh_verify_close(xh_verify *v);
 // The list's SHA-256: what the kernel publishes as the identity of a verified disk.
 const uint8_t *xh_verify_digest(const xh_verify *v);
+// The list itself (oneios-hash-list-1, already checked against the manifest), for a kernel that checks the chunks it
+// reads itself: the native kernel's OneiOSHostedDisk, which runtime/loader/tools/xnuloader-qemu.c gives it in the disk's
+// node ("oneios,hash-list"). Valid until xh_verify_close.
+const uint8_t *xh_verify_list(const xh_verify *v, size_t *size);
 struct xh_blk;
 void xh_blk_set_verify(struct xh_blk *b, xh_verify *verify);      // blk.c
 

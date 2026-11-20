@@ -16,6 +16,17 @@
 //     hashes are checked a second time here. xnuhost holds the kernel's memory, so it is the root of trust.
 //   - Which disk is which comes from the node too: "oneios,role" (os, systemos, app, data, seed) and
 //     "oneios,volume-uuid" (the APFS volume to mount from an image).
+//
+// The native kernel (XNU_ONEIOS_NATIVE, kernel/build-native.sh, docs/native.md: XNU alone at EL1, first on QEMU's
+// virt board) has the same class and the same nodes, with two differences:
+//   - The registers are a device mapping of the window (mapDeviceMemoryWithIndex), and the device answers when it
+//     answers: the queue is polled, as before.
+//   - Nobody checks the reads before the kernel sees them, so this driver does what xnuhost does: the loader puts the
+//     image's chunk hash list (oneios-hash-list-1, the file the manifest lists beside the image) in the node as
+//     "oneios,hash-list", and every chunk is read whole and checked against its SHA-256 the first time it is read; a
+//     chunk that differs is a read error and stays unchecked. The disk is a verified one ("oneios,verified") only when
+//     that list's SHA-256 is the one the node names. The loader is the root of trust here: it writes the kernel's
+//     memory, as xnuhost does for a hosted kernel.
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOLib.h>
@@ -33,8 +44,14 @@
 #include <sys/param.h>
 
 extern "C" {
+#if XNU_HOSTED
 uint32_t oneios_hosted_mmio_read32(uint64_t physical);
 void oneios_hosted_mmio_write32(uint64_t physical, uint32_t value);
+#else
+// The native kernel's chunk checks, for a debugger and the boot log: chunks checked, chunks that differed.
+volatile uint64_t oneios_native_chunks_checked = 0;
+volatile uint32_t oneios_native_chunk_failures = 0;
+#endif
 
 int native_verified_block_root_authorized(dev_t device);
 int native_verified_block_manifest_sha384(dev_t device, const char *uuid, uint8_t digest[48]);
@@ -84,8 +101,24 @@ class OneiOSHostedDisk : public IOBlockStorageDevice {
   char volumeUUID[37] = {};
   char seedSHA256[65] = {};
   uint64_t contentBytes = 0;
+#if XNU_HOSTED
   uint32_t read32(unsigned offset) const { return oneios_hosted_mmio_read32(registers + offset); }
   void write32(unsigned offset, uint32_t value) { oneios_hosted_mmio_write32(registers + offset, value); }
+#else
+  IOMemoryMap *registerMap = nullptr;
+  volatile uint32_t *mapped = nullptr;
+  uint32_t read32(unsigned offset) const { return mapped[offset / 4]; }
+  void write32(unsigned offset, uint32_t value) { mapped[offset / 4] = value; }
+  // The chunk checks: the node's hash list (oneios-hash-list-1: a 32-byte header, then a SHA-256 per chunk) and one bit
+  // per chunk, set once the chunk was read whole and matched. Under the gate, as every transfer.
+  OSData *hashList = nullptr;
+  uint8_t *checkedChunks = nullptr;
+  uint32_t chunkBytes = 0;
+  uint64_t chunkCount = 0;
+  uint64_t imageBytes = 0;
+  bool loadHashList(IOService *provider);
+  IOReturn readChecked(IOMemoryDescriptor *buffer, uint64_t into, uint64_t at, uint32_t *bytes);
+#endif
   void writeAddress(unsigned offset, uint64_t value) {
     write32(offset, static_cast<uint32_t>(value));
     write32(offset + 4, static_cast<uint32_t>(value >> 32));
@@ -288,10 +321,88 @@ void OneiOSHostedDisk::identity(IOService *provider)
   OSData *policy = OSDynamicCast(OSData, provider->getProperty("oneios,verified"));
   // Only a disk the device itself refuses to write can be a verified one.
   verified = policy && policy->getLength() == sizeof(verifiedDigest) && !writable;
+#if !XNU_HOSTED
+  // Native: verified only when this driver checks the reads, against the list the node names by its SHA-256.
+  if (verified) {
+    uint8_t listDigest[SHA256_DIGEST_LENGTH];
+    SHA256_CTX context;
+    SHA256_Init(&context);
+    if (hashList) SHA256_Update(&context, hashList->getBytesNoCopy(), hashList->getLength());
+    SHA256_Final(listDigest, &context);
+    verified = hashList && !memcmp(listDigest, policy->getBytesNoCopy(), sizeof(listDigest));
+  }
+#endif
   if (verified) memcpy(verifiedDigest, policy->getBytesNoCopy(), sizeof(verifiedDigest));
   if (role[0]) setProperty("oneios,role", role);
   setProperty("oneios,verified", verified);
 }
+
+#if !XNU_HOSTED
+static uint32_t le32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | static_cast<uint32_t>(p[3]) << 24; }
+static uint64_t le64(const uint8_t *p) { return le32(p) | static_cast<uint64_t>(le32(p + 4)) << 32; }
+
+// The node's "oneios,hash-list", as xnuhost's xh_verify_open reads the file: false for a list that is there and does
+// not describe this disk (the disk is then not started: its reads could not be checked). No list: nothing to check.
+bool OneiOSHostedDisk::loadHashList(IOService *provider)
+{
+  OSData *list = OSDynamicCast(OSData, provider->getProperty("oneios,hash-list"));
+  if (!list) return true;
+  const auto *p = static_cast<const uint8_t *>(list->getBytesNoCopy());
+  uint64_t size = list->getLength();
+  if (writable || size < 32 || memcmp(p, "OIHL1\0\0\0", 8) || le32(p + 12) != 1) return false;
+  uint32_t chunk = le32(p + 8);
+  uint64_t bytes = le64(p + 16), count = le64(p + 24);
+  // A chunk is read whole into the transfer buffer, and a piece of a request never crosses one: chunks of 4 KiB to
+  // the buffer's 1 MiB that divide it (the image sets' are 1 MiB).
+  if (chunk < 4096 || chunk > transferSize || (transferSize % chunk) || !bytes || bytes > capacity * 512 ||
+      capacity * 512 - bytes >= 512 || count != (bytes + chunk - 1) / chunk || size != 32 + count * 32) return false;
+  checkedChunks = static_cast<uint8_t *>(IOMallocZeroData(static_cast<vm_size_t>((count + 7) / 8)));
+  if (!checkedChunks) return false;
+  list->retain();
+  hashList = list;
+  chunkBytes = chunk;
+  chunkCount = count;
+  imageBytes = bytes;
+  return true;
+}
+
+// One piece of a read of a checked disk, at byte `at` of the image into `buffer` at `into`: *bytes is cut at the end of
+// the piece's chunk. A chunk read for the first time is read whole and compared with the list; a chunk that matched
+// before is read as asked (the device is the loader's and nothing else writes it, as xnuhost trusts its files). A chunk
+// that differs is a read error and stays unchecked: the next read checks it again.
+IOReturn OneiOSHostedDisk::readChecked(IOMemoryDescriptor *buffer, uint64_t into, uint64_t at, uint32_t *bytes)
+{
+  uint64_t chunk = at / chunkBytes, start = chunk * chunkBytes;
+  if (chunk >= chunkCount) return kIOReturnIOError;           // past what the list describes
+  if (*bytes > start + chunkBytes - at) *bytes = static_cast<uint32_t>(start + chunkBytes - at);
+  auto *data = static_cast<uint8_t *>(transferMemory->getBytesNoCopy());
+  IOReturn result;
+  if (checkedChunks[chunk / 8] & (1U << (chunk % 8))) {
+    if ((result = transfer(opRead, at / 512, *bytes))) return result;
+    return buffer->writeBytes(into, data, *bytes) == *bytes ? kIOReturnSuccess : kIOReturnIOError;
+  }
+  uint64_t want = imageBytes - start < chunkBytes ? imageBytes - start : chunkBytes;
+  uint32_t length = static_cast<uint32_t>((want + 511) & ~UINT64_C(511));
+  if ((result = transfer(opRead, start / 512, length))) return result;
+  uint8_t digest[SHA256_DIGEST_LENGTH];
+  SHA256_CTX context;
+  SHA256_Init(&context);
+  SHA256_Update(&context, data, static_cast<size_t>(want));
+  SHA256_Final(digest, &context);
+  if (memcmp(digest, static_cast<const uint8_t *>(hashList->getBytesNoCopy()) + 32 + chunk * 32, sizeof(digest))) {
+    uint32_t failures = __atomic_add_fetch(&oneios_native_chunk_failures, 1, __ATOMIC_RELAXED);
+    if (failures <= 8) printf("OneiOSHostedDisk: %s: chunk %llu differs from its hash list: a read error\n", role, chunk);
+    return kIOReturnIOError;
+  }
+  // The bytes after the image in its last sector are not in the list: zeros, and that chunk is checked at every read.
+  bzero(data + want, length - want);
+  if (want == chunkBytes) checkedChunks[chunk / 8] |= static_cast<uint8_t>(1U << (chunk % 8));
+  __atomic_fetch_add(&oneios_native_chunks_checked, 1, __ATOMIC_RELAXED);
+  uint64_t inner = at - start;
+  if (inner + *bytes > length) return kIOReturnIOError;
+  return buffer->writeBytes(into, data + inner, *bytes) == *bytes ? kIOReturnSuccess : kIOReturnIOError;
+}
+#endif
 
 bool OneiOSHostedDisk::start(IOService *provider)
 {
@@ -299,9 +410,22 @@ bool OneiOSHostedDisk::start(IOService *provider)
   IODeviceMemory *window = provider->getDeviceMemoryWithIndex(0);
   if (!window || window->getLength() < 0x108) return false;
   registers = window->getPhysicalAddress();
+#if !XNU_HOSTED
+  // Native: the window mapped as device memory (uncached, the default for a device's memory).
+  registerMap = provider->mapDeviceMemoryWithIndex(0);
+  mapped = registerMap ? reinterpret_cast<volatile uint32_t *>(registerMap->getVirtualAddress()) : nullptr;
+  if (!mapped) { registers = 0; return false; }
+#endif
   if (read32(0x00) != 0x74726976 || read32(0x04) != 2 || read32(0x08) != 2) { registers = 0; return false; }
   gate = IOLockAlloc();
   if (!gate || !configureQueue()) return false;
+#if !XNU_HOSTED
+  if (!loadHashList(provider)) {
+    printf("OneiOSHostedDisk: %s: its hash list does not describe it: not started\n", provider->getName());
+    reset();
+    return false;
+  }
+#endif
   identity(provider);
   IOLockLock(gate);
   IOReturn first = transfer(opRead, 0, 512);
@@ -312,8 +436,15 @@ bool OneiOSHostedDisk::start(IOService *provider)
   }
   unsigned slot = __atomic_fetch_add(&oneios_hosted_disks, 1, __ATOMIC_RELAXED);
   if (slot < maxDisks) disks[slot] = this;
+#if XNU_HOSTED
   printf("OneiOSHostedDisk: %s: %llu MiB, role %s%s%s\n", provider->getName(), capacity >> 11, role[0] ? role : "none",
          writable ? ", writable" : ", read-only", verified ? ", verified by xnuhost" : "");
+#else
+  printf("OneiOSHostedDisk: %s: %llu MiB, role %s%s%s\n", provider->getName(), capacity >> 11, role[0] ? role : "none",
+         writable ? ", writable" : ", read-only",
+         verified ? ", verified: each chunk checked against its hash list when first read" :
+         hashList ? ", its chunks checked (the node names no list digest: not a verified disk)" : "");
+#endif
   registerService();
   return true;
 }
@@ -331,6 +462,14 @@ IOReturn OneiOSHostedDisk::doAsyncReadWrite(IOMemoryDescriptor *buffer, UInt64 b
   IOLockLock(gate);
   while (online && actual < count * 512) {
     uint32_t bytes = static_cast<uint32_t>(count * 512 - actual > transferSize ? transferSize : count * 512 - actual);
+#if !XNU_HOSTED
+    if (reading && hashList) {
+      // a checked disk (native): piece by piece, never across a chunk
+      if ((result = readChecked(buffer, actual, block * 512 + actual, &bytes))) break;
+      actual += bytes;
+      continue;
+    }
+#endif
     if (!reading && buffer->readBytes(actual, transferMemory->getBytesNoCopy(), bytes) != bytes) {
       result = kIOReturnIOError;
       break;
@@ -391,6 +530,11 @@ void OneiOSHostedDisk::free()
   if (queueMemory) { queueMemory->release(); queueMemory = nullptr; }
   if (transferMemory) { transferMemory->release(); transferMemory = nullptr; }
   if (gate) { IOLockFree(gate); gate = nullptr; }
+#if !XNU_HOSTED
+  if (checkedChunks) { IOFreeData(checkedChunks, static_cast<vm_size_t>((chunkCount + 7) / 8)); checkedChunks = nullptr; }
+  if (hashList) { hashList->release(); hashList = nullptr; }
+  if (registerMap) { registerMap->release(); registerMap = nullptr; mapped = nullptr; }
+#endif
   IOBlockStorageDevice::free();
 }
 

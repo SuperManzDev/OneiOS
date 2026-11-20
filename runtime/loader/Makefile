@@ -2,7 +2,8 @@
 #   make            host build into build/host
 #   make test       host unit tests (generated fixtures, no Apple files)
 #   make android    cross-build for aarch64-linux-android into build/android
-# xnuloader-qemu places a standalone kernel for qemu-system-aarch64's virt board (scripts/qemu/boot-vm.sh, docs/native.md).
+# xnuloader-qemu places a standalone kernel for qemu-system-aarch64's virt board (scripts/qemu/boot-vm.sh, docs/native.md),
+# with an image set's disks: it compiles xnuhost's imageset.c (the manifest, hash lists and trust caches as xnuhost reads them).
 include $(dir $(lastword $(MAKEFILE_LIST)))../host.mk
 ANDROID_CC ?= $(TOOLS)/aarch64-linux-android30-clang
 ANDROID_AR ?= $(TOOLS)/llvm-ar
@@ -20,8 +21,8 @@ build/host/libxnuloader.a: $(SRC:src/%.c=build/host/%.o)
 	$(AR) rcs $@ $^
 build/host/xnuloader-inspect: tools/xnuloader-inspect.c build/host/libxnuloader.a
 	$(CC) $(CFLAGS) $^ -o $@
-build/host/xnuloader-qemu: tools/xnuloader-qemu.c build/host/libxnuloader.a
-	$(CC) $(CFLAGS) $^ -o $@
+build/host/xnuloader-qemu: tools/xnuloader-qemu.c ../xnuhost/src/imageset.c ../xnuhost/src/imageset.h build/host/libxnuloader.a
+	$(CC) $(CFLAGS) -I../xnuhost/src tools/xnuloader-qemu.c ../xnuhost/src/imageset.c build/host/libxnuloader.a -lpthread -o $@
 build/host/test_loader: tests/test_loader.c build/host/libxnuloader.a $(HDR)
 	$(CC) $(CFLAGS) -fsanitize=address,undefined tests/test_loader.c $(SRC) -o $@
 

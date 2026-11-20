@@ -531,6 +531,12 @@ void xh_verify_stats_take(xh_verify *v, xh_verify_stats *out)
 
 const uint8_t *xh_verify_digest(const xh_verify *v) { return v->digest; }
 
+const uint8_t *xh_verify_list(const xh_verify *v, size_t *size)
+{
+  *size = 32 + (size_t)v->count * 32;
+  return v->list;
+}
+
 void xh_verify_close(xh_verify *v)
 {
   if (!v) return;

@@ -1,0 +1,514 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index f996348..865cbb2 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -8024,7 +8024,7 @@ native_owner_cache_prepare(proc_t p, user_addr_t scratch, user_addr_t *envp)
+ #define XNU_OWNER_CACHE_VOLUME_UUID "7A23BAC7-E86D-4DF4-B181-E6D80F212AE5"
+ #endif
+ 	const char *volume = XNU_OWNER_CACHE_VOLUME_UUID;
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 	/*
+ 	 * OneiOS: the SystemOS and OS volumes are the ones the image set names, read from the device tree nodes of
+ 	 * xnuhost's disks (kernel/patches/oneios-hosted/storage/OneiOSHostedDisk.cpp), not build-time constants.
+@@ -8124,7 +8124,7 @@ native_owner_cache_prepare(proc_t p, user_addr_t scratch, user_addr_t *envp)
+ 	cache_authorized = cache_authorized && native_union;
+ #endif
+ 	if (!cache_authorized) { error = EAUTH; goto done; }
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 	{
+ 		/* OneiOS hosted (0047): this checked mount answers FSIOC_AUTH_FS for AMFI (oneios_hosted_root.c). */
+ 		extern void oneios_systemos_verified(mount_t);
+@@ -8152,7 +8152,7 @@ done:
+ 	if (!error && cache_authorized && root_recheck &&
+ 	    !native_owner_publish_boot_manifest(root_device, XNU_OWNER_ROOT_VOLUME_UUID,
+ 	        selected, volume)) error = EAUTH;
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 	/* OneiOS hosted: the IOAESAccelerator AppleImage4 waits for, now that /chosen has the boot manifest hash. */
+ 	if (!error) {
+ 		extern void oneios_software_aes_start(void);
+@@ -8621,7 +8621,7 @@ native_ls_store_names(const char *path, const char *prefix, char (*names)[64], u
+ 	vnode_put(vp);
+ 	return error;
+ }
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ /*
+  * OneiOS (0036): iconservicesagent's store of drawn icons (com.apple.IconsCache/<UUID>/*.isdata) is keyed by the
+  * build and the language only, so an icon drawn while the drawing stack was broken stays as it was drawn: on this
+@@ -8758,7 +8758,7 @@ oneios_lsd_first_boot_done(proc_t p, user_addr_t scratch)
+ 	    error ? "not made" : "made", error);
+ }
+ #endif /* XNU_HOSTED */
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ /*
+  * OneiOS hosted (0043): the drop below makes lsd register every app again at every boot: 6 to 11 minutes on the phone,
+  * with the database's lock held, and chronod (the lock screen's widgets) waits for lsd, and SpringBoard's main thread
+@@ -8862,7 +8862,7 @@ oneios_ls_apps_named(struct oneios_ls_apps *apps, const char *path, off_t *size,
+ 	return named;
+ }
+ #endif /* XNU_HOSTED */
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ /*
+  * OneiOS hosted (0044): launchd jobs that the Data store's disabled.plist (written by the image's roottweak, the daemon
+  * policy of the seed it was made from) disables but that must run, enabled again before launchd reads the file: their
+@@ -8943,7 +8943,7 @@ oneios_jobs_enable(void)
+ 	kfree_data(text, cap);
+ }
+ #endif /* XNU_HOSTED */
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ /*
+  * OneiOS hosted (0053): launchd jobs disabled in the Data store's disabled.plist before launchd, for a Data store made
+  * from a seed whose daemon policy did not disable them yet (the roottweak's daemons.toml does, in new seeds); the
+@@ -9052,7 +9052,7 @@ oneios_jobs_disable(void)
+ 	kfree_data(text, cap);
+ }
+ #endif /* XNU_HOSTED */
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ /*
+  * OneiOS hosted (0048): feature flags turned off in the Data store's override files before launchd, for a Data store
+  * made from a seed that does not carry them (the image's roottweak writes the same files into new seeds). FeatureFlags
+@@ -9179,7 +9179,7 @@ oneios_feature_flags_off(proc_t p, user_addr_t scratch)
+ 	}
+ }
+ #endif /* XNU_HOSTED */
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ /*
+  * OneiOS hosted (0057): the swap files' folder. XNU's compressor swaps to /private/var/vm/swapfileN on the Data volume
+  * (SWAP_FILE_NAME of vm_compressor_backing_store_internal.h, opened O_CREAT | O_TRUNC | O_NOFOLLOW_ANY by
+@@ -9448,7 +9448,7 @@ native_ls_store_drop(proc_t p, user_addr_t scratch)
+ 				continue;
+ 			}
+ 			looked++;
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 			/* 0043: the container's database is kept when its largest file names every app of /Applications. */
+ 			uint32_t keep_mode = 2;
+ 			(void)PE_parse_boot_argn("oneios-ls-keep", &keep_mode, sizeof(keep_mode));
+@@ -9511,7 +9511,7 @@ done:
+ 		kfree_data(path, 256);
+ 	}
+ }
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ /*
+  * OneiOS hosted (0039): the Metal plug-in's list of the processes that get a device (NativeAdrenoMetal.clients beside its
+  * bundle; the plug-in reads it in every process but backboardd) is written at every boot from the kernel's own list, the
+@@ -9520,10 +9520,20 @@ done:
+  * was built: another list needed a new seed, and a new seed starts the Data store over. One line:
+  *   oneios-gpu-list: /private/var/oneios/addons/Extensions/NativeAdrenoMetal.clients "a,b": written (0)
+  */
++#if XNU_HOSTED
+ extern void oneios_gpu_plugin_client_list(char *, size_t) __attribute__((weak_import));
++#endif
+ static void
+ oneios_gpu_clients_file(const char *folder)
+ {
++#if !XNU_HOSTED
++	/*
++	 * 0076: a native kernel has no GPU archive yet, so no list (and the arm64e static link leaves no weak import
++	 * undefined): the plug-in's file stays as the Data seed has it.
++	 */
++	(void)folder;
++	return;
++#else
+ 	char list[256], text[260], path[128];
+ 	if (!oneios_gpu_plugin_client_list) {
+ 		return;
+@@ -9537,9 +9547,10 @@ oneios_gpu_clients_file(const char *folder)
+ 	snprintf(path, sizeof(path), "%s/NativeAdrenoMetal.clients", folder);
+ 	int error = native_gpu_addon_write(path, (const uint8_t *)text, length, 0644, vfs_context_current());
+ 	printf("oneios-gpu-list: %s \"%s\": %s (%d)\n", path, list, error < 0 ? "unchanged" : error ? "not written" : "written", error);
++#endif /* XNU_HOSTED */
+ }
+ #endif
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ /*
+  * OneiOS hosted (0056): the capture plug-in. CMCapture 27 loads the FigCaptureDevice's maker for the camera driver
+  * its probe finds: for AppleH9CamIn (drivers/camera/OneiOSCameraService.cpp) it dlopen()s
+@@ -9569,7 +9580,7 @@ oneios_camera_addon_mount(proc_t p, user_addr_t scratch)
+ 	    oneios_camera_addon_status);
+ }
+ #endif
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ /*
+  * OneiOS hosted (0070): info-level messages of chosen log subsystems kept in the unified log, for a boot whose question
+  * is answered only at that level. The phone's log keeps the default level, and CoreWiFi says why _CWFFilteredScanResults
+@@ -9637,7 +9648,7 @@ oneios_log_persist(void)
+ static void
+ native_gpu_addon_prepare(proc_t p, user_addr_t scratch)
+ {
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 	/*
+ 	 * OneiOS hosted (0031): the addon mount is on unless sheng-gpu-addon=0. Without it the Metal plug-in is not under
+ 	 * /System/Library/Extensions, Metal's discovery finds no bundle for the accelerator's MetalPluginName, no process
+@@ -9658,7 +9669,7 @@ native_gpu_addon_prepare(proc_t p, user_addr_t scratch)
+ 	native_gpu_addon_install(p, scratch);
+ 	static const char extensions_source[] = "/private/var/ngpu/addons", extensions_point[] = "/System/Library/Extensions";
+ 	static const char daemons_source[] = "/private/var/ngpu/daemons", daemons_point[] = "/System/Library/LaunchDaemons";
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 	/*
+ 	 * Which folder: the addon of this boot (kernel.kc.gpuaddon, written to /private/var/ngpu above) if there was one,
+ 	 * else the Data seed's (the image hook's metal-plugin tweak, /private/var/oneios/addons/Extensions). The sealed
+@@ -9708,7 +9719,7 @@ native_gpu_addon_prepare(proc_t p, user_addr_t scratch)
+ 	native_cryptex_os_view(p, scratch);
+ 	native_gestalt_cache_drop(p, scratch);
+ 	native_ls_store_drop(p, scratch);
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 	oneios_camera_addon_mount(p, scratch);        /* 0056 */
+ 	oneios_icon_store_refresh(p, scratch);        /* 0036 */
+ 	oneios_lsd_first_boot_done(p, scratch);       /* 0037 */
+@@ -10039,7 +10050,7 @@ volatile int native_staged_union_status = -1;
+ static void
+ native_staged_apps_union(proc_t p, user_addr_t scratch)
+ {
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 	/*
+ 	 * OneiOS (0035): on unless owner-staged-apps=0. The Data seed marks the data migration done and carries no
+ 	 * copy of the apps (docs/userland.md, "staged-apps"), so without this view the guest has Settings and the
+@@ -10061,7 +10072,7 @@ native_staged_apps_union(proc_t p, user_addr_t scratch)
+ 	static const char source[] = "/private/var/staged_system_apps", point[] = "/Applications";
+ 	native_gpu_addon_mount(p, scratch, 0x800, source, sizeof(source), point, sizeof(point), "/Applications/Preferences.app/Info.plist",
+ 	    "/Applications/Weather.app/Info.plist", &native_staged_union_stage, &native_staged_union_status);
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 	/* Stage 5: both an app of the sealed /Applications and one of the staged folder are found through the view. */
+ 	printf("oneios-apps: /private/var/staged_system_apps shown over /Applications: stage %d of 5, status %d%s\n",
+ 	    native_staged_union_stage, native_staged_union_status,
+@@ -10077,7 +10088,7 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
+ 	int error = EINVAL;
+ 	vnode_t data_root = NULLVP;
+ 	char device_path[64] = "/dev/md0";
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 	/*
+ 	 * OneiOS: the Data volume is the APFS volume on xnuhost's Data store, made on the first start, and its
+ 	 * content is the image set's seed, unpacked below once it is mounted (bsd/kern/oneios_hosted_root.c).
+@@ -10138,7 +10149,7 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
+ 	if (actual != device || (vfs_flags(data_mount) & MNT_RDONLY) ||
+ 	    strcmp(vfs_statfs(data_mount)->f_fstypename, "apfs")) error = EINVAL;
+ 	if (!error) native_owner_data_stage = 4;
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 	if (!error) error = oneios_hosted_data_seed(p, scratch, "/private/var");
+ 	if (!error) native_owner_data_stage = 5;
+ #endif
+diff --git a/bsd/kern/oneios_hosted_root.c b/bsd/kern/oneios_hosted_root.c
+index 80995be..f5b9f99 100644
+--- a/bsd/kern/oneios_hosted_root.c
++++ b/bsd/kern/oneios_hosted_root.c
+@@ -26,7 +26,7 @@
+  *
+  * The unpack reads what scripts/image writes and nothing more: ustar headers, pax extended headers, GNU long names.
+  */
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 
+ #include <sys/param.h>
+ #include <sys/systm.h>
+@@ -46,6 +46,9 @@
+ #include <kern/task.h>
+ #include <libkern/crypto/sha2.h>
+ #include <pexpert/pexpert.h>
++#if !XNU_HOSTED
++#include <IOKit/IOPlatformExpert.h>     /* PEHaltRestart: a native machine's restart */
++#endif
+ 
+ /* kernel/patches/oneios-hosted/storage/OneiOSHostedDisk.cpp */
+ extern int oneios_hosted_volume_uuid(const char *role, char uuid[37]);
+@@ -59,8 +62,10 @@ extern int oneios_kern_mkdir(const char *path, int mode, vfs_context_t ctx);
+ extern int oneios_kern_symlink(const char *target, const char *path, vfs_context_t ctx);
+ extern int oneios_kern_unlink(const char *path, vfs_context_t ctx);
+ extern int vn_setxattr(vnode_t vp, const char *name, uio_t uio, int options, vfs_context_t context);
++#if XNU_HOSTED
+ /* osfmk/arm64/hosted */
+ extern void hosted_halt(uint32_t reason, uint32_t code) __attribute__((noreturn));
++#endif
+ extern volatile int native_bindfs_boot_mount;
+ extern void delay(int);
+ 
+@@ -279,11 +284,13 @@ oneios_hosted_data_device(proc_t p, user_addr_t scratch, dev_t *device, char *pa
+ 		(void)PE_parse_boot_argn("oneios-data-wait", &wait_seconds, sizeof(wait_seconds));
+ 		if ((error = oneios_spawn(p, scratch, argv, &pid)) || (error = oneios_wait(p, scratch, pid, (int)wait_seconds, &status))) {
+ 			printf("OneiOS Data: newfs_apfs did not run: %d\n", error);
++#if XNU_HOSTED
+ 			if (error == ETIMEDOUT) {
+ 				/* Where it is stuck: every blocked thread's kernel stack (0009), the tool's among them. */
+ 				extern void hosted_dump_blocked_threads(void);
+ 				hosted_dump_blocked_threads();
+ 			}
++#endif
+ 			oneios_data_format_status = error;
+ 			return error;
+ 		}
+@@ -961,7 +968,16 @@ oneios_hosted_data_seed(proc_t p __unused, user_addr_t scratch __unused, const c
+ 			printf("OneiOS Data: the store could not be erased\n");
+ 			return EIO;
+ 		}
++#if XNU_HOSTED
+ 		hosted_halt(ONEIOS_HALT_RESTART, 0);
++#else
++		/*
++		 * 0076, a native machine (XNU alone at EL1): the whole machine restarts, and its next start finds the blank
++		 * store and formats it. Under QEMU (scripts/qemu/boot-vm.sh, -no-reboot) the run ends here.
++		 */
++		PEHaltRestart(kPERestartCPU);
++		return EIO;
++#endif
+ 	}
+ 	if (!seed_disk) {
+ 		printf("OneiOS Data: a new volume and no Data seed in the image set\n");
+diff --git a/bsd/kern/ubc_subr.c b/bsd/kern/ubc_subr.c
+index ee7d9b1..7726c5d 100644
+--- a/bsd/kern/ubc_subr.c
++++ b/bsd/kern/ubc_subr.c
+@@ -5990,7 +5990,7 @@ extern uint64_t mach_absolute_time(void);
+ #define CS_NATIVE4K_UNCACHED    (32 * 1024 * 1024)
+ 
+ __attribute__((noinline))
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ /*
+  * OneiOS hosted: the preparation on every CPU. dyld registers the signature of each file of the shared cache
+  * (dozens of files of about 125 MiB) before the first user process runs a line of its own, and each one is
+@@ -6181,7 +6181,7 @@ cs_native4k_prepare(vnode_t vp, struct cs_blob *blob)
+ 	}
+ 	/* Executables are faulted in right after their signature is added and stay cached. */
+ 	ioflags = limit > CS_NATIVE4K_UNCACHED ? IO_NOCACHE : 0;
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 	struct cs_native4k_job job = {
+ 		.vp = vp, .blob = blob, .storage = storage, .limit = limit, .ioflags = ioflags,
+ 		.cred = vfs_context_ucred(vfs_context_current()),
+diff --git a/bsd/vfs/kpi_vfs.c b/bsd/vfs/kpi_vfs.c
+index 857a480..b58c450 100644
+--- a/bsd/vfs/kpi_vfs.c
++++ b/bsd/vfs/kpi_vfs.c
+@@ -137,7 +137,7 @@
+ #endif
+ 
+ #include <sys/sdt.h>
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ #include <sys/fsctl.h>
+ extern bool oneios_app_cryptex_authenticated(vnode_t vp);
+ #endif /* XNU_HOSTED */
+@@ -3760,7 +3760,7 @@ native_dataprotect_emulated(vnode_t vp)
+ 	static int enabled = -1;
+ 	if (enabled < 0) {
+ 		uint32_t value = 0;
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 		/*
+ 		 * OneiOS hosted (0022-keystore.patch): on unless owner-dataprotect=0. The Data volume is always an
+ 		 * unencrypted APFS volume here (no Secure Enclave, the software key store of
+@@ -4248,7 +4248,7 @@ VNOP_IOCTL(vnode_t vp, u_long command, caddr_t data, int fflag, vfs_context_t ct
+ 		return 0;
+ 	}
+ 
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 	/*
+ 	 * OneiOS hosted (0032): the App cryptex, verified by the host, is an authenticated volume to AMFI's launch
+ 	 * constraints (bsd/kern/oneios_hosted_root.c says why). Only the plain question, with no vnode to authenticate
+diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
+index 2f8d5d8..089c038 100644
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -15657,7 +15657,7 @@ fs_snapshot(__unused proc_t p, struct fs_snapshot_args *uap,
+ 	return error;
+ }
+ 
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ /*
+  * OneiOS: mkdir, symlink and unlink by kernel paths, for the Data volume's first start, which unpacks the image
+  * set's seed in the kernel before launchd (bsd/kern/oneios_hosted_root.c).
+diff --git a/bsd/vm/vm_compressor_backing_file.c b/bsd/vm/vm_compressor_backing_file.c
+index 85883e2..c52bfdf 100644
+--- a/bsd/vm/vm_compressor_backing_file.c
++++ b/bsd/vm/vm_compressor_backing_file.c
+@@ -43,7 +43,7 @@
+ #include <vm/vm_ubc.h>
+ #include <vm/vm_compressor_backing_store_internal.h>
+ 
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ #include <kern/clock.h>
+ /*
+  * OneiOS hosted (0057): why a swap file could not be opened, for each errno the first time and then every 64th failure
+@@ -118,7 +118,7 @@ vm_swapfile_open(const char *path, vnode_t *vp)
+ 		ctx);
+ 	if (error) {
+ 		printf("Failed to open swap file %d\n", error);
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 		oneios_swapfile_failed(path, error, ctx);
+ #endif
+ 		*vp = NULL;
+diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
+index 353da45..f5178a0 100644
+--- a/iokit/Kernel/IOPlatformExpert.cpp
++++ b/iokit/Kernel/IOPlatformExpert.cpp
+@@ -1673,7 +1673,7 @@ IODTPlatformExpert::createNubs( IOService * parent, OSIterator * iter )
+ 		while ((next = (IORegistryEntry *) iter->getNextObject())) {
+ 			OSSafeReleaseNULL(nub);
+ 
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 			/*
+ 			 * OneiOS hosted: /chosen stays the entry it is. A nub takes the place of its device tree entry
+ 			 * (IORegistryEntry::init(old, plane): a copy of the properties, the old entry out of the plane),
+diff --git a/iokit/Kernel/IORegistryEntry.cpp b/iokit/Kernel/IORegistryEntry.cpp
+index 9de8fb7..dab6bd8 100644
+--- a/iokit/Kernel/IORegistryEntry.cpp
++++ b/iokit/Kernel/IORegistryEntry.cpp
+@@ -344,7 +344,7 @@ IORegistryEntry::init( OSDictionary * dict )
+ 	return true;
+ }
+ 
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ /*
+  * OneiOS hosted (0010-aes-after-boot-manifest.patch). The collection's Image4 looks /chosen up once, in its kext
+  * start, and reads every property from that entry afterwards. The platform expert then makes a nub for the node:
+@@ -397,7 +397,7 @@ IORegistryEntry::init( IORegistryEntry * old,
+ 		}
+ 	}
+ 
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 	if (plane == gIODTPlane && !oneios_early_chosen) {
+ 		const char * oldName = old->getName();
+ 		if (oldName && !strcmp(oldName, "chosen")) {
+diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
+index 79df7d2..338a1a4 100644
+--- a/makedefs/MakeInc.def
++++ b/makedefs/MakeInc.def
+@@ -85,6 +85,11 @@ MACHINE_FLAGS_ARM64_BCM2837 = -DARM64_BOARD_CONFIG_BCM2837
+ ifeq ($(XNU_HOSTED),1)
+ MACHINE_FLAGS_ARM64_BCM2837 += -DXNU_HOSTED=1
+ endif
++# OneiOS 0076: the hosted kernel's OS layer on a native machine (XNU alone at EL1: QEMU's virt board, later the phone).
++# XNU_ONEIOS_NATIVE=1 comes from CONFIG_XNU_ONEIOS_NATIVE=y of oneios_native_defconfig (kernel/build-native.sh).
++ifeq ($(XNU_ONEIOS_NATIVE),1)
++MACHINE_FLAGS_ARM64_BCM2837 += -DXNU_ONEIOS_NATIVE=1
++endif
+ MACHINE_FLAGS_ARM64_T8101 = -DARM64_BOARD_CONFIG_T8101			-mcpu=apple-a14
+ MACHINE_FLAGS_ARM64_T8103 = -DARM64_BOARD_CONFIG_T8103                  -mcpu=apple-a14
+ MACHINE_FLAGS_ARM64_T6000 = -DARM64_BOARD_CONFIG_T6000			-mcpu=apple-a14
+diff --git a/osfmk/arm/cpu_common.c b/osfmk/arm/cpu_common.c
+index 9b89ec3..cb72b85 100644
+--- a/osfmk/arm/cpu_common.c
++++ b/osfmk/arm/cpu_common.c
+@@ -416,12 +416,15 @@ volatile uint32_t sheng_sigp_recovered;
+ bool
+ sheng_sigp_recover(cpu_data_t *target_proc)
+ {
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 	/*
+ 	 * OneiOS hosted: xnuhost never loses an IPI (the line is a level and frame_resume raises it again), so a set
+ 	 * SIGPdisabled means what it says: the core has not reached processor_cpu_reinit yet. Clearing it from another
+ 	 * CPU in that window (which is wide when vCPUs are host threads) made the starting core's
+ 	 * assert_ml_cpu_signal_is_enabled(false) fail. The signal stays pending for it, as in Apple's XNU.
++	 * 0076, native: the same window under QEMU, whose vCPUs are host threads too (2026-11-20: cpu 1's assertion,
++	 * cpu_signal 0x8 instead of SIGPdisabled, at its start). A core that loses its self-IPI on a phone is a fault of
++	 * the interrupt controller's driver to fix there, not a flag for another CPU to clear.
+ 	 */
+ 	(void)target_proc;
+ 	return false;
+diff --git a/osfmk/arm/model_dep.c b/osfmk/arm/model_dep.c
+index 9515591..7dffadb 100644
+--- a/osfmk/arm/model_dep.c
++++ b/osfmk/arm/model_dep.c
+@@ -182,8 +182,10 @@ extern uint64_t roots_installed;
+ #define FP_MAX_NUM_TO_EVALUATE (50)
+ 
+ /* Timeout for all processors responding to debug crosscall */
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ /*
++ * 0076, native: QEMU's vCPUs are host threads too ("Debugger synchronization timed out; timeout 240000 nanoseconds" at
++ * every panic of the bench, 2026-11-20). On a phone the longer wait only delays a panic whose CPU does not answer.
+  * OneiOS hosted: a CPU is a thread of the host. It answers the debugger cross-call when the host runs it and it is
+  * not inside a host call (a disk read, an order to a task's process), which takes milliseconds to hundreds of them,
+  * not the microseconds of an interrupt on a core. 240000 ticks (10 ms at 24 MHz, 4 ms at qemu's 62.5 MHz) made the
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+index 4f1b333..348a90d 100644
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -1355,8 +1355,10 @@ ml_parse_cpu_topology(void)
+ 	cluster_offsets[0] = 0;
+ #endif
+ 	assert(topology_info.boot_cpu != NULL);
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 	/*
++	 * 0076, native: the same on a machine whose device tree has one kind of CPU (QEMU's virt board: launchd's first
++	 * workq_open stopped at sched_clutch.c:6589 on four vCPUs, 2026-11-20).
+ 	 * OneiOS hosted: the CPUs are the host's, as many and of whatever kinds xnuhost was given. This kernel is
+ 	 * built for an SoC with efficiency and performance clusters, and the scheduler asserts things that hold
+ 	 * only on that SoC (sched_edge_qos_max_parallelism: the E node and the P node are different nodes). A host
+diff --git a/osfmk/arm64/oneios_host.c b/osfmk/arm64/oneios_host.c
+index 5b6e49f..064fe53 100644
+--- a/osfmk/arm64/oneios_host.c
++++ b/osfmk/arm64/oneios_host.c
+@@ -32,7 +32,7 @@ droidvm_cpufreq_attach(void)
+ {
+ }
+ 
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ /*
+  * The hosted kernel's 3D GPU: Droid-VM's virtio-gpu 3D driver on xnuhost's device, which the phone's Adreno serves
+  * through drm2kgsl (kernel/patches/oneios-hosted/gpu: OneiOSGpu.cpp and build-oneios-gpu.py, an archive that
+@@ -76,7 +76,7 @@ oneios_board_late_start(void)
+ {
+ 	droidvm_cpufreq_attach();
+ 	oneios_drivers_start();
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 	/*
+ 	 * Not here (0010-aes-after-boot-manifest.patch): AppleImage4 comes up as soon as it has its IOAESAccelerator,
+ 	 * and the collection's Image4 starts with it and panics when /chosen has no boot-manifest-hash yet
+@@ -87,10 +87,12 @@ oneios_board_late_start(void)
+ 	oneios_gpu3d_start();
+ 	/* before the first user process: launchd looks the AppleKeyStore service up in its early boot tasks */
+ 	oneios_keystore_start();
++#if XNU_HOSTED
+ 	/* 0026: the user backtraces asked for with oneios-ubt=NAME,... (off without it) */
+ 	extern void hosted_user_backtrace_start(void);
+ 	hosted_user_backtrace_start();
+-#endif /* XNU_HOSTED */
++#endif
++#endif /* XNU_HOSTED || XNU_ONEIOS_NATIVE */
+ }
+ 
+ /*
+diff --git a/osfmk/mach/shared_region.h b/osfmk/mach/shared_region.h
+index f281dd4..489f427 100644
+--- a/osfmk/mach/shared_region.h
++++ b/osfmk/mach/shared_region.h
+@@ -88,7 +88,7 @@
+ /* ARM64_TODO: move to higher memory */
+ #endif
+ #define SHARED_REGION_BASE_ARM64                0x180000000ULL
+-#if defined(XNU_HOSTED) && XNU_HOSTED
++#if (defined(XNU_HOSTED) && XNU_HOSTED) || (defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE)
+ /*
+  * OneiOS hosted: the dyld shared cache of iOS 27.0.1 for iPhone18,2 (24A446, arm64e) says in its header that it
+  * spans 0x185804000 bytes from 0x180000000 and may be slid by up to 0x20000000: more than the 6 GiB of the public

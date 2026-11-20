@@ -210,6 +210,14 @@ The difference from a firmware loader is one parameter: `virt_base`. DarwinBoot 
 base and the kernel maps itself there. xnuhost passes the address where the window **already is**, a
 multiple of 2 MiB away from the link base, which is the slide the kernel finds when it rebases itself.
 
+`tools/xnuloader-qemu.c` is the same library as a firmware loader uses it (`virt_base` = the link base), for the native
+kernel on QEMU's virt board (`docs/native.md`). With `--image DIR --data FILE` it compiles and uses xnuhost's
+`imageset.c` (the manifest, each file's SHA-256, the hash lists, `xh_imageset_trustcaches`, `xh_imageset_describe`, and
+`xh_verify_list` for the list itself): the image set's disks on virtio-mmio transports 0-4 with xnuhost's identities, the
+hash list of each read-only image in its node (`oneios,hash-list`: the native kernel checks the chunks itself), root
+matching on the OS volume, the trust caches. Its `qemu.args` names the transports (`bus=virtio-mmio-bus.K` is the
+window at 0x0a000000 + 0x200 * K) and the CPU (`--qemu-cpu`, a Cortex-A710 by default).
+
 ### 2.2 Memory
 
 - One memfd is the guest's RAM (its size: section 1, `ram=auto`). xnuhost maps it once at `0x2000000000 + (link base mod 2 MiB)` (retrying

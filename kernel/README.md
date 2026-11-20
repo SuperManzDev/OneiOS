@@ -5,6 +5,8 @@ iPhone18,2 profile**, built from Apple's open source with UniXNU's and Droid-VM'
 
 State (2026-11-10): **it compiles and links on this Linux PC in 91 s (clean, 20 cores), with the board's drivers of `drivers/` inside. It has never run.**
 2026-11-19: it builds again (`build-linux.sh` binds UniXNU's plutil) and has run under QEMU: `docs/native.md`.
+2026-11-20: the **native** kernel (`build-native.sh`: this base, the hosted series with its machine layer off and hosted
+0076, `configs/oneios_native_defconfig`) boots the image set on QEMU to launchd: `docs/native.md`.
 
 ## Build
 
