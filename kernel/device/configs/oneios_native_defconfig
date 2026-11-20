@@ -23,8 +23,16 @@ CONFIG_XNU_BOOT_PROGRESS=n
 # each chunk of a read-only image checked against the hash list the loader puts in its node), started by
 # native_source_storage_start. Then the software AES (oneios-tool kernel gen aes: the IOAESAccelerator AppleImage4 waits for, without
 # which IOResources never finishes matching and the disks get no BSD nodes) and the key store (gen keystore: launchd looks
-# for an AppleKeyStore service), as the hosted kernel has them; kernel/build-native.sh adds the four to the archives.
-CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/oneios-drivers/liboneiosdrivers.a -Wl,-force_load,{tree}/build/oneios-board/liboneiosboard.a -Wl,-force_load,{tree}/build/oneios-hosted-storage/liboneioshostedstorage.a -Wl,-force_load,{tree}/build/oneios-aes/liboneiosaes.a -Wl,-force_load,{tree}/build/oneios-keystore/liboneioskeystore.a"
+# for an AppleKeyStore service), as the hosted kernel has them; the GPU (gen gpu: Droid-VM's virtio-gpu transport,
+# which the display's scanout uses; without a 3D device, "display only"); and touch and keys (gen hid: NativeHidInput
+# fed by Droid-VM's virtio-input transport: on the bench QEMU's virtio-tablet-device as one finger and its keyboard).
+# In the hosted kernel's link order; kernel/build-native.sh adds them, and the display (gen display), to the archives.
+CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/oneios-drivers/liboneiosdrivers.a -Wl,-force_load,{tree}/build/oneios-board/liboneiosboard.a -Wl,-force_load,{tree}/build/oneios-hosted-storage/liboneioshostedstorage.a -Wl,-force_load,{tree}/build/oneios-gpu/liboneiosgpu.a -Wl,-force_load,{tree}/build/oneios-aes/liboneiosaes.a -Wl,-force_load,{tree}/build/oneios-keystore/liboneioskeystore.a -Wl,-force_load,{tree}/build/oneios-hid/liboneioshid.a"
+# The display (kernel/patches/oneios-hosted/display): UniXNU's NativeMobileDisplay under the collection's
+# IOMobileFramebufferLegacy, frames to the virtio-gpu scanout (QEMU's virtio-gpu-device on the bench). UniXNU's build links
+# build/native-legacy-display/libNativeLegacyDisplay.late.a and compiles bsd_init's two calls; 0076 turns the display on
+# as the hosted kernel has it (oneios-display=0 turns it off).
+CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y
 # The hosted kernel's OS layer without its host (kernel/patches/oneios-hosted/0076-native-os-layer.patch: the image set's
 # root, Data, seed and launch policy, the boot manifest's /chosen, the AES and key store starts, iOS 27's shared region).
 CONFIG_XNU_ONEIOS_NATIVE=y

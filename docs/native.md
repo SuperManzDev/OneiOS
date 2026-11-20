@@ -101,9 +101,43 @@ Runs of 2026-11-20 (consoles in `logs/native-qemu/`, local):
    Not seen: SpringBoard (backboardd has no display here). The clock is at 1970 (no RTC on the machine tree).
    logd_helper used 88 % of a vCPU for 100 s (`caught burning CPU`).
 
+## The display on the bench (2026-11-20)
+The hosted kernel's display, as it is: UniXNU's NativeMobileDisplay under the collection's `IOMobileFramebufferLegacy`
+and Droid-VM's virtio-gpu scanout (`kernel/patches/oneios-hosted/display/README.md`), with Droid-VM's virtio-gpu transport
+(the `gpu` archive). Without a 3D device the GPU archive says "display only" and publishes no Metal accelerator, so iOS
+draws with the CPU (as on the PC under xnuhost, `docs/gpu.md`).
+- The native kernel links `gpu` and `display` (`CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y`); 0076 turns the display on as the
+  hosted kernel has it (`bsd_init.c`'s two switches) and gives the two hosted hooks the GPU archive declares weak a
+  native default.
+- `xnuloader-qemu --display 828x1792 --scale 2` (boot-vm.sh `SCREEN=828x1792 SCALE=2`): QEMU's `virtio-gpu-device` on
+  transport 5 (2D; `qemu-hw-display-virtio-gpu`'s module, from the sysroot with `QEMU_MODULE_DIR`), the boot video right
+  after the kernel's window (6 MiB at 0xf3004000), the tree's mode and scale, `offline-legacy-unit-scale=2 sheng-vsync=60`
+  in the boot arguments. 828x1792 at @2x is an iPhone 11's 414x896 points: a third of the phone panel's pixels for the
+  CPU to draw.
+- The transport wanted a control queue of 512 descriptors; QEMU's 2D device has 64. Now it takes what the device offers
+  (`staged/gpu.rs` `TRANSPORT`, 32 slots of which 12 large on QEMU; 256 as before with xnuhost and crosvm):
+  `virtio-gpu: the device's control queue is 64 descriptors: 32 command slots, 12 of them large`, then
+  `oneios-display: panel 828x1792 at 0xf3004000 ...; virtio scanout state 2 (2 = presenting)`.
+- Watching: `VNC=1` serves the display on 127.0.0.1:5901 (`krdc vnc://127.0.0.1:5901`, this PC only);
+  `scripts/qemu/shot.sh out/qemu/native` writes a PNG of it through QEMU's monitor.
+- Run 6 (4 vCPUs, the store's third start): thermalmonitord, then backboardd (`ONEIOS-GUEST stage=backboardd-up
+  t=208`) open the framebuffer; 15 minutes after launchd, `oneios-display: swap 1 accepted`, `the compositor swaps
+  format 'BGRA' ... 828x1792 ... taken`, `frame 1 scanned out through virtio-gpu`: **the Apple logo on the screen**, drawn
+  by backboardd with the CPU (`logs/native-qemu/2026-11-20-run6-apple-logo.png`). SpringBoard runs (pid 34) and had
+  not drawn after 12 more minutes; chronod aborted once (EXC_CRASH). Ended at 40 minutes by a mistake of the bench's
+  (killing the `timeout` that holds QEMU kills QEMU too: give a long timeout from the start).
+
+- Run 7 (6 vCPUs, a 3 h limit): launchd 13 minutes after the start, backboardd at t=271 s, the logo 18 minutes after
+  launchd; then all six vCPUs 65-80 % busy for SpringBoard's first start (and lsd, which builds the LaunchServices
+  database of a new store: 6 to 11 minutes on the phone).
+- Touch and keys (prepared, not run yet): `xnuloader-qemu --input tablet,keyboard` (boot-vm.sh `INPUT=tablet,keyboard`)
+  puts QEMU's virtio-tablet-device and virtio-keyboard-device on the transports after the GPU as `/arm-io/input-N`;
+  Droid-VM's virtio-input transport takes an absolute pointer as one finger while its button is down (the VNC client's
+  mouse), and the native kernel links the hosted `hid` archive (NativeHidInput's touch screen and keys).
+
 ## Next
-1. A display on the bench, for backboardd and SpringBoard (QEMU's ramfb or virtio-gpu 2D through a scanout like
-   UniXNU's GopFramebuffer), and the RTC (virt's PL031) for the clock.
+1. The display past the boot video: backboardd's and SpringBoard's frames drawn by the CPU; touch through VNC; the RTC
+   (virt's PL031) for the clock.
 2. The S25's live FDT, read only, for the SM8750 machine tree; how the phone gets its root (a RAM disk first: no UFS
    writes); the phone's ID registers (FEAT_LVA: the assertion above).
 3. The Adreno 830's kernel side for XNU with Turnip (references: UniXNU's Adreno740, UniXNU-houji's A750 port).

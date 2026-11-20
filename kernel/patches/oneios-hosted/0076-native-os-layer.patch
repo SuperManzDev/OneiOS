@@ -1,5 +1,27 @@
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+index b2b5149..228a9e6 100644
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -545,7 +545,7 @@ static void
+ native_mobile_graphics_load_probe(void)
+ {
+ 	int enabled = 0;
+-#if XNU_HOSTED && defined(XNU_NATIVE_LEGACY_DISPLAY) && XNU_NATIVE_LEGACY_DISPLAY
++#if (XNU_HOSTED || XNU_ONEIOS_NATIVE) && defined(XNU_NATIVE_LEGACY_DISPLAY) && XNU_NATIVE_LEGACY_DISPLAY
+ 	/*
+ 	 * The hosted guest's display (kernel/patches/oneios-hosted/display) is part of the board, not an experiment a
+ 	 * boot argument asks for: the two switches below are on unless they are given, or oneios-display=0 turns the
+@@ -567,7 +567,7 @@ native_mobile_graphics_load_probe(void)
+ 	native_mobile_graphics_probe_checkpoint();
+ #if defined(XNU_NATIVE_LEGACY_DISPLAY) && XNU_NATIVE_LEGACY_DISPLAY
+ 	int legacy_register = 0;
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 	legacy_register = hosted_display != 0;
+ 	PE_parse_boot_argn("offline-legacy-register", &legacy_register, sizeof(legacy_register));
+ 	printf("hosted display: IOMobileGraphicsFamily load status %d, framebuffer backend %s\n",
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
-index f996348..865cbb2 100644
+index f996348..a03d570 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
 @@ -8024,7 +8024,7 @@ native_owner_cache_prepare(proc_t p, user_addr_t scratch, user_addr_t *envp)
@@ -101,32 +123,8 @@ index f996348..865cbb2 100644
  /*
   * OneiOS hosted (0039): the Metal plug-in's list of the processes that get a device (NativeAdrenoMetal.clients beside its
   * bundle; the plug-in reads it in every process but backboardd) is written at every boot from the kernel's own list, the
-@@ -9520,10 +9520,20 @@ done:
-  * was built: another list needed a new seed, and a new seed starts the Data store over. One line:
-  *   oneios-gpu-list: /private/var/oneios/addons/Extensions/NativeAdrenoMetal.clients "a,b": written (0)
-  */
-+#if XNU_HOSTED
- extern void oneios_gpu_plugin_client_list(char *, size_t) __attribute__((weak_import));
-+#endif
- static void
- oneios_gpu_clients_file(const char *folder)
- {
-+#if !XNU_HOSTED
-+	/*
-+	 * 0076: a native kernel has no GPU archive yet, so no list (and the arm64e static link leaves no weak import
-+	 * undefined): the plug-in's file stays as the Data seed has it.
-+	 */
-+	(void)folder;
-+	return;
-+#else
- 	char list[256], text[260], path[128];
- 	if (!oneios_gpu_plugin_client_list) {
- 		return;
-@@ -9537,9 +9547,10 @@ oneios_gpu_clients_file(const char *folder)
- 	snprintf(path, sizeof(path), "%s/NativeAdrenoMetal.clients", folder);
- 	int error = native_gpu_addon_write(path, (const uint8_t *)text, length, 0644, vfs_context_current());
+@@ -9539,7 +9539,7 @@ oneios_gpu_clients_file(const char *folder)
  	printf("oneios-gpu-list: %s \"%s\": %s (%d)\n", path, list, error < 0 ? "unchanged" : error ? "not written" : "written", error);
-+#endif /* XNU_HOSTED */
  }
  #endif
 -#if XNU_HOSTED
@@ -134,7 +132,7 @@ index f996348..865cbb2 100644
  /*
   * OneiOS hosted (0056): the capture plug-in. CMCapture 27 loads the FigCaptureDevice's maker for the camera driver
   * its probe finds: for AppleH9CamIn (drivers/camera/OneiOSCameraService.cpp) it dlopen()s
-@@ -9569,7 +9580,7 @@ oneios_camera_addon_mount(proc_t p, user_addr_t scratch)
+@@ -9569,7 +9569,7 @@ oneios_camera_addon_mount(proc_t p, user_addr_t scratch)
  	    oneios_camera_addon_status);
  }
  #endif
@@ -143,7 +141,7 @@ index f996348..865cbb2 100644
  /*
   * OneiOS hosted (0070): info-level messages of chosen log subsystems kept in the unified log, for a boot whose question
   * is answered only at that level. The phone's log keeps the default level, and CoreWiFi says why _CWFFilteredScanResults
-@@ -9637,7 +9648,7 @@ oneios_log_persist(void)
+@@ -9637,7 +9637,7 @@ oneios_log_persist(void)
  static void
  native_gpu_addon_prepare(proc_t p, user_addr_t scratch)
  {
@@ -152,7 +150,7 @@ index f996348..865cbb2 100644
  	/*
  	 * OneiOS hosted (0031): the addon mount is on unless sheng-gpu-addon=0. Without it the Metal plug-in is not under
  	 * /System/Library/Extensions, Metal's discovery finds no bundle for the accelerator's MetalPluginName, no process
-@@ -9658,7 +9669,7 @@ native_gpu_addon_prepare(proc_t p, user_addr_t scratch)
+@@ -9658,7 +9658,7 @@ native_gpu_addon_prepare(proc_t p, user_addr_t scratch)
  	native_gpu_addon_install(p, scratch);
  	static const char extensions_source[] = "/private/var/ngpu/addons", extensions_point[] = "/System/Library/Extensions";
  	static const char daemons_source[] = "/private/var/ngpu/daemons", daemons_point[] = "/System/Library/LaunchDaemons";
@@ -161,7 +159,7 @@ index f996348..865cbb2 100644
  	/*
  	 * Which folder: the addon of this boot (kernel.kc.gpuaddon, written to /private/var/ngpu above) if there was one,
  	 * else the Data seed's (the image hook's metal-plugin tweak, /private/var/oneios/addons/Extensions). The sealed
-@@ -9708,7 +9719,7 @@ native_gpu_addon_prepare(proc_t p, user_addr_t scratch)
+@@ -9708,7 +9708,7 @@ native_gpu_addon_prepare(proc_t p, user_addr_t scratch)
  	native_cryptex_os_view(p, scratch);
  	native_gestalt_cache_drop(p, scratch);
  	native_ls_store_drop(p, scratch);
@@ -170,7 +168,7 @@ index f996348..865cbb2 100644
  	oneios_camera_addon_mount(p, scratch);        /* 0056 */
  	oneios_icon_store_refresh(p, scratch);        /* 0036 */
  	oneios_lsd_first_boot_done(p, scratch);       /* 0037 */
-@@ -10039,7 +10050,7 @@ volatile int native_staged_union_status = -1;
+@@ -10039,7 +10039,7 @@ volatile int native_staged_union_status = -1;
  static void
  native_staged_apps_union(proc_t p, user_addr_t scratch)
  {
@@ -179,7 +177,7 @@ index f996348..865cbb2 100644
  	/*
  	 * OneiOS (0035): on unless owner-staged-apps=0. The Data seed marks the data migration done and carries no
  	 * copy of the apps (docs/userland.md, "staged-apps"), so without this view the guest has Settings and the
-@@ -10061,7 +10072,7 @@ native_staged_apps_union(proc_t p, user_addr_t scratch)
+@@ -10061,7 +10061,7 @@ native_staged_apps_union(proc_t p, user_addr_t scratch)
  	static const char source[] = "/private/var/staged_system_apps", point[] = "/Applications";
  	native_gpu_addon_mount(p, scratch, 0x800, source, sizeof(source), point, sizeof(point), "/Applications/Preferences.app/Info.plist",
  	    "/Applications/Weather.app/Info.plist", &native_staged_union_stage, &native_staged_union_status);
@@ -188,7 +186,7 @@ index f996348..865cbb2 100644
  	/* Stage 5: both an app of the sealed /Applications and one of the staged folder are found through the view. */
  	printf("oneios-apps: /private/var/staged_system_apps shown over /Applications: stage %d of 5, status %d%s\n",
  	    native_staged_union_stage, native_staged_union_status,
-@@ -10077,7 +10088,7 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
+@@ -10077,7 +10077,7 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
  	int error = EINVAL;
  	vnode_t data_root = NULLVP;
  	char device_path[64] = "/dev/md0";
@@ -197,7 +195,7 @@ index f996348..865cbb2 100644
  	/*
  	 * OneiOS: the Data volume is the APFS volume on xnuhost's Data store, made on the first start, and its
  	 * content is the image set's seed, unpacked below once it is mounted (bsd/kern/oneios_hosted_root.c).
-@@ -10138,7 +10149,7 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
+@@ -10138,7 +10138,7 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
  	if (actual != device || (vfs_flags(data_mount) & MNT_RDONLY) ||
  	    strcmp(vfs_statfs(data_mount)->f_fstypename, "apfs")) error = EINVAL;
  	if (!error) native_owner_data_stage = 4;
@@ -464,7 +462,7 @@ index 4f1b333..348a90d 100644
  	 * built for an SoC with efficiency and performance clusters, and the scheduler asserts things that hold
  	 * only on that SoC (sched_edge_qos_max_parallelism: the E node and the P node are different nodes). A host
 diff --git a/osfmk/arm64/oneios_host.c b/osfmk/arm64/oneios_host.c
-index 5b6e49f..064fe53 100644
+index 5b6e49f..b25a03c 100644
 --- a/osfmk/arm64/oneios_host.c
 +++ b/osfmk/arm64/oneios_host.c
 @@ -32,7 +32,7 @@ droidvm_cpufreq_attach(void)
@@ -476,7 +474,39 @@ index 5b6e49f..064fe53 100644
  /*
   * The hosted kernel's 3D GPU: Droid-VM's virtio-gpu 3D driver on xnuhost's device, which the phone's Adreno serves
   * through drm2kgsl (kernel/patches/oneios-hosted/gpu: OneiOSGpu.cpp and build-oneios-gpu.py, an archive that
-@@ -76,7 +76,7 @@ oneios_board_late_start(void)
+@@ -67,6 +67,31 @@ __attribute__((weak)) void
+ oneios_keystore_start(void)
+ {
+ }
++
++#if !XNU_HOSTED
++/*
++ * 0076, native: two hooks of the hosted machine layer that the GPU archive (kernel/patches/oneios-hosted/gpu,
++ * OneiOSAdreno.cpp) declares weak. The arm64e static link leaves no weak import undefined, so a native kernel defines
++ * them as they would answer without a host: no GPU text rows to flush, no idle time the host counts.
++ */
++#include <stdint.h>
++__attribute__((weak)) void hosted_gpu_text_flush(uint64_t quiet_ns);
++__attribute__((weak)) void
++hosted_gpu_text_flush(uint64_t quiet_ns)
++{
++	(void)quiet_ns;
++}
++
++__attribute__((weak)) uint64_t hosted_processors_idle_mach(uint32_t *count);
++__attribute__((weak)) uint64_t
++hosted_processors_idle_mach(uint32_t *count)
++{
++	if (count) {
++		*count = 0;
++	}
++	return 0;
++}
++#endif /* !XNU_HOSTED */
+ #endif /* XNU_HOSTED */
+ 
+ void oneios_board_late_start(void);
+@@ -76,7 +101,7 @@ oneios_board_late_start(void)
  {
  	droidvm_cpufreq_attach();
  	oneios_drivers_start();
@@ -485,7 +515,7 @@ index 5b6e49f..064fe53 100644
  	/*
  	 * Not here (0010-aes-after-boot-manifest.patch): AppleImage4 comes up as soon as it has its IOAESAccelerator,
  	 * and the collection's Image4 starts with it and panics when /chosen has no boot-manifest-hash yet
-@@ -87,10 +87,12 @@ oneios_board_late_start(void)
+@@ -87,10 +112,12 @@ oneios_board_late_start(void)
  	oneios_gpu3d_start();
  	/* before the first user process: launchd looks the AppleKeyStore service up in its early boot tasks */
  	oneios_keystore_start();

@@ -3,7 +3,8 @@
 //! The hosted kernel's GPU archive, built between the two kernel passes from the compile records of the first:
 //!
 //!   build/oneios-gpu/liboneiosgpu.a    OneiOSGpu.cpp (the patch folder: oneios_gpu3d_start) and Droid-VM's virtio-gpu 3D
-//!                                      kernel driver: UniXNU-droidvm package/DroidVMVirtioGpu.cpp unchanged and
+//!                                      kernel driver: UniXNU-droidvm package/DroidVMVirtioGpu.cpp staged (staged/gpu.rs
+//!                                      TRANSPORT: the control queue as long as the device takes, for QEMU's 64) and
 //!                                      DroidVMVirtioGpu3D.cpp staged (staged/gpu.rs GPU3D: each blob made, closed and
 //!                                      gone goes to OneiOSAdreno.cpp), with NativeAdreno's DroidVMVirtgpuABI.h
 //!
@@ -49,7 +50,7 @@
 use crate::class_record::{pylist, ClassRecord};
 use crate::drivers_build::Record;
 use crate::gen::{self, fail, Compile, Ctx};
-use crate::staged::gpu::{GPU, GPU3D};
+use crate::staged::gpu::{GPU, GPU3D, TRANSPORT};
 use anyhow::{Context, Result};
 use oneios_common::pyjson::Value;
 use std::collections::BTreeSet;
@@ -149,6 +150,18 @@ pub fn staged_text(text: String) -> std::result::Result<String, String> {
     for (anchor, replacement) in GPU {
         if text.matches(anchor).count() != 1 {
             return Err(format!("DroidVMGpu.cpp no longer has exactly one {}", anchor.trim()));
+        }
+        text = text.replace(anchor, replacement);
+    }
+    Ok(text)
+}
+
+/// DroidVMVirtioGpu.cpp with the changes of staged/gpu.rs TRANSPORT; Err is the anchor that is not there exactly once.
+pub fn staged_transport_text(text: String) -> std::result::Result<String, String> {
+    let mut text = text;
+    for (anchor, replacement) in TRANSPORT {
+        if text.matches(anchor).count() != 1 {
+            return Err(format!("DroidVMVirtioGpu.cpp no longer has exactly one {}", anchor.trim()));
         }
         text = text.replace(anchor, replacement);
     }
@@ -286,9 +299,13 @@ pub fn main() -> Result<()> {
     gen::mkdirs(&staged_dir)?;
     let staged_3d = staged_dir.join("DroidVMVirtioGpu3D.cpp");
     gen::write_text(&staged_3d, &staged_3d_text(gen::read_text(&sources[2])?).map_err(|e| anyhow::anyhow!("build-oneios-gpu: {e}"))?)?;
+    // DroidVMVirtioGpu.cpp the same way (staged/gpu.rs TRANSPORT: the control queue as long as the device takes).
+    let staged_transport = staged_dir.join("DroidVMVirtioGpu.cpp");
+    gen::write_text(&staged_transport,
+                    &staged_transport_text(gen::read_text(&sources[1])?).map_err(|e| anyhow::anyhow!("build-oneios-gpu: {e}"))?)?;
     let mut objects = Vec::new();
     for source in &sources {
-        let compiled = if source == &sources[2] { &staged_3d } else { source };
+        let compiled = if source == &sources[2] { &staged_3d } else if source == &sources[1] { &staged_transport } else { source };
         objects.push(compile.object(&record, compiled, &out.join(gen::stem(source) + ".o"), &extra)?);
     }
     objects.extend(linked);

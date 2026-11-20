@@ -15,7 +15,7 @@
 #
 # ONEIOS_MACHINE=native (what kernel/build-native.sh sets): the native kernel instead, XNU alone at EL1 (docs/native.md).
 # The same series with CONFIG_XNU_ONEIOS_NATIVE=y and no hosted machine layer (configs/oneios_native_defconfig: 0076
-# opens the OS layer to it), the archives a machine without a host takes (storage, board, aes, keystore), the sealed
+# opens the OS layer to it), the archives a machine without a host takes (storage, board, aes, keystore, hid, gpu, display), the sealed
 # kernel without the hosted fixups. Its own trees: out/kernel-native, out/native-device, out/kernel/current-native
 # (NATIVE_OUT=NAME: each with -NAME). HOSTED_OUT is not asked for.
 set -euo pipefail
@@ -116,12 +116,15 @@ PY
 # tools/oneios-tool/tests/kernelgen/golden.
 stage_tool
 if [ "$MACHINE" = native ]; then
-  # The native kernel's archives: the disks before the board's own entry, the software AES and the key store after it
-  # (oneios_native_defconfig force-loads all five itself). No GPU, display, HID, audio or Wi-Fi: those are the host's.
+  # The native kernel's archives, in the hosted order: the disks before the board's own entry, then the software AES,
+  # the key store, touch and keys, the GPU's transport and the display (oneios_native_defconfig force-loads all but the
+  # display, which UniXNU's build links with CONFIG_XNU_NATIVE_LEGACY_DISPLAY). No audio or Wi-Fi: those are the host's.
   awk '/^[[:space:]]*"oneios-tool kernel gen board",?[[:space:]]*$/ {
          match($0, /^[[:space:]]*/); pad = substr($0, 1, RLENGTH); n++
          printf "%s\"oneios-tool kernel gen storage\",\n%s\"oneios-tool kernel gen board\",\n", pad, pad
          printf "%s\"oneios-tool kernel gen aes\",\n%s\"oneios-tool kernel gen keystore\",\n", pad, pad
+         printf "%s\"oneios-tool kernel gen hid\",\n", pad
+         printf "%s\"oneios-tool kernel gen gpu\",\n%s\"oneios-tool kernel gen display\",\n", pad, pad
          next }
        { print }
        END { exit n == 1 ? 0 : 1 }' "$DEVICE/board.toml" > "$DEVICE/board.toml.native" \

@@ -69,7 +69,7 @@ static void spit(const char *dir, const char *name, const void *data, size_t siz
 
 static void usage(void)
 {
-  fprintf(stderr, "usage: xnuloader-qemu KERNEL OUTDIR [--cpus N] [--ram-mib N] [--timebase HZ] [--args TEXT] [--args-add TEXT] [--qemu-cpu M] [--image DIR --data FILE]\n");
+  fprintf(stderr, "usage: xnuloader-qemu KERNEL OUTDIR [--cpus N] [--ram-mib N] [--timebase HZ] [--args TEXT] [--args-add TEXT] [--qemu-cpu M] [--image DIR --data FILE] [--display WxH [--scale 2|3] [--hz N]] [--input tablet,keyboard]\n");
   exit(2);
 }
 
@@ -135,6 +135,13 @@ int main(int argc, char **argv)
   if (argc < 3) usage();
   const char *kernel_path = argv[1], *out = argv[2], *args = default_args, *image_dir = NULL, *data_path = NULL;
   unsigned cpus = 1, ram_mib = 1024;
+  // The display (--display WxH): QEMU's virtio-gpu-device on the transport after the disks, the boot video right after the
+  // kernel's window, the mode and scale in the tree as xnuhost gives them (docs/booter.md 2.8). 0: no display.
+  unsigned display_w = 0, display_h = 0, display_scale = 2, display_hz = 60;
+  // Input (--input tablet,keyboard): QEMU's virtio-tablet-device (an absolute pointer: Droid-VM's virtio-input transport
+  // takes it as one finger while its button is down, NativeHidInput's touch screen) and virtio-keyboard-device, on the
+  // transports after the GPU, as /arm-io/input-N ("droidvm,virtio-input"). The pointer is the VNC client's mouse.
+  bool input_tablet = false, input_keyboard = false;
   // The CPU: a Cortex-A710 (Armv9.0, PAuth, BTI, 64-byte DC ZVA, no FEAT_LVA), the kind of core a phone has, not QEMU's
   // max: max has FEAT_LVA, and the DEVELOPMENT kernel asserts that no CPU has it (vm_sanitize.c:643, launchd's first
   // jobs, 2026-11-20). No SVE (Apple's cores have none; neither has the S25's Oryon). Its counter at 1 GHz, as the tree's
@@ -156,7 +163,23 @@ int main(int argc, char **argv)
     }
     else if (!strcmp(argv[i], "--image")) image_dir = argv[++i];
     else if (!strcmp(argv[i], "--data")) data_path = argv[++i];
+    else if (!strcmp(argv[i], "--display")) {
+      if (sscanf(argv[++i], "%ux%u", &display_w, &display_h) != 2) usage();
+    }
+    else if (!strcmp(argv[i], "--scale")) display_scale = (unsigned)strtoul(argv[++i], NULL, 0);
+    else if (!strcmp(argv[i], "--hz")) display_hz = (unsigned)strtoul(argv[++i], NULL, 0);
+    else if (!strcmp(argv[i], "--input")) {
+      const char *list = argv[++i];
+      input_tablet = strstr(list, "tablet") != NULL;
+      input_keyboard = strstr(list, "keyboard") != NULL;
+      if (!input_tablet && !input_keyboard) usage();
+    }
     else usage();
+  }
+  if (display_w && (display_w < 320 || display_h < 320 || display_w > 4096 || display_h > 4096 || (display_scale != 2 && display_scale != 3) ||
+                    display_hz < 24 || display_hz > 120)) {
+    fprintf(stderr, "xnuloader-qemu: --display 320x320 to 4096x4096, --scale 2 or 3, --hz 24 to 120\n");
+    return 2;
   }
   if (cpus < 1 || cpus > XL_MAX_CPUS || ram_mib < 256 || ram_mib > 3072) { fprintf(stderr, "xnuloader-qemu: 1-%d CPUs, 256-3072 MiB\n", XL_MAX_CPUS); return 2; }
   if (!image_dir != !data_path) { fprintf(stderr, "xnuloader-qemu: --image and --data go together\n"); return 2; }
@@ -206,6 +229,41 @@ int main(int argc, char **argv)
   // The disks: transport K for disk K, read-only ones as virtio,mmio nodes (virtio-mmio-0..), the store as data-store.
   for (unsigned i = 0; i < ndisk; i++)
     m.dev[m.ndev++] = (xl_device){ disks[i].writable ? XL_DEV_DATA_STORE : XL_DEV_BLOCK, VIRTIO_BASE + i * VIRTIO_SIZE, VIRTIO_SIZE };
+  // The display: /arm-io/virtio-gpu on the next transport (Droid-VM's transport maps it and takes "droidvm,intid"), and
+  // the boot video, which the display driver presents until the compositor's first frame, after the window (as xnuhost
+  // puts it after the window and its pools: not RAM the kernel manages).
+  const unsigned gpu_transport = ndisk;
+  const uint64_t fb_pa = phys + window, fb_bytes = display_w ? ((uint64_t)display_w * display_h * 4 + 0x1fffff) & ~0x1fffffull : 0;
+  if (display_w) {
+    m.dev[m.ndev++] = (xl_device){ XL_DEV_GPU, VIRTIO_BASE + gpu_transport * VIRTIO_SIZE, VIRTIO_SIZE };
+    m.display_width = display_w;
+    m.display_height = display_h;
+    m.display_scale = display_scale;
+    m.display_hz = display_hz;
+    // What xnuhost passes beside the tree's display-scale: the backend's unit scale and its vsync tick (display/README.md).
+    static char with_display[4096];
+    size_t at = (size_t)snprintf(with_display, sizeof with_display, "%s", args);
+    if (at < sizeof with_display && !strstr(args, "offline-legacy-unit-scale="))
+      at += (size_t)snprintf(with_display + at, sizeof with_display - at, " offline-legacy-unit-scale=%u", display_scale);
+    if (at < sizeof with_display && !strstr(args, "sheng-vsync="))
+      at += (size_t)snprintf(with_display + at, sizeof with_display - at, " sheng-vsync=%u", display_hz);
+    if (at >= sizeof with_display) { fprintf(stderr, "xnuloader-qemu: boot arguments too long\n"); return 2; }
+    args = with_display;
+  }
+  // The input devices on the transports after the GPU's (or the disks', without a display): input-0 the tablet, then the
+  // keyboard, in that order (xl_machine_tree numbers the input nodes as it meets them).
+  unsigned next_transport = ndisk + (display_w ? 1 : 0), tablet_transport = 0, keyboard_transport = 0, ninput = 0;
+  unsigned input_transport[2];
+  if (input_tablet) {
+    tablet_transport = next_transport++;
+    input_transport[ninput++] = tablet_transport;
+    m.dev[m.ndev++] = (xl_device){ XL_DEV_INPUT, VIRTIO_BASE + tablet_transport * VIRTIO_SIZE, VIRTIO_SIZE };
+  }
+  if (input_keyboard) {
+    keyboard_transport = next_transport++;
+    input_transport[ninput++] = keyboard_transport;
+    m.dev[m.ndev++] = (xl_device){ XL_DEV_INPUT, VIRTIO_BASE + keyboard_transport * VIRTIO_SIZE, VIRTIO_SIZE };
+  }
   const xh_imageset_file *os = image_dir ? xh_imageset_role(&set, "os") : NULL;
   if (os && *os->volume_uuid) m.root_volume_uuid = os->volume_uuid;
   m.trust_cache = trust.data != NULL;
@@ -224,6 +282,18 @@ int main(int argc, char **argv)
     }
     xl_adt_set_u32(node, "droidvm,intid", VIRTIO_INTID + i);
   }
+  if (display_w) {
+    xl_adt_node *gpu = xl_adt_find(tree, "arm-io/virtio-gpu");
+    if (!gpu) { fprintf(stderr, "board: no /arm-io/virtio-gpu\n"); return 1; }
+    xl_adt_set_u32(gpu, "droidvm,intid", VIRTIO_INTID + gpu_transport);
+  }
+  for (unsigned i = 0; i < ninput; i++) {
+    char name[40];
+    snprintf(name, sizeof name, "arm-io/input-%u", i);
+    xl_adt_node *node = xl_adt_find(tree, name);
+    if (!node) { fprintf(stderr, "board: no /%s\n", name); return 1; }
+    xl_adt_set_u32(node, "droidvm,intid", VIRTIO_INTID + input_transport[i]);
+  }
   // The console: XNU's PL011 driver (the board's oneios-board-pl011-console.patch) takes the node that /defaults
   // serial-device names by its AAPL,phandle (pexpert/arm/pe_serial.c get_serial_device_phandle).
   xl_adt_node *uart = xl_adt_find(tree, "arm-io/uart0"), *defaults = xl_adt_find(tree, "defaults");
@@ -235,7 +305,8 @@ int main(int argc, char **argv)
   uint8_t *ram = calloc(1, window);
   if (!ram) { fprintf(stderr, "xnuloader-qemu: %u MiB: out of memory\n", ram_mib); return 1; }
   xl_boot_request req = { .image = { image, size }, .kernel = &k, .ram = ram, .window = window, .phys_base = phys,
-                          .virt_base = k.base, .tree = tree, .command_line = args, .trustcache = trust };
+                          .virt_base = k.base, .tree = tree, .command_line = args, .trustcache = trust,
+                          .video = { display_w ? fb_pa : 0, display_w ? 1 : 0, (uint64_t)display_w * 4, display_w, display_h, display_w ? 32 : 0 } };
   xl_boot_layout lay;
   if (xl_boot_place(&req, &lay, &err)) { fprintf(stderr, "place: %s\n", err); return 1; }
 
@@ -252,8 +323,9 @@ int main(int argc, char **argv)
   memcpy(&stub[6], &lay.entry_pa, 8);
   spit(out, "stub.bin", stub, sizeof stub);
 
-  uint64_t ram_end = phys + window;
+  uint64_t ram_end = phys + window + fb_bytes;
   uint64_t qemu_mib = ((ram_end - RAM_BASE) + (256ull << 20) - 1) >> 20 & ~255ull;
+  if (RAM_BASE + (qemu_mib << 20) > 0x100000000ull) { fprintf(stderr, "xnuloader-qemu: the window and the boot video end above 4 GiB (highmem=off)\n"); return 2; }
   char line[16384];
   int n = snprintf(line, sizeof line,
                    "-M\nvirt,gic-version=3,virtualization=off,secure=off,highmem=off\n-cpu\n%s\n-smp\n%u\n-m\n%lluM\n"
@@ -261,7 +333,15 @@ int main(int argc, char **argv)
                    qemu_cpu, cpus, (unsigned long long)qemu_mib, out, (unsigned long long)phys, out, (unsigned long long)STUB_PA);
   // The disks: modern virtio (OneiOSHostedDisk takes version 2 only), disk K on transport K. A path with a comma would
   // need QEMU's doubling: refused instead.
-  if (ndisk && n >= 0 && (size_t)n < sizeof line) n += snprintf(line + n, sizeof line - n, "-global\nvirtio-mmio.force-legacy=false\n");
+  if ((ndisk || display_w || ninput) && n >= 0 && (size_t)n < sizeof line) n += snprintf(line + n, sizeof line - n, "-global\nvirtio-mmio.force-legacy=false\n");
+  // The GPU: 2D only (no virgl), its first mode the panel's; QEMU's display backend is boot-vm.sh's (VNC or none).
+  if (display_w && n >= 0 && (size_t)n < sizeof line)
+    n += snprintf(line + n, sizeof line - n, "-device\nvirtio-gpu-device,bus=virtio-mmio-bus.%u,xres=%u,yres=%u,max_outputs=1\n",
+                  gpu_transport, display_w, display_h);
+  if (input_tablet && n >= 0 && (size_t)n < sizeof line)
+    n += snprintf(line + n, sizeof line - n, "-device\nvirtio-tablet-device,bus=virtio-mmio-bus.%u\n", tablet_transport);
+  if (input_keyboard && n >= 0 && (size_t)n < sizeof line)
+    n += snprintf(line + n, sizeof line - n, "-device\nvirtio-keyboard-device,bus=virtio-mmio-bus.%u\n", keyboard_transport);
   for (unsigned i = 0; i < ndisk && n >= 0 && (size_t)n < sizeof line; i++) {
     if (strchr(disks[i].path, ',') || strchr(disks[i].path, '\n')) { fprintf(stderr, "%s: a disk path with a comma\n", disks[i].path); return 1; }
     n += snprintf(line + n, sizeof line - n, "-drive\nif=none,id=disk%u,format=raw,file=%s,readonly=%s\n"
@@ -282,5 +362,11 @@ int main(int argc, char **argv)
   for (unsigned i = 0; i < ndisk; i++)
     printf("  disk %u (transport 0x%llx): %s, %s, %s%s\n", i, (unsigned long long)(VIRTIO_BASE + i * VIRTIO_SIZE), disks[i].identity.role,
            disks[i].path, disks[i].writable ? "writable" : "read-only", disks[i].list ? ", hash list in its node" : "");
+  if (display_w)
+    printf("  display: %ux%u @%ux, %u Hz, virtio-gpu on transport 0x%llx, boot video at PA 0x%llx (%llu MiB)\n", display_w, display_h,
+           display_scale, display_hz, (unsigned long long)(VIRTIO_BASE + gpu_transport * VIRTIO_SIZE), (unsigned long long)fb_pa,
+           (unsigned long long)(fb_bytes >> 20));
+  if (input_tablet) printf("  input: tablet (one finger while the button is down) on transport 0x%llx\n", (unsigned long long)(VIRTIO_BASE + tablet_transport * VIRTIO_SIZE));
+  if (input_keyboard) printf("  input: keyboard on transport 0x%llx\n", (unsigned long long)(VIRTIO_BASE + keyboard_transport * VIRTIO_SIZE));
   return 0;
 }

@@ -2216,6 +2216,12 @@ Shared: `gen.rs` (where a generator runs, Python's file and process calls as the
 script repeated), `drivers_build.rs` (`drivers/build.py`: `record`, `command`, and since 2026-11-13 the whole script), `macho_object.rs` (a compiled
 object's symbols and the signed entries of a vtable), `staged/` (the edit lists of the staged sources).
 
+Since 2026-11-20 (native path) `kernel gen gpu` also compiles a staged copy of the transport, `DroidVMVirtioGpu.cpp`
+(`build/oneios-gpu/staged/`, edit list `staged/gpu.rs` `TRANSPORT`): the control queue is as long as the device takes
+(QEMU's 2D virtio-gpu-device offers 64 descriptors, crosvm and xnuhost 512 or more: there nothing changes), half of it
+command slots and the last 12 of those the large ones. Checked against the pinned source by
+`the_transport_edits_fit_the_pinned_source` (`cargo test -p oneios-kernel --test golden`, 13 passed on the Linux PC).
+
 Since 2026-11-13 (hang) `kernel gen gpu` also compiles a staged copy of UniXNU-droidvm's `DroidVMVirtioGpu3D.cpp`
 (`build/oneios-gpu/staged/`, edit list `staged/gpu.rs` `GPU3D`: three weak hooks that hand each blob's creation, deferred
 close and release to `OneiOSAdreno.cpp`'s GPU memory report, `docs/gpu.md` 5.1; since the widgets work of the same day

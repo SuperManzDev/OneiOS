@@ -14,9 +14,16 @@
 #   QEMU_DEBUG=LIST ...         QEMU's -d log (default int,guest_errors,unimp: every exception, for a kernel that stops
 #                               early; with IMAGE guest_errors,unimp, because a long boot's interrupts would fill the
 #                               log's 64 MB and stop QEMU)
+#   SCREEN=WxH [SCALE=2|3] [HZ=N] ...  a display: QEMU's virtio-gpu-device (2D) and the boot video, the kernel's display
+#                               driver on it (kernel/patches/oneios-hosted/display). Without a 3D GPU iOS draws with the CPU.
+#   VNC=N ...                   QEMU's VNC server on 127.0.0.1:590N (this PC only), to watch it: krdc vnc://127.0.0.1:590N
+#   INPUT=tablet,keyboard ...   QEMU's virtio-tablet-device (the VNC client's mouse: one finger while the button is down)
+#                               and virtio-keyboard-device, for the kernel's touch screen and keys (the hid archive)
 # Out: OUT (out/qemu/vm) serial.log (the kernel's console on the PL011), qemu.log (QEMU's -d log, the first 64 MB), and
-# xnuloader-qemu's layout files. A guest restart ends the run (-no-reboot). QEMU comes from the project's sysroot
-# (/mnt/tkg-build/oneios/sysroot, QEMU_SYSROOT=; Arch's qemu-system-aarch64 extracted there, never installed to /).
+# xnuloader-qemu's layout files; monitor.sock, QEMU's monitor while it runs (scripts/qemu/shot.sh takes a picture of the
+# display). A guest restart ends the run (-no-reboot). QEMU comes from the project's sysroot
+# (/mnt/tkg-build/oneios/sysroot, QEMU_SYSROOT=; Arch's qemu-system-aarch64 extracted there, never installed to /), and
+# its modules from there too (QEMU_MODULE_DIR: virtio-gpu-device is qemu-hw-display-virtio-gpu's module).
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 SECS=${1:-30}
@@ -35,6 +42,10 @@ opts=()
 [ -z "${RAM_MIB:-}" ] || opts+=(--ram-mib "$RAM_MIB")
 [ -z "${BOOT_ARGS:-}" ] || opts+=(--args "$BOOT_ARGS")
 [ -z "${ARGS_ADD:-}" ] || opts+=(--args-add "$ARGS_ADD")
+[ -z "${SCREEN:-}" ] || opts+=(--display "$SCREEN" --scale "${SCALE:-2}" --hz "${HZ:-60}")
+[ -z "${INPUT:-}" ] || opts+=(--input "$INPUT")
+display=(-display none)
+[ -z "${VNC:-}" ] || display+=(-vnc "127.0.0.1:$VNC")
 debug=${QEMU_DEBUG:-int,guest_errors,unimp}
 if [ -n "$IMAGE" ]; then
   [ -f "$IMAGE/manifest.json" ] || { echo "boot-vm: $IMAGE has no manifest.json" >&2; exit 1; }
@@ -52,7 +63,8 @@ mapfile -t args < "$OUT/qemu.args"
 echo "boot-vm: $SECS s of QEMU $(LD_LIBRARY_PATH=$SYSROOT/usr/lib "$QEMU" --version | head -1)"
 set +e
 # QEMU's own log (-d) goes to stderr, here into the pipe; when head has its 64 MB QEMU gets SIGPIPE and stops.
-LD_LIBRARY_PATH=$SYSROOT/usr/lib timeout "$SECS" "$QEMU" "${args[@]}" -display none -monitor none -no-reboot \
+QEMU_MODULE_DIR=$SYSROOT/usr/lib/qemu LD_LIBRARY_PATH=$SYSROOT/usr/lib timeout "$SECS" "$QEMU" "${args[@]}" "${display[@]}" -no-reboot \
+  -monitor "unix:$OUT/monitor.sock,server=on,wait=off" \
   -serial "file:$OUT/serial.log" -d "$debug" 2>&1 >/dev/null | head -c 64000000 > "$OUT/qemu.log"
 code=${PIPESTATUS[0]}
 set -e

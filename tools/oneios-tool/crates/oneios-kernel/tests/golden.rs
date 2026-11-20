@@ -99,6 +99,26 @@ fn the_display_edits_fit_the_pinned_sources() {
 }
 
 #[test]
+fn the_transport_edits_fit_the_pinned_source() {
+    // native, 2026-11-20: the virtio-gpu transport's control queue as long as the device takes (staged/gpu.rs TRANSPORT),
+    // against the real DroidVMVirtioGpu.cpp where external/ has it; the kernel build applies the same list and stops on a
+    // missing anchor.
+    let source = repo().join("external/UniXNU-droidvm/package/DroidVMVirtioGpu.cpp");
+    if !source.exists() {
+        eprintln!("external/UniXNU-droidvm is not here: the transport's edits were not checked");
+        return;
+    }
+    let text = std::fs::read_to_string(&source).unwrap();
+    let staged = build_oneios_gpu::staged_transport_text(text.clone()).unwrap();
+    assert!(staged.contains("uint32_t queueSize = QueueSize, usable = Slots, largeFrom = Large;"));
+    assert!(staged.contains("queueSize = size = max;") && staged.contains("wr(0x38, size);"));
+    assert!(staged.contains("i < usable && s == Slots") && staged.contains("available % queueSize"));
+    // every ring index and descriptor check follows the device's length
+    assert!(!staged.contains("% QueueSize") && !staged.contains("head < QueueSize"));
+    assert!(build_oneios_gpu::staged_transport_text(text.repeat(2)).is_err());
+}
+
+#[test]
 fn the_pen_edits_fit_the_pinned_source() {
     // spen, 2026-11-15: the pen digitizer's edits (staged/hid_pen.rs) apply after the phone's (staged/hid.rs) to the real
     // NativeHidInput.cpp, where external/ has it; the kernel build applies the same lists and stops on a missing anchor.

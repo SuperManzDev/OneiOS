@@ -1061,6 +1061,10 @@ void oneios_adreno_start(void)
     if (!oneios_adreno_wanted()) {
         oneios_adreno_stage = 1;
         IOLog("oneios-adreno: no Metal accelerator (gpu state %u; oneios-gpu-metal=1 publishes it anyway)\n", oneios_gpu3d_state);
+        // The report all the same (2026-11-20): its oneios-cpu lines say which processes have the CPUs, which matters most
+        // where iOS draws with them (the native kernel on QEMU, a host with no 3D); its GPU lines stay quiet without work.
+        thread_t reporter = nullptr;
+        if (kernel_thread_start(report, nullptr, &reporter) == KERN_SUCCESS) thread_deallocate(reporter);
         return;
     }
     oneios_adreno_stage = 2;

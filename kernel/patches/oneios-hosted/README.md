@@ -1175,16 +1175,18 @@ are about iOS on the image set and not about the host (`#if XNU_HOSTED || XNU_ON
 | `bsd/vm/vm_compressor_backing_file.c` | why a swap file cannot be opened (0057) |
 | `iokit/Kernel/IORegistryEntry.cpp`, `IOPlatformExpert.cpp` | the boot manifest mirrored onto the `/chosen` Image4 holds (0010); `/chosen` gets no nub (0011) |
 | `osfmk/mach/shared_region.h` | the 8 GiB shared region iOS 27's cache needs (0013) |
-| `osfmk/arm64/oneios_host.c` | the weak defaults of the GPU, AES and key store starts; the board's late start of the key store |
+| `osfmk/arm64/oneios_host.c` | the weak defaults of the GPU, AES and key store starts; the board's late start of the GPU and the key store; for a native kernel only, defaults of the two hosted hooks the GPU archive declares weak (`hosted_gpu_text_flush`, `hosted_processors_idle_mach`: the arm64e static link leaves no weak import undefined) |
+| `bsd/kern/bsd_init.c` | the display on unless `oneios-display=0` (0020): the graphics family loaded and the framebuffer backend registered without Droid-VM's two experiment switches |
 | `osfmk/arm/cpu_common.c` | no clearing of a starting core's `SIGPdisabled` from another CPU (0006): under QEMU too a vCPU is a host thread, and the starting core's `assert_ml_cpu_signal_is_enabled(false)` failed (cpu 1, `cpu_signal` 0x8) |
 | `osfmk/arm64/machine_routines.c` | one kind of CPU is a non-standard topology (0016): QEMU's four vCPUs stopped launchd's first `workq_open` at `sched_clutch.c:6589` |
 | `osfmk/arm/model_dep.c` | the debugger's acknowledge timeout of 100000000 ticks (0017): every panic on the bench said "Debugger synchronization timed out" |
 | `makedefs/MakeInc.def` | `-DXNU_ONEIOS_NATIVE=1` from `XNU_ONEIOS_NATIVE=1` |
 
 What stays hosted inside the opened code: the blocked-thread dump when `newfs_apfs` hangs (0009's host debugging), the
-user backtraces (0026), the Metal plug-in's client list (no GPU archive in a native kernel: its file stays as the seed has
-it), and the restart into a first start when the Data volume holds another seed: `hosted_halt(XH_HALT_RESTART)` on a
-hosted kernel, `PEHaltRestart(kPERestartCPU)` on a native machine (under QEMU, `-no-reboot`: the run ends).
+user backtraces (0026), and the restart into a first start when the Data volume holds another seed:
+`hosted_halt(XH_HALT_RESTART)` on a hosted kernel, `PEHaltRestart(kPERestartCPU)` on a native machine (under QEMU,
+`-no-reboot`: the run ends). The native kernel links the GPU and display archives too (`docs/native.md`, "The display on
+the bench"), so the Metal plug-in's client list (0039) is written as on the hosted kernel.
 
 The disks of a native kernel are the same class with the same nodes (`storage/OneiOSHostedDisk.cpp`, `#if !XNU_HOSTED`):
 the window is a device mapping instead of the host calls, and because no host checks the reads, the driver checks every

@@ -112,3 +112,47 @@ pub const GPU3D: &[(&str, &str)] = &[
      concat!("    if (!status && entries && r.wired && oneios_gpu_blob_segments) oneios_gpu_blob_segments(r.id, c->slot, r.size, entries, entryCount);\n",
              "    if (entries) IODeleteData(entries, Entry, entryCapacity);\n")),
 ];
+
+/// DroidVMVirtioGpu.cpp's lines that change (native, 2026-11-20): the control queue is as long as the device takes, not
+/// always 512 descriptors. QEMU's 2D virtio-gpu-device offers 64 (crosvm and xnuhost 512 or more, and there nothing
+/// changes): the transport stopped at "queue unavailable or too small" and the display had no scanout. With a shorter
+/// queue half of it are command slots (two descriptors each) and the last LargeSlots of those the large ones (half, with
+/// fewer than 2 * LargeSlots). Each anchor must be there exactly once.
+pub const TRANSPORT: &[(&str, &str)] = &[
+    ("uint32_t hugeOwner = Slots;   // the slot the buffer is lent to; Slots when free\n",
+     concat!("uint32_t hugeOwner = Slots;   // the slot the buffer is lent to; Slots when free\n",
+             "// OneiOS: the control queue's length, the slots in use and the first large one, from the device (start()).\n",
+             "uint32_t queueSize = QueueSize, usable = Slots, largeFrom = Large;\n")),
+    ("    return head < QueueSize && !(head & 1) && (slots[head / 2].state == Posted || slots[head / 2].state == Abandoned);\n",
+     "    return head < queueSize && !(head & 1) && (slots[head / 2].state == Posted || slots[head / 2].state == Abandoned);\n"),
+    ("UsedOffset + 4) + consumed % QueueSize;\n", "UsedOffset + 4) + consumed % queueSize;\n"),
+    ("                droidvm_virtio_gpu_stray[2] = head < QueueSize ? slots[head / 2].state : 0xff;\n",
+     "                droidvm_virtio_gpu_stray[2] = head < queueSize ? slots[head / 2].state : 0xff;\n"),
+    ("uint16_t(consumed - 1), head, unsigned(head < QueueSize ? slots[head / 2].state : 0xff));\n",
+     "uint16_t(consumed - 1), head, unsigned(head < queueSize ? slots[head / 2].state : 0xff));\n"),
+    ("        if (rd(0x44) || rd(0x34) < sizes[q]) return fail(\"queue unavailable or too small\");\n",
+     concat!("        if (rd(0x44)) return fail(\"queue unavailable\");\n",
+             "        uint32_t size = sizes[q];\n",
+             "        if (q == 0 && rd(0x34) < size) {\n",
+             "            const uint32_t max = rd(0x34);\n",
+             "            if (max < 8 || (max & (max - 1))) return fail(\"control queue too small\");\n",
+             "            queueSize = size = max;\n",
+             "            usable = max / 2;\n",
+             "            largeFrom = usable >= 2 * LargeSlots ? usable - LargeSlots : usable / 2;\n",
+             "            for (uint32_t s = largeFrom; s < usable; ++s) {\n",
+             "                Slot &slot = slots[s];\n",
+             "                slot.request = largeRequest[s - largeFrom];\n",
+             "                slot.response = largeResponse[s - largeFrom];\n",
+             "                slot.requestCapacity = slot.responseCapacity = uint32_t(MaxCommand);\n",
+             "                if (!physical(slot.request, slot.requestCapacity, slot.requestPA) ||\n",
+             "                    !physical(slot.response, slot.responseCapacity, slot.responsePA)) return fail(\"noncontiguous command buffers\");\n",
+             "            }\n",
+             "            IOLog(\"virtio-gpu: the device's control queue is %u descriptors: %u command slots, %u of them large\\n\",\n",
+             "                  max, usable, usable - largeFrom);\n",
+             "        }\n",
+             "        if (rd(0x34) < size) return fail(\"queue unavailable or too small\");\n")),
+    ("        wr(0x38, sizes[q]); wr64(0x80, pa);", "        wr(0x38, size); wr64(0x80, pa);"),
+    ("            for (uint32_t i = large ? Large : 0; i < Slots && s == Slots; ++i) if (slots[i].state == Free) s = i;\n",
+     "            for (uint32_t i = large ? largeFrom : 0; i < usable && s == Slots; ++i) if (slots[i].state == Free) s = i;\n"),
+    ("    avail[2 + available % QueueSize] = uint16_t(2 * s);", "    avail[2 + available % queueSize] = uint16_t(2 * s);"),
+];

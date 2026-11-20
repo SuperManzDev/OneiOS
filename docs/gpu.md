@@ -623,8 +623,10 @@ Delivered in the hosted kernel, not as a kext:
 - `0005-gpu-3d.patch`: under `#if XNU_HOSTED`, `oneios_board_late_start` calls `oneios_gpu3d_start` (weak default).
 - `oneios-tool kernel gen gpu`: a board archive of the hosted build only (`kernel/build-hosted.sh` adds it to the board's
   archives of the build's device repository and `liboneiosgpu.a` to the force-loaded archives; was `gpu/build-oneios-gpu.py`). It compiles `gpu/OneiOSGpu.cpp`
-  and, unchanged from `external/UniXNU-droidvm/package/`, `DroidVMVirtioGpu.cpp` (the transport) and
-  `DroidVMVirtioGpu3D.cpp` (contexts, blobs over guest pages, fenced submissions, `droidvm_virtgpu_call`).
+  and, from `external/UniXNU-droidvm/package/`, `DroidVMVirtioGpu.cpp` (the transport; staged since 2026-11-20 so that
+  its control queue is as long as the device takes: QEMU's 2D device of the native bench offers 64 descriptors,
+  `staged/gpu.rs` `TRANSPORT`) and `DroidVMVirtioGpu3D.cpp` (contexts, blobs over guest pages, fenced submissions,
+  `droidvm_virtgpu_call`). The native kernel (`docs/native.md`) links the same archive: on QEMU "display only".
 - The transport is compiled with `DROIDVM_VIRTIO_GPU_DYNAMIC=1`: its queues and command buffers (about 9 MB) are one
   wired allocation at start, not kernel bss. With them in bss the kernel's `__DATA` was 10.4 MB and did not fit the
   collection's stock layout (fable-prelink); it is 1.6 MB now.

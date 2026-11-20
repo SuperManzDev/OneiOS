@@ -6,7 +6,7 @@
 # stays off: every hosted change is under #if XNU_HOSTED) and 0076, which opens the hosted kernel's OS layer to this
 # kernel (CONFIG_XNU_ONEIOS_NATIVE=y of kernel/device/configs/oneios_native_defconfig): the image set's disks, root,
 # Data, seed and launch policy. The archives: storage (OneiOSHostedDisk on a mapped virtio-mmio window, every chunk of a
-# read-only image checked against its hash list), board, aes, keystore.
+# read-only image checked against its hash list), board, aes, keystore, hid (touch and keys over virtio-input), gpu (the virtio-gpu transport) and display.
 # Output: out/kernel/current-native/xnu.macho (sealed). Its collection: kernel/prelink/build.sh with
 # KERNEL=out/kernel/current-native/xnu.macho OUT=out/kernel/native-24A446 (never the phone's out/kernel/24A446).
 exec env ONEIOS_MACHINE=native "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/build-hosted.sh" "$@"

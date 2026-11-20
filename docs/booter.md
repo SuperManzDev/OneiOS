@@ -216,7 +216,10 @@ kernel on QEMU's virt board (`docs/native.md`). With `--image DIR --data FILE` i
 `xh_verify_list` for the list itself): the image set's disks on virtio-mmio transports 0-4 with xnuhost's identities, the
 hash list of each read-only image in its node (`oneios,hash-list`: the native kernel checks the chunks itself), root
 matching on the OS volume, the trust caches. Its `qemu.args` names the transports (`bus=virtio-mmio-bus.K` is the
-window at 0x0a000000 + 0x200 * K) and the CPU (`--qemu-cpu`, a Cortex-A710 by default).
+window at 0x0a000000 + 0x200 * K) and the CPU (`--qemu-cpu`, a Cortex-A710 by default). `--display WxH [--scale 2|3]
+[--hz N]` adds the display as xnuhost gives it: `/arm-io/virtio-gpu` on the transport after the disks (QEMU's 2D
+`virtio-gpu-device` with that first mode), the boot video right after the kernel's window (`boot_args.Video`, outside the
+tree's DRAM), the tree's display mode and scale, and `offline-legacy-unit-scale` and `sheng-vsync` in the boot arguments.
 
 ### 2.2 Memory
 
