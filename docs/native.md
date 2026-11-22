@@ -199,6 +199,22 @@ MiB, no device but the serial port: it prints a line on the 8250 at 0x3f8, reads
 PAC), never waits in WFE and powers off by PSCI by itself; a run still up after 20 s is stopped through
 `crosvm stop`. It answers whether Samsung's Gunyah runs our VM at all.
 
+**Run 1, 2026-11-20: it does.** `oneios-tool phone vm-probe` (`runtime/vmprobe/probe.S`, AVF's crosvm with
+`--hypervisor gunyah --protected-vm-without-firmware`, 1 vCPU, 128 MiB; `logs/pa3q-vmprobe/run1/`): crosvm made the
+VM ("creating hypervisor: Gunyah"), the payload ran and printed on the 8250; the 2^28-turn loop with the MMU off did
+not end in 20 s, `crosvm stop` ended the VM (crosvm exit 0) and One UI ran on. What the vCPU says:
+- EL1 (`CurrentEL` 4); `MIDR_EL1` `0x000f0480` (Gunyah's, not Oryon's), `MPIDR_EL1` `0x80000000`; PSCI 1.1 over HVC;
+  `CNTFRQ_EL0` 19.2 MHz; the device tree at `0x87600000` (RAM from `0x80000000`), its magic right.
+- `ID_AA64MMFR0_EL1` `0x100010000f001021`: 36-bit IPA, 16-bit ASIDs, **4 KiB granule only** (no 16 KiB, no 64 KiB).
+  `ID_AA64MMFR2_EL1` `0x1220001112101011`: **VARange 0, no FEAT_LVA** (the bench's `vm_sanitize.c:643` assertion came
+  from QEMU's `max` CPU, not from this core). `ID_AA64MMFR1_EL1` `0x1000111110312122`: PAN 3, VHE, HAFDBS 2.
+- `ID_AA64ISAR1_EL1` `0x0011111101211052`: **pointer authentication, APA 5 (QARMA5 with FPACCOMBINE) and GPA 1**, LRCPC
+  2, BF16, I8MM; `ID_AA64PFR1_EL1` `0x21`: BTI, SSBS 2; `ID_AA64PFR0_EL1` `0x1101000001111111`: FP16, GIC system
+  registers, no SVE. `CTR_EL0` `0xb444c004`: 64-byte lines, IDC and DIC (no cache maintenance between data and code).
+- `SCTLR_EL1` at entry `0x30d00980` (MMU, caches off).
+The probe since run 1 times 2^20 turns with the MMU off, then turns the MMU on (an identity map, write-back RAM) and
+times 2^28 turns, before it powers off: the vCPU's own speed, and whether PSCI's SYSTEM_OFF ends a VM on Gunyah.
+
 ## Next
 1. The owner's choice, with the facts above: the Gunyah VM (its first test needs the owner's go, the worst case being
    a phone reset), or XNU alone, whose unknowns are the hand-off under Samsung's protections, the command-mode panel

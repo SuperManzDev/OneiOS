@@ -1269,6 +1269,8 @@ oneios-tool phone backlight status            # the panel's level, max_brightnes
 oneios-tool phone backlight set N             # 1..max_brightness (12750); the return writes One UI's own value back
 oneios-tool phone cpu [--trace S] [--out F]   # cores, domains, top and capped clocks, cpusets, xnuhost's threads and uclamps (read only)
 oneios-tool phone hw [--out DIR]              # the hardware map: fdt.dtb, iomem, partitions, kernel.config, Gunyah/AVF (read only)
+oneios-tool phone vm-probe [--payload F] [--mem MIB] [--timeout S] [--out DIR]
+                                              # runtime/vmprobe's payload once as a protected VM under Gunyah (AVF's crosvm)
 oneios-tool phone pull-data OUT [--ioslog]    # data/data.img in chunks, each checked against the phone's sha256, zero runs as holes;
                                               #   run again after a stop and it goes on (OUT.part, OUT.part.progress)
                                               #   [--chunk MIB] [--retries 5] [--backoff 2] [--stall 120] [--verify chunk|end] [--restart]
@@ -1564,6 +1566,23 @@ whose stdin is /dev/null: `vm info` waited on the script's own stdin for ever on
 Named files only (`hw::tests::the_script_reads_named_files_only`; 3 unit tests). Run on the S25 on 2026-11-20 (what it
 found: `docs/SM8750_PORT.md` section 0b); the files carry the handset's serial number, so they stay in the git-ignored
 `logs/`.
+
+**`phone vm-probe [--payload FILE] [--mem MIB] [--timeout SECONDS] [--out DIR]`** (native path, 2026-11-20;
+`crates/oneios-phone/src/vmprobe.rs`). Refused during a session and while a probe VM is up: one run of
+`runtime/vmprobe`'s payload (`build.sh` makes `out/vmprobe/vmprobe.bin`, the default) as a protected VM under the
+phone's Gunyah with AVF's own crosvm. The payload is checked (an arm64 Image of at most 1 MiB), pushed to
+`/data/local/tmp/oneios-vmprobe/probe.bin` and its SHA-256 checked on the phone; root's shell then runs `crosvm
+--log-level debug run --disable-sandbox --no-balloon --no-rng --no-usb --hypervisor gunyah
+--protected-vm-without-firmware --swiotlb 8 --hugepages --mem size=MIB --cpus num-cores=1 --socket ... --serial
+type=file,hardware=serial,num=1,path=...,console probe.bin` (MIB 128 by default) with /dev/null as its stdin, after
+`ulimit -l unlimited`. The payload powers off by itself (PSCI SYSTEM_OFF over HVC); a VM still up after SECONDS (20)
+is stopped through the control socket (`crosvm stop`), and only a crosvm still there SECONDS after that is killed:
+never a signal first (a guest killed from the host once reset a phone, Droid-VM's pacprobe notes). Into DIR (default
+`phone-vmprobe`): `run.txt` (start, end, `how itself|stop|kill`, crosvm's status), `serial.txt` (the VM's 8250),
+`crosvm.log`; the report prints the serial lines, crosvm's last 25 lines when the probe did not finish, and the
+verdict. 3 unit tests (`vmprobe::tests`: stop before kill, crosvm's stdin, the flags, the payload's check, the
+verdict). Run 1 on the S25 (2026-11-20): Samsung's Gunyah ran the VM; the results are in `docs/native.md` "A VM under
+Gunyah".
 
 **`phone cpu [--trace SECONDS] [--out FILE]`** (fix-host-overhead, 2026-11-15; `crates/oneios-phone/src/cpu.rs`). Read
 only, with or without a session: for each of cpu0-7 by name, the core (`regs/identification/midr_el1`), `cpu_capacity`,

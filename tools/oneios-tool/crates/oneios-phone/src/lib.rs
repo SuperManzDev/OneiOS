@@ -16,6 +16,7 @@ pub mod phone;
 pub mod pull;
 pub mod session;
 pub mod sparse;
+pub mod vmprobe;
 
 use adb::Adb;
 
@@ -90,6 +91,22 @@ pub enum Command {
     Hw {
         /// The folder for the files (fdt.dtb, iomem.txt, ..., hw.txt)
         #[arg(long, value_name = "DIR", default_value = "phone-hw")]
+        out: String,
+    },
+    /// One run of runtime/vmprobe's payload as a protected VM under Gunyah with AVF's crosvm: 1 vCPU, no device but
+    /// the serial port; it powers off by itself, else crosvm stop after SECONDS. Refused during a session
+    VmProbe {
+        /// The payload (runtime/vmprobe/build.sh)
+        #[arg(long, value_name = "FILE", default_value = "out/vmprobe/vmprobe.bin")]
+        payload: String,
+        /// The VM's RAM in MiB
+        #[arg(long, value_name = "MIB", default_value_t = 128)]
+        mem: u32,
+        /// Seconds before crosvm stop, and again before the last resort (kill)
+        #[arg(long, value_name = "SECONDS", default_value_t = 20)]
+        timeout: u32,
+        /// The folder for serial.txt, crosvm.log and run.txt
+        #[arg(long, value_name = "DIR", default_value = "phone-vmprobe")]
         out: String,
     },
     /// Only during a session: the panel's level (/sys/class/backlight/panel0-backlight/brightness)
@@ -268,6 +285,9 @@ pub fn main(cli: Cli) -> i32 {
         Command::Touch { command: TouchCommand::Wake } => Adb::connect(serial).and_then(|adb| session::touch_wake(&adb)),
         Command::Cpu { trace, out } => Adb::connect(serial).and_then(|adb| cpu::cpu(&adb, trace, out.as_deref())),
         Command::Hw { out } => Adb::connect(serial).and_then(|adb| hw::hw(&adb, &out)),
+        Command::VmProbe { payload, mem, timeout, out } => {
+            Adb::connect(serial).and_then(|adb| vmprobe::vm_probe(&adb, &payload, &out, &vmprobe::Options { mem, timeout }))
+        }
         Command::Backlight { command: BacklightCommand::Status } => Adb::connect(serial).and_then(|adb| session::backlight_status(&adb)),
         Command::Backlight { command: BacklightCommand::Set { level } } => Adb::connect(serial).and_then(|adb| session::backlight_set(&adb, level)),
         Command::Stage { kind, dir } => Adb::connect(serial).and_then(|adb| phone::stage(&adb, &kind, &dir)),
