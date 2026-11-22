@@ -106,6 +106,10 @@ if [ {thp} = 1 ]; then
     echo "thp: the write was refused"; thp_restore; exit 1
   fi
   echo "thp set: shmem_enabled $(cat $T/shmem_enabled) | defrag $(cat $T/defrag)"
+  # one compaction of all zones right before the VM: free 2 MiB blocks for its folios (run 6: none were free, and
+  # the 4 KiB pages it got instead filled Gunyah's own 18 MiB). A one-shot action: no setting stays changed
+  sed 's/^/uncompacted /' /proc/buddyinfo
+  echo 1 > /proc/sys/vm/compact_memory || echo "thp: compact_memory refused"
 fi
 grep -E '^(MemAvailable|SwapFree):' /proc/meminfo | tr -s ' ' | sed 's/^/before /'
 sed 's/^/before /' /proc/buddyinfo
@@ -265,6 +269,10 @@ mod tests {
         assert!(s.contains("echo \"$old_shmem\" > $T/shmem_enabled") && s.contains("echo \"$old_defrag\" > $T/defrag"));
         // a refused write is undone and nothing starts
         assert!(s.contains("echo \"thp: the write was refused\"; thp_restore; exit 1"));
+        // one compaction, inside the --thp block, before crosvm starts; the only write under /proc
+        let compact = s.find("echo 1 > /proc/sys/vm/compact_memory").unwrap();
+        assert!(compact > s.find("if [ 1 = 1 ]; then").unwrap() && compact < s.find("$C --log-level").unwrap());
+        assert_eq!(s.lines().filter(|l| l.contains("> /proc/")).count(), 1);
     }
 
     #[test]

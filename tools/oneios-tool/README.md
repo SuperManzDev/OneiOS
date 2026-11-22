@@ -1568,7 +1568,7 @@ Named files only (`hw::tests::the_script_reads_named_files_only`; 3 unit tests).
 found: `docs/SM8750_PORT.md` section 0b); the files carry the handset's serial number, so they stay in the git-ignored
 `logs/`.
 
-**`phone vm-probe [--payload FILE] [--mem MIB] [--timeout SECONDS] [--out DIR]`** (native path, 2026-11-20;
+**`phone vm-probe [--payload FILE] [--mem MIB] [--timeout SECONDS] [--thp] [--out DIR]`** (native path, 2026-11-20;
 `crates/oneios-phone/src/vmprobe.rs`). Refused during a session and while a probe VM is up: one run of
 `runtime/vmprobe`'s payload (`build.sh` makes `out/vmprobe/vmprobe.bin`, the default) as a protected VM under the
 phone's Gunyah with AVF's own crosvm. The payload is checked (an arm64 Image of at most 1 MiB), pushed to
@@ -1585,7 +1585,8 @@ Droid-VM's pacprobe notes). Into DIR (default `phone-vmprobe`): `run.txt` (start
 VM's 8250), `crosvm.log`, `fdt.dtb` (crosvm's tree for the VM) and `dmesg.txt` (the kernel's lines that name gunyah,
 folio, gh_, crosvm, scm or memextent, read right after the run: the phone's log keeps minutes); the report prints the
 serial lines, crosvm's and the kernel's last 25 lines when the probe did not finish, and the verdict. `--thp`: for
-the run only, `shmem_enabled` advise and `defrag` madvise under `/sys/kernel/mm/transparent_hugepage`, so that
+the run only, `shmem_enabled` advise and `defrag` madvise under `/sys/kernel/mm/transparent_hugepage` and one
+`echo 1 > /proc/sys/vm/compact_memory` right before crosvm (a one-shot action), so that
 crosvm's memfd gets 2 MiB folios (the old values are read first, checked against the words the kernel offers, and
 written back right after crosvm ends, by a trap too if the script ends early; nothing is written when they cannot be
 read). 5 unit tests (`vmprobe::tests`: stop before kill, crosvm's stdin, the flags, the payload's check, the memory

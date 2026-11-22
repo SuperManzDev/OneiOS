@@ -45,7 +45,7 @@ getprop | grep -i -E 'hypervisor|virtualization|gunyah|avf'; pm list features 2>
     // demand paging lends one at a time (docs/native.md "A VM under Gunyah", run 4)
     ("thp.txt", "for f in enabled defrag shmem_enabled hugepages-2048kB/enabled hugepages-2048kB/shmem_enabled \
 khugepaged/defrag; do echo \"$f: $(cat /sys/kernel/mm/transparent_hugepage/$f 2>&1)\"; done; \
-grep -E '^(AnonHugePages|ShmemHugePages|ShmemPmdMapped|FileHugePages|Hugepagesize|HugePages_Total|CmaTotal|CmaFree):' /proc/meminfo; cat /proc/buddyinfo"),
+grep -E '^(AnonHugePages|ShmemHugePages|ShmemPmdMapped|FileHugePages|Hugepagesize|HugePages_Total|CmaTotal|CmaFree):' /proc/meminfo; cat /proc/buddyinfo; cat /proc/pagetypeinfo"),
     // what AVF says of the hypervisor and what its crosvm takes: queries and help texts, no VM is made. Each is
     // given 20 s: `vm info` waited on a pipe for ever on 2026-11-20 when it had the script's stdin (now /dev/null)
     ("avf.txt", "timeout 20 /apex/com.android.virt/bin/vm info; timeout 20 /apex/com.android.virt/bin/crosvm version; \

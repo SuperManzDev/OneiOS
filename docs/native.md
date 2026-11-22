@@ -247,6 +247,24 @@ compaction. `vm-probe --thp` sets `shmem_enabled` advise and `defrag` madvise fo
 values back after it (read first and checked against the words the kernel offers, a trap for an early end; a
 restart of the phone also brings the defaults back).
 
+**Runs 5 to 7, 2026-11-23: the limit is Gunyah's own memory** (`logs/pa3q-vmprobe/run5-1g-confirm/`, `run6-1g-thp/`,
+`run7-1g-thp-compact/`). Run 5 (1 GiB, as run 4) kept the kernel's lines: "gunyah_vm_mgr: Failed to map guest address
+0x9d557000: 10" and "Failed to provide folio ...: -12". 10 is GUNYAH_ERROR_NOMEM from the `addrspace_map` hypercall:
+the hypervisor has no memory left for the VM's stage 2 and its records, after about 470 MiB of 4 KiB pages. Gunyah's
+whole region is 18 MiB (`gunyah_hyp_region@80000000`, `0x1200000`) for all its VMs (One UI's, the trusted UI's,
+Samsung's uH, ours). Run 6 (`--thp`, the settings set and written back as they should): to `0xa1110000`; buddyinfo
+had no free 2 MiB block before it, so the folios were 4 KiB again. Run 7 (`--thp` and one `compact_memory` first):
+127 free 2 MiB blocks before the VM, to `0xa64a8000` (610 MiB). Each of runs 4 to 7 filled the hypervisor's memory
+for a moment (crosvm ends at once and gives it back); One UI ran on each time, but it is not a thing to do often.
+
+Why so few 2 MiB blocks (`phone hw`, `meminfo.txt`, `thp.txt` with pagetypeinfo): MemFree 0.99 GB of 11.4 GB; the file
+cache holds 3.6 GB (2.6 GB of it inactive), apps 2.5 GB, the kernel's slabs, stacks, page tables and vmalloc 1.7 GB.
+Of the 5,736 pageblocks of 2 MiB, 3,722 are Movable (7.3 GB), 1,581 Unmovable (3.1 GB), 312 CMA, 121 Reclaimable.
+Compaction moves pages but frees none: a VM of iOS's size (3 to 4 GiB) in 2 MiB folios needs that much memory freed
+first (the file cache dropped, then compacted) and taken at once (a guest that touches all its RAM at boot), at every
+start, since a temporary root cannot reserve huge pages at boot (Droid-VM's `gh_hugepage_reserve` does, from a
+module loaded at boot; lyc8503 hit the same wall at 1 GB without it).
+
 ## Next
 1. The owner's choice, with the facts above: the Gunyah VM (its first test needs the owner's go, the worst case being
    a phone reset), or XNU alone, whose unknowns are the hand-off under Samsung's protections, the command-mode panel
