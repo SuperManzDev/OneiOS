@@ -104,16 +104,50 @@ start:
         sub     x1, x22, x21
         bl      putkv
 
-        // The MMU on, as a kernel has it: an identity map of two 1 GiB blocks, the UART's (block 0, Device-nGnRnE,
-        // never executed) and the RAM's (block RAM_GIB_BLOCK, Normal write-back, inner shareable); 4 KiB granule,
-        // 39-bit VA from TTBR0 (TTBR1's walks off), 36-bit IPA (the VM's PARange), non-cacheable table walks.
+        // The RAM the VM was given, from the device tree's /memory (MMU off: the walk reads aligned words only).
+        bl      fdt_memory
+        adr     x0, s_mem_base
+        mov     x1, x23
+        bl      putkv
+        adr     x0, s_mem_size
+        mov     x1, x24
+        bl      putkv
+        adr     x0, s_image
+        adr     x1, _head
+        bl      putkv
+        adr     x0, s_image_end
+        adr     x1, _end
+        bl      putkv
+
+        // The MMU on, as a kernel has it: an identity map of 1 GiB blocks, the UART's (block 0, Device-nGnRnE, never
+        // executed) and the RAM's (Normal write-back, inner shareable: every block /memory covers, else block
+        // RAM_GIB_BLOCK); 4 KiB granule, 39-bit VA from TTBR0 (TTBR1's walks off), 36-bit IPA (the VM's PARange),
+        // non-cacheable table walks.
         adr     x3, table
         movz    x1, #0x0401             // block, AF, AttrIndx 0
         movk    x1, #0x0060, lsl #48    // PXN, UXN
         str     x1, [x3]
-        movz    x1, #0x0705             // block, AttrIndx 1, inner shareable, AF
-        movk    x1, #(RAM_GIB_BLOCK << 14), lsl #16
-        str     x1, [x3, #(RAM_GIB_BLOCK * 8)]
+        cbz     x24, 11f
+        lsr     x4, x23, #30            // the first block of RAM
+        add     x5, x23, x24
+        sub     x5, x5, #1
+        lsr     x5, x5, #30             // the last
+        b       12f
+11:     mov     x4, #RAM_GIB_BLOCK
+        mov     x5, #RAM_GIB_BLOCK
+12:     cmp     x4, #1                  // block 0 stays the UART's
+        b.hs    13f
+        mov     x4, #1
+13:     cmp     x5, #511
+        b.ls    14f
+        mov     x5, #511
+14:     lsl     x1, x4, #30
+        movz    x2, #0x0705             // block, AttrIndx 1, inner shareable, AF
+        orr     x1, x1, x2
+        str     x1, [x3, x4, lsl #3]
+        add     x4, x4, #1
+        cmp     x4, x5
+        b.ls    14b
         dsb     sy
         mov     x1, #0xff00             // MAIR: Attr0 Device-nGnRnE, Attr1 Normal write-back RW-allocate
         msr     mair_el1, x1
@@ -145,6 +179,75 @@ start:
         sub     x1, x22, x21
         bl      putkv
 
+        // Every 4 KiB page of the RAM above the image, but the tree's 2 MiB blocks, gets its own address written and
+        // then read back: what a VM of this size costs the host, and whether all of it is there. "MEM_AT" every 256 MiB.
+        cbz     x24, 29f
+        mov     x9, #0x1fffff           // 2 MiB - 1 (not an add immediate)
+        adr     x4, _end
+        add     x4, x4, x9
+        and     x4, x4, #~0x1fffff      // from: above the image, 2 MiB aligned
+        add     x5, x23, x24            // to: the end of RAM
+        and     x6, x19, #~0x1fffff     // the tree's blocks: skipped
+        ldr     w1, [x19, #4]
+        rev     w1, w1
+        add     x7, x19, x1
+        add     x7, x7, x9
+        and     x7, x7, #~0x1fffff
+        adr     x0, s_mem_from
+        mov     x1, x4
+        bl      putkv
+        mrs     x21, S3_3_C14_C0_2
+        mov     x8, x4
+        mov     x15, #0                 // pages written
+21:     cmp     x8, x5
+        b.hs    23f
+        cmp     x8, x6
+        b.lo    22f
+        cmp     x8, x7
+        b.hs    22f
+        mov     x8, x7
+        b       21b
+22:     str     x8, [x8]
+        add     x15, x15, #1
+        tst     x8, #0xfffffff
+        b.ne    24f
+        adr     x0, s_mem_at
+        mov     x1, x8
+        bl      putkv
+24:     add     x8, x8, #4096
+        b       21b
+23:     mrs     x22, S3_3_C14_C0_2
+        adr     x0, s_mem_pages
+        mov     x1, x15
+        bl      putkv
+        adr     x0, s_mem_wticks
+        sub     x1, x22, x21
+        bl      putkv
+        mrs     x21, S3_3_C14_C0_2
+        mov     x8, x4
+        mov     x16, #0                 // pages that do not read back
+25:     cmp     x8, x5
+        b.hs    27f
+        cmp     x8, x6
+        b.lo    26f
+        cmp     x8, x7
+        b.hs    26f
+        mov     x8, x7
+        b       25b
+26:     ldr     x1, [x8]
+        cmp     x1, x8
+        b.eq    28f
+        add     x16, x16, #1
+28:     add     x8, x8, #4096
+        b       25b
+27:     mrs     x22, S3_3_C14_C0_2
+        adr     x0, s_mem_bad
+        mov     x1, x16
+        bl      putkv
+        adr     x0, s_mem_rticks
+        sub     x1, x22, x21
+        bl      putkv
+29:
         adr     x0, s_done
         bl      puts
         b       poweroff
@@ -163,6 +266,118 @@ poweroff:
         movk    x0, #0x8400, lsl #16
         hvc     #0
         b       3b
+
+// fdt_memory: the device tree at x19 (big-endian); x23 = /memory's first base, x24 = its size (two cells each, as
+// crosvm and QEMU write them), both 0 when there is none. With the MMU off: aligned words and bytes only. Uses x0..x2,
+// x10..x16.
+fdt_memory:
+        mov     x23, #0
+        mov     x24, #0
+        tst     x19, #7
+        b.ne    49f
+        ldr     w1, [x19]
+        rev     w1, w1
+        movz    w2, #0xfeed
+        movk    w2, #0xd00d, lsl #16
+        cmp     w1, w2
+        b.ne    49f
+        ldr     w1, [x19, #8]           // off_dt_struct
+        rev     w1, w1
+        add     x10, x19, x1            // the token
+        ldr     w1, [x19, #12]          // off_dt_strings
+        rev     w1, w1
+        add     x11, x19, x1
+        ldr     w1, [x19, #4]           // totalsize: the walk's bound
+        rev     w1, w1
+        add     x12, x19, x1
+        mov     x13, #0                 // depth: the root's is 1, its children's 2
+        mov     x14, #0                 // the memory node's depth while in it, else 0
+41:     cmp     x10, x12
+        b.hs    49f
+        ldr     w1, [x10], #4
+        rev     w1, w1
+        cmp     w1, #1                  // FDT_BEGIN_NODE
+        b.eq    42f
+        cmp     w1, #2                  // FDT_END_NODE
+        b.eq    45f
+        cmp     w1, #3                  // FDT_PROP
+        b.eq    46f
+        cmp     w1, #4                  // FDT_NOP
+        b.eq    41b
+        b       49f                     // FDT_END, or a tree this walk does not know
+42:     add     x13, x13, #1
+        cmp     x13, #2
+        b.ne    44f
+        ldrb    w1, [x10]               // "memory", then NUL or '@'
+        cmp     w1, #'m'
+        b.ne    44f
+        ldrb    w1, [x10, #1]
+        cmp     w1, #'e'
+        b.ne    44f
+        ldrb    w1, [x10, #2]
+        cmp     w1, #'m'
+        b.ne    44f
+        ldrb    w1, [x10, #3]
+        cmp     w1, #'o'
+        b.ne    44f
+        ldrb    w1, [x10, #4]
+        cmp     w1, #'r'
+        b.ne    44f
+        ldrb    w1, [x10, #5]
+        cmp     w1, #'y'
+        b.ne    44f
+        ldrb    w1, [x10, #6]
+        cmp     w1, #'@'
+        b.eq    43f
+        cbnz    w1, 44f
+43:     mov     x14, x13
+44:     ldrb    w1, [x10], #1           // past the name and its NUL, to the next word
+        cbnz    w1, 44b
+        add     x10, x10, #3
+        and     x10, x10, #~3
+        b       41b
+45:     cmp     x14, x13
+        b.ne    47f
+        mov     x14, #0
+47:     sub     x13, x13, #1
+        b       41b
+46:     ldr     w15, [x10], #4          // len
+        rev     w15, w15
+        ldr     w16, [x10], #4          // nameoff
+        rev     w16, w16
+        cbz     x14, 48f
+        cmp     x14, x13
+        b.ne    48f
+        cmp     w15, #16
+        b.lo    48f
+        add     x0, x11, x16            // the name: "reg"
+        ldrb    w1, [x0]
+        cmp     w1, #'r'
+        b.ne    48f
+        ldrb    w1, [x0, #1]
+        cmp     w1, #'e'
+        b.ne    48f
+        ldrb    w1, [x0, #2]
+        cmp     w1, #'g'
+        b.ne    48f
+        ldrb    w1, [x0, #3]
+        cbnz    w1, 48f
+        ldr     w1, [x10]               // base: two big-endian cells
+        rev     w1, w1
+        ldr     w2, [x10, #4]
+        rev     w2, w2
+        orr     x23, x2, x1, lsl #32
+        ldr     w1, [x10, #8]           // size
+        rev     w1, w1
+        ldr     w2, [x10, #12]
+        rev     w2, w2
+        orr     x24, x2, x1, lsl #32
+        b       49f
+48:     add     x10, x10, x15           // past the value, to the next word
+        add     x10, x10, #3
+        and     x10, x10, #~3
+        b       41b
+49:     ret
 
 // putc: w0 to the UART. Uses x9.
 putc:
@@ -263,6 +478,16 @@ s_sctlr_now: .asciz "SCTLR_EL1_ICACHE "
 s_loop_off:  .asciz "LOOP_MMUOFF_2E20_TICKS "
 s_sctlr_mmu: .asciz "SCTLR_EL1_MMU "
 s_loop_on:   .asciz "LOOP_MMUON_2E28_TICKS "
+s_mem_base:  .asciz "MEM_BASE "
+s_mem_size:  .asciz "MEM_SIZE "
+s_image:     .asciz "IMAGE "
+s_image_end: .asciz "IMAGE_END "
+s_mem_from:  .asciz "MEM_FROM "
+s_mem_at:    .asciz "MEM_AT "
+s_mem_pages: .asciz "MEM_PAGES "
+s_mem_wticks: .asciz "MEM_WRITE_TICKS "
+s_mem_bad:   .asciz "MEM_BAD_PAGES "
+s_mem_rticks: .asciz "MEM_READ_TICKS "
 s_exc:       .asciz "EXCEPTION "
 s_esr:       .asciz "ESR_EL1 "
 s_elr:       .asciz "ELR_EL1 "

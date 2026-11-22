@@ -27,6 +27,31 @@ pub struct Options {
     pub timeout: u32,
 }
 
+/// The most RAM a probe VM may ask for, and what Android must keep available beside it (MiB).
+pub const MAX_MEM: u32 = 6144;
+pub const KEEP_FREE: u64 = 1024;
+
+/// MemAvailable in MiB from `/proc/meminfo`'s line ("MemAvailable:  3276800 kB").
+pub fn mem_available_mib(meminfo: &str) -> Option<u64> {
+    let line = meminfo.lines().find(|l| l.starts_with("MemAvailable:"))?;
+    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb / 1024)
+}
+
+/// The VM's size against what Android has: at most MAX_MEM, and KEEP_FREE left to Android.
+pub fn check_mem(mem: u32, available_mib: u64) -> Result<()> {
+    if mem == 0 || mem > MAX_MEM {
+        bail!("--mem {mem}: a probe VM takes 1 to {MAX_MEM} MiB");
+    }
+    if mem as u64 + KEEP_FREE > available_mib {
+        bail!(
+            "--mem {mem}: Android has {available_mib} MiB available, and a VM's RAM is pinned; {KEEP_FREE} MiB must stay \
+             free beside it. Close apps or ask for less. Nothing was started"
+        );
+    }
+    Ok(())
+}
+
 /// The payload's own check: a Linux arm64 Image (magic "ARM\x64" at 0x38) of at most 1 MiB.
 pub fn check_payload(data: &[u8]) -> Result<()> {
     if data.len() < 64 || &data[0x38..0x3c] != b"ARM\x64" {
@@ -50,13 +75,14 @@ cd $D || exit 1
 got=$(sha256sum probe.bin | cut -d' ' -f1)
 [ "$got" = "{sha}" ] || {{ echo "sha256 $got, not {sha}"; exit 1; }}
 [ -c /dev/gunyah ] || {{ echo "no /dev/gunyah"; exit 1; }}
-rm -f serial.txt crosvm.log crosvm.sock
+rm -f serial.txt crosvm.log crosvm.sock fdt.dtb
 ulimit -l unlimited 2>/dev/null || echo "ulimit -l unlimited: refused"
-echo "start $(date +%s)"
+grep -E '^(MemAvailable|SwapFree):' /proc/meminfo | tr -s ' ' | sed 's/^/before /'
+echo "start $(date +%s) up $(cut -d' ' -f1 /proc/uptime)"
 $C --log-level debug run --disable-sandbox --no-balloon --no-rng --no-usb --hypervisor gunyah \
   --protected-vm-without-firmware --swiotlb 8 --hugepages --mem size={mem} --cpus num-cores=1 \
   --socket $D/crosvm.sock --serial type=file,hardware=serial,num=1,path=$D/serial.txt,console \
-  $D/probe.bin </dev/null >$D/crosvm.log 2>&1 &
+  --dump-device-tree-blob $D/fdt.dtb $D/probe.bin </dev/null >$D/crosvm.log 2>&1 &
 pid=$!
 t=0; while [ $t -lt {t} ] && kill -0 $pid 2>/dev/null; do sleep 1; t=$((t + 1)); done
 how=itself
@@ -66,7 +92,8 @@ if kill -0 $pid 2>/dev/null; then
 fi
 if kill -0 $pid 2>/dev/null; then how=kill; kill -9 $pid; fi
 wait $pid; rc=$?
-echo "end $(date +%s) how $how exit $rc"
+echo "end $(date +%s) up $(cut -d' ' -f1 /proc/uptime) how $how exit $rc"
+grep -E '^(MemAvailable|SwapFree):' /proc/meminfo | tr -s ' ' | sed 's/^/after /'
 echo '=== serial.txt'
 head -c 65536 serial.txt 2>/dev/null
 echo '=== crosvm.log'
@@ -108,6 +135,9 @@ pub fn vm_probe(adb: &Adb, payload: &str, out: &str, o: &Options) -> Result<()> 
     if !up.trim().is_empty() {
         bail!("a probe VM is still up on the phone: {}", up.trim());
     }
+    let meminfo = adb.root_ok("grep '^MemAvailable:' /proc/meminfo\n", "the memory check")?;
+    let available = mem_available_mib(&meminfo).with_context(|| format!("no MemAvailable in \"{}\"", meminfo.trim()))?;
+    check_mem(o.mem, available)?;
     adb.root_ok(&format!("mkdir -p {DIR} && chmod 777 {DIR}\n"), "the probe's folder")?;
     adb.push(payload, &format!("{DIR}/probe.bin"))?;
     println!("vm-probe: {} bytes, sha256 {sha}; crosvm runs it (1 vCPU, {} MiB, at most {} s, then crosvm stop)", data.len(), o.mem, o.timeout);
@@ -119,7 +149,18 @@ pub fn vm_probe(adb: &Adb, payload: &str, out: &str, o: &Options) -> Result<()> 
     fs::write(Path::new(out).join("run.txt"), format!("{run}{}", r.err))?;
     fs::write(Path::new(out).join("serial.txt"), serial)?;
     fs::write(Path::new(out).join("crosvm.log"), log)?;
+    // the VM's device tree as crosvm made it (--dump-device-tree-blob): the machine an XNU guest is given
+    let tree = Path::new(out).join("fdt.dtb");
+    let mut child = adb.exec_out(&format!("su -c 'cat {DIR}/fdt.dtb'"))?;
+    let mut file = fs::File::create(&tree).with_context(|| format!("cannot write {}", tree.display()))?;
+    let n = std::io::copy(child.stdout.as_mut().context("no output from adb")?, &mut file)?;
+    child.wait()?;
+    let good = fs::read(&tree).map(|d| d.len() >= 40 && d[..4] == [0xd0, 0x0d, 0xfe, 0xed]).unwrap_or(false);
+    if !good {
+        fs::remove_file(&tree).ok();
+    }
     print!("{run}");
+    println!("fdt.dtb: {}", if good { format!("{n} bytes (crosvm's tree for this VM)") } else { "none".to_string() });
     if !r.err.trim().is_empty() {
         println!("stderr: {}", r.err.trim());
     }
@@ -152,7 +193,18 @@ mod tests {
         assert!(s.contains("--no-balloon --no-rng --no-usb") && s.contains("--cpus num-cores=1") && s.contains("--mem size=128"));
         assert!(s.contains("[ \"$got\" = \"ab12\" ]"), "the payload's sha256 is checked before the run");
         assert!(s.contains("while [ $t -lt 20 ]"));
+        assert!(s.contains("--dump-device-tree-blob $D/fdt.dtb $D/probe.bin"));
         assert!(!s.contains('*'), "no glob");
+    }
+
+    #[test]
+    fn the_vm_leaves_android_a_gib() {
+        assert_eq!(mem_available_mib("MemAvailable:    3276800 kB\n"), Some(3200));
+        assert_eq!(mem_available_mib("MemFree: 1 kB\n"), None);
+        assert!(check_mem(128, 3200).is_ok());
+        assert!(check_mem(2048, 3200).is_ok());
+        assert!(check_mem(2304, 3200).is_err(), "2304 + 1024 > 3200");
+        assert!(check_mem(0, 9999).is_err() && check_mem(MAX_MEM + 1, 99999).is_err());
     }
 
     #[test]

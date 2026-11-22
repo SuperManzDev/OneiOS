@@ -215,6 +215,19 @@ not end in 20 s, `crosvm stop` ended the VM (crosvm exit 0) and One UI ran on. W
 The probe since run 1 times 2^20 turns with the MMU off, then turns the MMU on (an identity map, write-back RAM) and
 times 2^28 turns, before it powers off: the vCPU's own speed, and whether PSCI's SYSTEM_OFF ends a VM on Gunyah.
 
+**Run 2, 2026-11-23: the whole probe, and the VM ends by itself** (`logs/pa3q-vmprobe/run2/`): crosvm's run took about
+a second, PSCI SYSTEM_OFF ended it (crosvm exit 0, no stop needed), One UI ran on. `SCTLR_EL1.I` is set when the
+probe writes it (`0x30d01980`), yet with the MMU off a turn of the loop costs 105 ns (2^20 turns in 2,110,484 ticks of
+19.2 MHz): every fetch goes to memory, which is why run 1's 2^28 turns could not end in 20 s. With the MMU on
+(`0x30d01985`: M, C, I) 2^28 turns take 1,800,312 ticks, 93.8 ms: 0.35 ns a turn, 2.86 billion turns a second, the core's
+own speed. Code that stays in the VM loses nothing to Gunyah.
+
+Since run 2 the probe also reads `/memory` from the device tree, maps all of it, writes every 4 KiB page above itself
+(but the tree's blocks) with its own address and reads it back (`MEM_PAGES`, `MEM_BAD_PAGES`, the ticks of each pass,
+`MEM_AT` every 256 MiB): how much RAM a protected VM can have while One UI runs, and what lending it costs. `vm-probe`
+keeps crosvm's tree (`--dump-device-tree-blob`, `fdt.dtb` in DIR: the machine an XNU guest gets) and refuses a VM
+that would leave Android less than 1 GiB of its MemAvailable (the VM's RAM is pinned).
+
 ## Next
 1. The owner's choice, with the facts above: the Gunyah VM (its first test needs the owner's go, the worst case being
    a phone reset), or XNU alone, whose unknowns are the hand-off under Samsung's protections, the command-mode panel

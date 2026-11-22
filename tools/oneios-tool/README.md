@@ -1574,14 +1574,17 @@ phone's Gunyah with AVF's own crosvm. The payload is checked (an arm64 Image of 
 `/data/local/tmp/oneios-vmprobe/probe.bin` and its SHA-256 checked on the phone; root's shell then runs `crosvm
 --log-level debug run --disable-sandbox --no-balloon --no-rng --no-usb --hypervisor gunyah
 --protected-vm-without-firmware --swiotlb 8 --hugepages --mem size=MIB --cpus num-cores=1 --socket ... --serial
-type=file,hardware=serial,num=1,path=...,console probe.bin` (MIB 128 by default) with /dev/null as its stdin, after
-`ulimit -l unlimited`. The payload powers off by itself (PSCI SYSTEM_OFF over HVC); a VM still up after SECONDS (20)
-is stopped through the control socket (`crosvm stop`), and only a crosvm still there SECONDS after that is killed:
-never a signal first (a guest killed from the host once reset a phone, Droid-VM's pacprobe notes). Into DIR (default
-`phone-vmprobe`): `run.txt` (start, end, `how itself|stop|kill`, crosvm's status), `serial.txt` (the VM's 8250),
-`crosvm.log`; the report prints the serial lines, crosvm's last 25 lines when the probe did not finish, and the
-verdict. 3 unit tests (`vmprobe::tests`: stop before kill, crosvm's stdin, the flags, the payload's check, the
-verdict). Run 1 on the S25 (2026-11-20): Samsung's Gunyah ran the VM; the results are in `docs/native.md` "A VM under
+type=file,hardware=serial,num=1,path=...,console --dump-device-tree-blob ... probe.bin` (MIB 128 by default) with
+/dev/null as its stdin, after `ulimit -l unlimited`. MIB is at most 6144, and Android must keep 1 GiB of its
+MemAvailable beside it (a VM's RAM is pinned): else nothing starts. The payload powers off by itself (PSCI SYSTEM_OFF
+over HVC); a VM still up after SECONDS (20) is stopped through the control socket (`crosvm stop`), and only a crosvm
+still there SECONDS after that is killed: never a signal first (a guest killed from the host once reset a phone,
+Droid-VM's pacprobe notes). Into DIR (default `phone-vmprobe`): `run.txt` (start and end with the uptime,
+`how itself|stop|kill`, crosvm's status, MemAvailable and SwapFree before and after), `serial.txt` (the VM's 8250),
+`crosvm.log` and `fdt.dtb` (crosvm's tree for the VM); the report prints the serial lines, crosvm's last 25 lines when
+the probe did not finish, and the verdict. 4 unit tests (`vmprobe::tests`: stop before kill, crosvm's stdin, the
+flags, the payload's check, the memory check, the verdict). Runs 1 and 2 on the S25 (2026-11-20 and 23): Samsung's
+Gunyah runs the VM, at the core's own speed, and it ends by itself; the results are in `docs/native.md` "A VM under
 Gunyah".
 
 **`phone cpu [--trace SECONDS] [--out FILE]`** (fix-host-overhead, 2026-11-15; `crates/oneios-phone/src/cpu.rs`). Read
