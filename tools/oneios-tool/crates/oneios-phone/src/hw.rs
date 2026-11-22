@@ -41,6 +41,11 @@ ro.boot.flash.locked ro.boot.verifiedbootstate; do echo \"$p=$(getprop $p)\"; do
     ("hyp.txt", "for f in /dev/gunyah /dev/kvm /dev/udmabuf /apex/com.android.virt/bin/crosvm /apex/com.android.virt/bin/vm \
 /apex/com.android.virt/etc/pvmfw.img; do echo \"$f: $(ls -lZ $f 2>&1)\"; done; \
 getprop | grep -i -E 'hypervisor|virtualization|gunyah|avf'; pm list features 2>/dev/null | grep -i virtualization"),
+    // transparent huge pages: whether a VM's RAM (crosvm's memfd, shmem) can come in 2 MiB folios, which Gunyah's
+    // demand paging lends one at a time (docs/native.md "A VM under Gunyah", run 4)
+    ("thp.txt", "for f in enabled defrag shmem_enabled hugepages-2048kB/enabled hugepages-2048kB/shmem_enabled \
+khugepaged/defrag; do echo \"$f: $(cat /sys/kernel/mm/transparent_hugepage/$f 2>&1)\"; done; \
+grep -E '^(AnonHugePages|ShmemHugePages|ShmemPmdMapped|FileHugePages|Hugepagesize|HugePages_Total|CmaTotal|CmaFree):' /proc/meminfo; cat /proc/buddyinfo"),
     // what AVF says of the hypervisor and what its crosvm takes: queries and help texts, no VM is made. Each is
     // given 20 s: `vm info` waited on a pipe for ever on 2026-11-20 when it had the script's stdin (now /dev/null)
     ("avf.txt", "timeout 20 /apex/com.android.virt/bin/vm info; timeout 20 /apex/com.android.virt/bin/crosvm version; \
@@ -59,6 +64,24 @@ pub fn hw_script() -> String {
         s += &format!("echo '=== {name}'\n( {run} ) </dev/null 2>&1\n");
     }
     s
+}
+
+/// The lines of the kernel's log that match any of `greps` (all lines when there is none), the last `tail` of them.
+pub fn dmesg_lines(text: &str, greps: &[regex::Regex], tail: usize) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().filter(|l| greps.is_empty() || greps.iter().any(|g| g.is_match(l))).collect();
+    lines[lines.len().saturating_sub(tail)..].iter().map(|l| l.to_string()).collect()
+}
+
+/// `phone dmesg`: the kernel's log, read only (root's `dmesg`), filtered here.
+pub fn dmesg(adb: &Adb, greps: &[String], tail: usize) -> Result<()> {
+    let res: Vec<regex::Regex> =
+        greps.iter().map(|g| regex::Regex::new(g).with_context(|| format!("--grep {g}"))).collect::<Result<_>>()?;
+    adb.need_root()?;
+    let out = adb.root_ok("dmesg </dev/null\n", "dmesg")?;
+    for line in dmesg_lines(&out, &res, tail) {
+        println!("{line}");
+    }
+    Ok(())
 }
 
 /// A gzip file's text (`/proc/config.gz`), or None when it is not gzip.
@@ -157,6 +180,15 @@ mod tests {
         for (_, remote) in BINARIES {
             assert!(!remote.contains('*') && remote.starts_with('/'), "{remote}");
         }
+    }
+
+    #[test]
+    fn dmesg_keeps_the_matching_lines_and_the_last_ones() {
+        let text = "[1.0] a gunyah x\n[2.0] b\n[3.0] gunyah: Failed to provide folio for guest addr: 90200000: -12\n[4.0] c\n";
+        let g = vec![regex::Regex::new("gunyah").unwrap()];
+        assert_eq!(dmesg_lines(text, &g, 10).len(), 2);
+        assert_eq!(dmesg_lines(text, &g, 1), vec!["[3.0] gunyah: Failed to provide folio for guest addr: 90200000: -12"]);
+        assert_eq!(dmesg_lines(text, &[], 2), vec!["[3.0] gunyah: Failed to provide folio for guest addr: 90200000: -12", "[4.0] c"]);
     }
 
     #[test]

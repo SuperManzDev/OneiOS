@@ -228,6 +228,25 @@ Since run 2 the probe also reads `/memory` from the device tree, maps all of it,
 keeps crosvm's tree (`--dump-device-tree-blob`, `fdt.dtb` in DIR: the machine an XNU guest gets) and refuses a VM
 that would leave Android less than 1 GiB of its MemAvailable (the VM's RAM is pinned).
 
+**Runs 3 and 4, 2026-11-23: 128 MiB yes, 1 GiB no** (`logs/pa3q-vmprobe/run3-128m/`, `run4-1g/`). Run 3: `/memory`
+`0x80000000` + 128 MiB, the image at `0x80000000`; 31,744 pages written and read back, none bad, the whole run about
+2 s; crosvm's tree kept (`fdt.dtb`, 4,251 bytes). The first write of a page costs 16.7 us and a read after it 9 ns:
+Gunyah's demand paging gives the guest each page when it first touches it (`drivers/virt/gunyah/vm_mgr_mem.c`
+`gunyah_gup_demand_page`: the page pinned, Qualcomm's platform hook assigns it by an SCM call, then donated and
+mapped, one folio at a time). Run 4: the guest wrote past `0x90000000` (256 MiB), then crosvm logged "unknown gh exit
+reason: 3" and "vcpu crashed": 3 is `GUNYAH_VCPU_EXIT_PAGE_FAULT`, the kernel could not give a page and hands the fault
+to the VMM (`page_fault.attempt` is its error), which AVF's crosvm does not handle. crosvm ended by itself, One UI ran
+on. The kernel's own line ("Failed to provide folio for guest addr: ...") had left the phone's log, which keeps
+minutes (Wi-Fi's lines): `vm-probe` now keeps the kernel's lines of each run (`dmesg.txt`), and `phone dmesg` reads it.
+
+Why 256 MiB [I]: that is 65,536 pages of 4 KiB, and they are 4 KiB because of the phone's transparent huge pages
+(`phone hw` `thp.txt`): `enabled` always, `defrag` never, **`shmem_enabled` never**. crosvm's guest RAM is a memfd
+(shmem), so `--hugepages` (MADV_HUGEPAGE) gets no 2 MiB folio; with them the same RAM takes 512 times fewer demand
+paging calls (and SCM calls). buddyinfo had 11 free blocks of 2 MiB and 76 of 4 MiB: about 320 MiB without
+compaction. `vm-probe --thp` sets `shmem_enabled` advise and `defrag` madvise for the run only and writes the old
+values back after it (read first and checked against the words the kernel offers, a trap for an early end; a
+restart of the phone also brings the defaults back).
+
 ## Next
 1. The owner's choice, with the facts above: the Gunyah VM (its first test needs the owner's go, the worst case being
    a phone reset), or XNU alone, whose unknowns are the hand-off under Samsung's protections, the command-mode panel

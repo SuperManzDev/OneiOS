@@ -1269,8 +1269,9 @@ oneios-tool phone backlight status            # the panel's level, max_brightnes
 oneios-tool phone backlight set N             # 1..max_brightness (12750); the return writes One UI's own value back
 oneios-tool phone cpu [--trace S] [--out F]   # cores, domains, top and capped clocks, cpusets, xnuhost's threads and uclamps (read only)
 oneios-tool phone hw [--out DIR]              # the hardware map: fdt.dtb, iomem, partitions, kernel.config, Gunyah/AVF (read only)
-oneios-tool phone vm-probe [--payload F] [--mem MIB] [--timeout S] [--out DIR]
+oneios-tool phone vm-probe [--payload F] [--mem MIB] [--timeout S] [--thp] [--out DIR]
                                               # runtime/vmprobe's payload once as a protected VM under Gunyah (AVF's crosvm)
+oneios-tool phone dmesg [--grep RE] [--tail N]  # the kernel's log, filtered on the PC (read only)
 oneios-tool phone pull-data OUT [--ioslog]    # data/data.img in chunks, each checked against the phone's sha256, zero runs as holes;
                                               #   run again after a stop and it goes on (OUT.part, OUT.part.progress)
                                               #   [--chunk MIB] [--retries 5] [--backoff 2] [--stall 120] [--verify chunk|end] [--restart]
@@ -1580,12 +1581,21 @@ MemAvailable beside it (a VM's RAM is pinned): else nothing starts. The payload 
 over HVC); a VM still up after SECONDS (20) is stopped through the control socket (`crosvm stop`), and only a crosvm
 still there SECONDS after that is killed: never a signal first (a guest killed from the host once reset a phone,
 Droid-VM's pacprobe notes). Into DIR (default `phone-vmprobe`): `run.txt` (start and end with the uptime,
-`how itself|stop|kill`, crosvm's status, MemAvailable and SwapFree before and after), `serial.txt` (the VM's 8250),
-`crosvm.log` and `fdt.dtb` (crosvm's tree for the VM); the report prints the serial lines, crosvm's last 25 lines when
-the probe did not finish, and the verdict. 4 unit tests (`vmprobe::tests`: stop before kill, crosvm's stdin, the
-flags, the payload's check, the memory check, the verdict). Runs 1 and 2 on the S25 (2026-11-20 and 23): Samsung's
-Gunyah runs the VM, at the core's own speed, and it ends by itself; the results are in `docs/native.md` "A VM under
-Gunyah".
+`how itself|stop|kill`, crosvm's status, MemAvailable, SwapFree and buddyinfo before and after), `serial.txt` (the
+VM's 8250), `crosvm.log`, `fdt.dtb` (crosvm's tree for the VM) and `dmesg.txt` (the kernel's lines that name gunyah,
+folio, gh_, crosvm, scm or memextent, read right after the run: the phone's log keeps minutes); the report prints the
+serial lines, crosvm's and the kernel's last 25 lines when the probe did not finish, and the verdict. `--thp`: for
+the run only, `shmem_enabled` advise and `defrag` madvise under `/sys/kernel/mm/transparent_hugepage`, so that
+crosvm's memfd gets 2 MiB folios (the old values are read first, checked against the words the kernel offers, and
+written back right after crosvm ends, by a trap too if the script ends early; nothing is written when they cannot be
+read). 5 unit tests (`vmprobe::tests`: stop before kill, crosvm's stdin, the flags, the payload's check, the memory
+check, THP set and written back, the verdict). Runs 1 to 4 on the S25 (2026-11-20 and 23): Samsung's Gunyah runs the
+VM at the core's own speed and it ends by itself; 128 MiB of RAM works, 1 GiB stops at 256 MiB; the results are in
+`docs/native.md` "A VM under Gunyah".
+
+**`phone dmesg [--grep REGEX]... [--tail N]`** (2026-11-23; `crates/oneios-phone/src/hw.rs`). Read only: root's `dmesg`,
+filtered on the PC (any of the REGEXes; `(?i)` for no case), the last N lines (200). The phone's kernel log holds only
+minutes of lines (Wi-Fi's driver writes most of them). 1 unit test.
 
 **`phone cpu [--trace SECONDS] [--out FILE]`** (fix-host-overhead, 2026-11-15; `crates/oneios-phone/src/cpu.rs`). Read
 only, with or without a session: for each of cpu0-7 by name, the core (`regs/identification/midr_el1`), `cpu_capacity`,

@@ -93,6 +93,15 @@ pub enum Command {
         #[arg(long, value_name = "DIR", default_value = "phone-hw")]
         out: String,
     },
+    /// The kernel's log (root's dmesg), read only: the last N lines, or the last N that match a REGEX
+    Dmesg {
+        /// Print only lines matching REGEX (repeatable: any of them)
+        #[arg(long, value_name = "REGEX")]
+        grep: Vec<String>,
+        /// How many lines, from the end
+        #[arg(long, value_name = "N", default_value_t = 200)]
+        tail: usize,
+    },
     /// One run of runtime/vmprobe's payload as a protected VM under Gunyah with AVF's crosvm: 1 vCPU, no device but
     /// the serial port; it powers off by itself, else crosvm stop after SECONDS. Refused during a session
     VmProbe {
@@ -108,6 +117,10 @@ pub enum Command {
         /// The folder for serial.txt, crosvm.log and run.txt
         #[arg(long, value_name = "DIR", default_value = "phone-vmprobe")]
         out: String,
+        /// During the run only: 2 MiB folios for the VM's RAM (/sys/kernel/mm/transparent_hugepage: shmem_enabled
+        /// advise, defrag madvise); the old values are written back after it
+        #[arg(long)]
+        thp: bool,
     },
     /// Only during a session: the panel's level (/sys/class/backlight/panel0-backlight/brightness)
     Backlight {
@@ -285,8 +298,9 @@ pub fn main(cli: Cli) -> i32 {
         Command::Touch { command: TouchCommand::Wake } => Adb::connect(serial).and_then(|adb| session::touch_wake(&adb)),
         Command::Cpu { trace, out } => Adb::connect(serial).and_then(|adb| cpu::cpu(&adb, trace, out.as_deref())),
         Command::Hw { out } => Adb::connect(serial).and_then(|adb| hw::hw(&adb, &out)),
-        Command::VmProbe { payload, mem, timeout, out } => {
-            Adb::connect(serial).and_then(|adb| vmprobe::vm_probe(&adb, &payload, &out, &vmprobe::Options { mem, timeout }))
+        Command::Dmesg { grep, tail } => Adb::connect(serial).and_then(|adb| hw::dmesg(&adb, &grep, tail)),
+        Command::VmProbe { payload, mem, timeout, out, thp } => {
+            Adb::connect(serial).and_then(|adb| vmprobe::vm_probe(&adb, &payload, &out, &vmprobe::Options { mem, timeout, thp }))
         }
         Command::Backlight { command: BacklightCommand::Status } => Adb::connect(serial).and_then(|adb| session::backlight_status(&adb)),
         Command::Backlight { command: BacklightCommand::Set { level } } => Adb::connect(serial).and_then(|adb| session::backlight_set(&adb, level)),

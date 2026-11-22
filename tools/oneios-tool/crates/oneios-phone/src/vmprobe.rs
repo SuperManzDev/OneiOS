@@ -25,7 +25,14 @@ pub const CROSVM: &str = "/apex/com.android.virt/bin/crosvm";
 pub struct Options {
     pub mem: u32,
     pub timeout: u32,
+    /// During the run only: transparent huge pages for madvised shmem (`shmem_enabled` advise) and direct compaction
+    /// for madvised regions (`defrag` madvise), so that crosvm's memfd (`--hugepages`) can come in 2 MiB folios,
+    /// which Gunyah's demand paging lends whole; the old values are written back after the run.
+    pub thp: bool,
 }
+
+/// The transparent huge page settings `--thp` changes for the run and writes back after it.
+pub const THP: &str = "/sys/kernel/mm/transparent_hugepage";
 
 /// The most RAM a probe VM may ask for, and what Android must keep available beside it (MiB).
 pub const MAX_MEM: u32 = 6144;
@@ -77,7 +84,31 @@ got=$(sha256sum probe.bin | cut -d' ' -f1)
 [ -c /dev/gunyah ] || {{ echo "no /dev/gunyah"; exit 1; }}
 rm -f serial.txt crosvm.log crosvm.sock fdt.dtb
 ulimit -l unlimited 2>/dev/null || echo "ulimit -l unlimited: refused"
+T={THP}
+thp_done=1
+thp_restore() {{
+  [ "$thp_done" = 0 ] || return 0
+  thp_done=1
+  echo "$old_shmem" > $T/shmem_enabled
+  echo "$old_defrag" > $T/defrag
+  echo "thp restored: shmem_enabled $(cat $T/shmem_enabled) | defrag $(cat $T/defrag)"
+}}
+if [ {thp} = 1 ]; then
+  old_shmem=$(tr ' ' '\n' < $T/shmem_enabled | grep '^\[' | tr -d '\133\135')
+  old_defrag=$(tr ' ' '\n' < $T/defrag | grep '^\[' | tr -d '\133\135')
+  [ -n "$old_shmem" ] && [ -n "$old_defrag" ] || {{ echo "thp: cannot read $T"; exit 1; }}
+  # only a value the kernel itself offers is ever written back: else nothing is written at all
+  case "$old_shmem" in always|within_size|advise|never|deny|force) ;; *) echo "thp: shmem_enabled '$old_shmem'?"; exit 1 ;; esac
+  case "$old_defrag" in always|defer|defer+madvise|madvise|never) ;; *) echo "thp: defrag '$old_defrag'?"; exit 1 ;; esac
+  thp_done=0
+  trap thp_restore EXIT HUP INT TERM
+  if ! {{ echo advise > $T/shmem_enabled && echo madvise > $T/defrag; }}; then
+    echo "thp: the write was refused"; thp_restore; exit 1
+  fi
+  echo "thp set: shmem_enabled $(cat $T/shmem_enabled) | defrag $(cat $T/defrag)"
+fi
 grep -E '^(MemAvailable|SwapFree):' /proc/meminfo | tr -s ' ' | sed 's/^/before /'
+sed 's/^/before /' /proc/buddyinfo
 echo "start $(date +%s) up $(cut -d' ' -f1 /proc/uptime)"
 $C --log-level debug run --disable-sandbox --no-balloon --no-rng --no-usb --hypervisor gunyah \
   --protected-vm-without-firmware --swiotlb 8 --hugepages --mem size={mem} --cpus num-cores=1 \
@@ -92,14 +123,19 @@ if kill -0 $pid 2>/dev/null; then
 fi
 if kill -0 $pid 2>/dev/null; then how=kill; kill -9 $pid; fi
 wait $pid; rc=$?
+thp_restore
 echo "end $(date +%s) up $(cut -d' ' -f1 /proc/uptime) how $how exit $rc"
 grep -E '^(MemAvailable|SwapFree):' /proc/meminfo | tr -s ' ' | sed 's/^/after /'
+sed 's/^/after /' /proc/buddyinfo
 echo '=== serial.txt'
 head -c 65536 serial.txt 2>/dev/null
 echo '=== crosvm.log'
 tail -c 65536 crosvm.log 2>/dev/null
+echo '=== dmesg'
+dmesg 2>/dev/null | grep -i -E 'gunyah|folio|gh_|crosvm|scm|memextent' | tail -n 80
 "#,
-        mem = o.mem
+        mem = o.mem,
+        thp = if o.thp { 1 } else { 0 }
     )
 }
 
@@ -145,10 +181,13 @@ pub fn vm_probe(adb: &Adb, payload: &str, out: &str, o: &Options) -> Result<()> 
     fs::create_dir_all(out).with_context(|| format!("cannot make {out}"))?;
     let parts = split(&r.out);
     let get = |name: &str| parts.iter().find(|(n, _)| n == name).map(|(_, t)| t.as_str()).unwrap_or("");
-    let (run, serial, log) = (get("run"), get("serial.txt"), get("crosvm.log"));
+    let (run, serial, log, kmsg) = (get("run"), get("serial.txt"), get("crosvm.log"), get("dmesg"));
     fs::write(Path::new(out).join("run.txt"), format!("{run}{}", r.err))?;
     fs::write(Path::new(out).join("serial.txt"), serial)?;
     fs::write(Path::new(out).join("crosvm.log"), log)?;
+    // the kernel's own lines of the run (Gunyah's demand paging logs why it could not give a page): the phone's log
+    // keeps only minutes, so they are read right after the run
+    fs::write(Path::new(out).join("dmesg.txt"), kmsg)?;
     // the VM's device tree as crosvm made it (--dump-device-tree-blob): the machine an XNU guest is given
     let tree = Path::new(out).join("fdt.dtb");
     let mut child = adb.exec_out(&format!("su -c 'cat {DIR}/fdt.dtb'"))?;
@@ -172,6 +211,11 @@ pub fn vm_probe(adb: &Adb, payload: &str, out: &str, o: &Options) -> Result<()> 
         for l in &lines[lines.len().saturating_sub(25)..] {
             println!("{l}");
         }
+        let klines: Vec<&str> = kmsg.lines().collect();
+        println!("--- the kernel's lines (dmesg: gunyah, folio, gh_, crosvm, scm), last 25 of {}", klines.len());
+        for l in &klines[klines.len().saturating_sub(25)..] {
+            println!("{l}");
+        }
     }
     println!("vm-probe: {} (files in {out})", verdict(run, serial));
     Ok(())
@@ -183,7 +227,7 @@ mod tests {
 
     #[test]
     fn the_run_stops_before_it_kills_and_reads_nothing_from_the_script() {
-        let s = run_script(&Options { mem: 128, timeout: 20 }, "ab12");
+        let s = run_script(&Options { mem: 128, timeout: 20, thp: false }, "ab12");
         let stop = s.find("$C stop $D/crosvm.sock").expect("crosvm stop");
         let kill = s.find("kill -9 $pid").expect("the last resort");
         assert!(stop < kill, "stop comes first");
@@ -194,7 +238,33 @@ mod tests {
         assert!(s.contains("[ \"$got\" = \"ab12\" ]"), "the payload's sha256 is checked before the run");
         assert!(s.contains("while [ $t -lt 20 ]"));
         assert!(s.contains("--dump-device-tree-blob $D/fdt.dtb $D/probe.bin"));
-        assert!(!s.contains('*'), "no glob");
+        assert!(s.contains("echo '=== dmesg'"), "the kernel's lines right after the run");
+        // no glob: the only stars are the defaults of the two case statements that check the old THP values
+        assert!(!s.replace(" *) echo \"thp: ", "").contains('*'), "no glob");
+        assert!(s.contains("if [ 0 = 1 ]; then"), "without --thp the settings are not touched");
+    }
+
+    #[test]
+    fn thp_is_set_for_the_run_only_and_always_written_back() {
+        let s = run_script(&Options { mem: 1024, timeout: 60, thp: true }, "ab12");
+        assert!(s.contains("if [ 1 = 1 ]; then"));
+        assert!(s.contains("T=/sys/kernel/mm/transparent_hugepage"));
+        // the old values are read before anything is written, and the trap is set before the write
+        let read = s.find("old_shmem=$(tr").unwrap();
+        let trap = s.find("trap thp_restore EXIT HUP INT TERM").unwrap();
+        let write = s.find("echo advise > $T/shmem_enabled && echo madvise > $T/defrag").unwrap();
+        assert!(read < trap && trap < write);
+        // written back right after crosvm ends, before the end line
+        let wait = s.find("wait $pid; rc=$?").unwrap();
+        let back = s[wait..].find("\nthp_restore\n").map(|i| i + wait).unwrap();
+        let end = s.find("echo \"end $(date").unwrap();
+        assert!(wait < back && back < end);
+        // the only writes under /sys are those two and their restore
+        let writes: Vec<&str> = s.lines().filter(|l| l.contains("> $T/")).collect();
+        assert_eq!(writes.len(), 3, "{writes:?}");
+        assert!(s.contains("echo \"$old_shmem\" > $T/shmem_enabled") && s.contains("echo \"$old_defrag\" > $T/defrag"));
+        // a refused write is undone and nothing starts
+        assert!(s.contains("echo \"thp: the write was refused\"; thp_restore; exit 1"));
     }
 
     #[test]
