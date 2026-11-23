@@ -1272,6 +1272,7 @@ oneios-tool phone hw [--out DIR]              # the hardware map: fdt.dtb, iomem
 oneios-tool phone vm-probe [--payload F] [--mem MIB] [--timeout S] [--thp] [--out DIR]
                                               # runtime/vmprobe's payload once as a protected VM under Gunyah (AVF's crosvm)
 oneios-tool phone dmesg [--grep RE] [--tail N]  # the kernel's log, filtered on the PC (read only)
+oneios-tool phone hugeblocks [--free]        # free memory in 2 MiB blocks; --free: drop the file cache and compact first
 oneios-tool phone pull-data OUT [--ioslog]    # data/data.img in chunks, each checked against the phone's sha256, zero runs as holes;
                                               #   run again after a stop and it goes on (OUT.part, OUT.part.progress)
                                               #   [--chunk MIB] [--retries 5] [--backoff 2] [--stall 120] [--verify chunk|end] [--restart]
@@ -1597,6 +1598,13 @@ VM at the core's own speed and it ends by itself; 128 MiB of RAM works, 1 GiB st
 **`phone dmesg [--grep REGEX]... [--tail N]`** (2026-11-23; `crates/oneios-phone/src/hw.rs`). Read only: root's `dmesg`,
 filtered on the PC (any of the REGEXes; `(?i)` for no case), the last N lines (200). The phone's kernel log holds only
 minutes of lines (Wi-Fi's driver writes most of them). 1 unit test.
+
+**`phone hugeblocks [--free]`** (2026-11-23; `crates/oneios-phone/src/vmprobe.rs`). Refused during a session; no VM:
+MemFree, MemAvailable, Cached and the free memory in blocks of 2 MiB or more (buddyinfo's orders 9 and 10, every
+zone), with buddyinfo's line by order. `--free` first runs `sync`, `echo 3 > /proc/sys/vm/drop_caches` and `echo 1 >
+/proc/sys/vm/compact_memory` (one-shot actions: Android reads its files again, nothing is lost, no setting stays
+changed), then reads again and says how long it took. 2 unit tests (`huge_free` counts, the read-only script without
+`--free`). On the S25 (2026-11-23): 2.9 GB free after `--free`, 52 to 248 MiB of it in 2 MiB blocks.
 
 **`phone cpu [--trace SECONDS] [--out FILE]`** (fix-host-overhead, 2026-11-15; `crates/oneios-phone/src/cpu.rs`). Read
 only, with or without a session: for each of cpu0-7 by name, the core (`regs/identification/midr_el1`), `cpu_capacity`,

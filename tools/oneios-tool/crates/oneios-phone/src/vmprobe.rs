@@ -164,6 +164,71 @@ pub fn verdict(run: &str, serial: &str) -> String {
     format!("{said} {ended}; crosvm exit {rc}")
 }
 
+/// The free memory in blocks of 2 MiB or more, from `/proc/buddyinfo` (orders 0 to 10 of 4 KiB pages, every zone):
+/// (how many 2 MiB blocks, their MiB).
+pub fn huge_free(buddyinfo: &str) -> (u64, u64) {
+    let mut blocks = 0u64;
+    for line in buddyinfo.lines().filter(|l| l.starts_with("Node ")) {
+        // "Node 0, zone   Normal  c0 c1 ... c10": the counts follow the zone's name
+        let counts: Vec<u64> = line.split_whitespace().skip(4).filter_map(|w| w.parse().ok()).collect();
+        for (order, n) in counts.iter().enumerate().skip(9) {
+            blocks += n << (order - 9);
+        }
+    }
+    (blocks, blocks * 2)
+}
+
+/// `phone hugeblocks`'s script: `=== before` (MemFree, MemAvailable, Cached, buddyinfo), and with `free` a sync, the
+/// file cache and reclaimable slabs dropped (`drop_caches` 3) and one compaction, then `=== after` the same.
+pub fn hugeblocks_script(free: bool) -> String {
+    let mut s = String::from(
+        "echo '=== before'\ngrep -E '^(MemFree|MemAvailable|Cached):' /proc/meminfo\ncat /proc/buddyinfo\n",
+    );
+    if free {
+        s += "t0=$(cut -d' ' -f1 /proc/uptime)\nsync\necho 3 > /proc/sys/vm/drop_caches\necho 1 > /proc/sys/vm/compact_memory\n";
+        s += "t1=$(cut -d' ' -f1 /proc/uptime)\necho '=== after'\necho \"took $t0 $t1\"\n";
+        s += "grep -E '^(MemFree|MemAvailable|Cached):' /proc/meminfo\ncat /proc/buddyinfo\n";
+    }
+    s
+}
+
+/// `phone hugeblocks [--free]`: how much free memory comes in 2 MiB blocks, which a VM's RAM must (docs/native.md
+/// "A VM under Gunyah", runs 5 to 7). With `--free`: first a sync, the file cache dropped and one compaction (one-shot
+/// actions: Android reads its files again, nothing is lost, no setting changes). No VM is started.
+pub fn hugeblocks(adb: &Adb, free: bool) -> Result<()> {
+    adb.need_root()?;
+    adb.refuse_in_session()?;
+    let out = adb.root_ok(&hugeblocks_script(free), "the memory read")?;
+    let parts = split(&out);
+    let mut seen = Vec::new();
+    for (name, text) in &parts {
+        let (blocks, mib) = huge_free(text);
+        let kb = |key: &str| text.lines().find(|l| l.starts_with(key)).and_then(|l| l.split_whitespace().nth(1)).unwrap_or("?").to_string();
+        let mb = |key: &str| kb(key).parse::<u64>().map(|k| format!("{} MiB", k / 1024)).unwrap_or("?".into());
+        if let Some(took) = text.lines().find(|l| l.starts_with("took ")) {
+            let t: Vec<f64> = took.split_whitespace().skip(1).filter_map(|w| w.parse().ok()).collect();
+            if t.len() == 2 {
+                println!("drop_caches and compaction took {:.1} s", t[1] - t[0]);
+            }
+        }
+        println!(
+            "{name}: MemFree {}, MemAvailable {}, Cached {}; free in 2 MiB blocks: {blocks} ({mib} MiB)",
+            mb("MemFree:"),
+            mb("MemAvailable:"),
+            mb("Cached:")
+        );
+        // the free blocks by order (4 KiB << order), as buddyinfo has them
+        for line in text.lines().filter(|l| l.starts_with("Node ")) {
+            println!("  {}", line.split_whitespace().collect::<Vec<_>>().join(" "));
+        }
+        seen.push(mib);
+    }
+    if seen.is_empty() {
+        bail!("the read gave nothing: {}", out.trim());
+    }
+    Ok(())
+}
+
 /// `phone vm-probe`.
 pub fn vm_probe(adb: &Adb, payload: &str, out: &str, o: &Options) -> Result<()> {
     let data = fs::read(payload).with_context(|| format!("cannot read {payload} (runtime/vmprobe/build.sh makes it)"))?;
@@ -246,6 +311,26 @@ mod tests {
         // no glob: the only stars are the defaults of the two case statements that check the old THP values
         assert!(!s.replace(" *) echo \"thp: ", "").contains('*'), "no glob");
         assert!(s.contains("if [ 0 = 1 ]; then"), "without --thp the settings are not touched");
+    }
+
+    #[test]
+    fn huge_free_counts_the_2_mib_blocks() {
+        // run 7's "before": 23 of order 9 and 52 of order 10
+        let b = "Node 0, zone   Normal  17518  18192   9932   3171    197     30      9      5      3     23     52 \n";
+        assert_eq!(huge_free(b), (23 + 2 * 52, (23 + 2 * 52) * 2));
+        assert_eq!(huge_free("Node 0, zone   Normal 1 2 3 4 5 6 7 8 9 0 0\n"), (0, 0));
+        let two = format!("{b}Node 0, zone    DMA32 0 0 0 0 0 0 0 0 0 1 1\n");
+        assert_eq!(huge_free(&two).0, 23 + 2 * 52 + 3);
+    }
+
+    #[test]
+    fn hugeblocks_only_reads_unless_asked_to_free() {
+        let read = hugeblocks_script(false);
+        assert!(!read.contains('>') && !read.contains("sync"), "a read only");
+        let free = hugeblocks_script(true);
+        let writes: Vec<&str> = free.lines().filter(|l| l.contains('>')).collect();
+        assert_eq!(writes, vec!["echo 3 > /proc/sys/vm/drop_caches", "echo 1 > /proc/sys/vm/compact_memory"]);
+        assert!(free.find("sync").unwrap() < free.find("drop_caches").unwrap());
     }
 
     #[test]

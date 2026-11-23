@@ -265,6 +265,15 @@ first (the file cache dropped, then compacted) and taken at once (a guest that t
 start, since a temporary root cannot reserve huge pages at boot (Droid-VM's `gh_hugepage_reserve` does, from a
 module loaded at boot; lyc8503 hit the same wall at 1 GB without it).
 
+**The file cache dropped, 2026-11-23: no** (`oneios-tool phone hugeblocks --free`: a sync, `drop_caches` 3, one
+`compact_memory`; no VM). First try: MemFree 505 MiB to 2,902 MiB in 2.4 s, Cached 3,872 to 1,603 MiB, free 2 MiB
+blocks 0 to 124 (248 MiB). Second try: MemFree 1,461 to 2,851 MiB, 2 MiB blocks 0 to 26 (52 MiB); by order (4 KiB <<
+order) `64331 53559 29200 13048 7123 2764 948 289 93 22 2`: the freed memory is in pieces of 4 KiB to 1 MiB, and
+compaction does not join them (most Movable pageblocks hold pages it cannot move). So at run time this phone cannot
+give a VM gigabytes of 2 MiB blocks, and in 4 KiB pages Gunyah's 18 MiB stops it near 500 MiB: with AVF's crosvm and a
+temporary root, a VM of iOS's size does not fit [F for the runs above, I for "does not fit": a VM's limit might grow
+with its declared size, which no run has tried].
+
 ## Next
 1. The owner's choice, with the facts above: the Gunyah VM (its first test needs the owner's go, the worst case being
    a phone reset), or XNU alone, whose unknowns are the hand-off under Samsung's protections, the command-mode panel

@@ -102,6 +102,14 @@ pub enum Command {
         #[arg(long, value_name = "N", default_value_t = 200)]
         tail: usize,
     },
+    /// How much free memory comes in 2 MiB blocks (buddyinfo), which a VM's RAM needs; with --free, first a sync, the
+    /// file cache dropped and one compaction (one-shot: nothing is lost, no setting changes). No VM. Refused during a
+    /// session
+    Hugeblocks {
+        /// Drop the file cache and compact first, then read again
+        #[arg(long)]
+        free: bool,
+    },
     /// One run of runtime/vmprobe's payload as a protected VM under Gunyah with AVF's crosvm: 1 vCPU, no device but
     /// the serial port; it powers off by itself, else crosvm stop after SECONDS. Refused during a session
     VmProbe {
@@ -299,6 +307,7 @@ pub fn main(cli: Cli) -> i32 {
         Command::Cpu { trace, out } => Adb::connect(serial).and_then(|adb| cpu::cpu(&adb, trace, out.as_deref())),
         Command::Hw { out } => Adb::connect(serial).and_then(|adb| hw::hw(&adb, &out)),
         Command::Dmesg { grep, tail } => Adb::connect(serial).and_then(|adb| hw::dmesg(&adb, &grep, tail)),
+        Command::Hugeblocks { free } => Adb::connect(serial).and_then(|adb| vmprobe::hugeblocks(&adb, free)),
         Command::VmProbe { payload, mem, timeout, out, thp } => {
             Adb::connect(serial).and_then(|adb| vmprobe::vm_probe(&adb, &payload, &out, &vmprobe::Options { mem, timeout, thp }))
         }
