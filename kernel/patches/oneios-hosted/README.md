@@ -1192,11 +1192,26 @@ The disks of a native kernel are the same class with the same nodes (`storage/On
 the window is a device mapping instead of the host calls, and because no host checks the reads, the driver checks every
 chunk itself the first time it is read, against the hash list the loader puts in the node (`oneios,hash-list`, the image
 set's `*.hashes`), and calls the disk verified only when that list's SHA-256 is the node's `oneios,verified`. The loader
-is the root of trust there, as xnuhost is for a hosted kernel. The native build links the storage, software AES and key
-store archives (no GPU, display, HID, audio or Wi-Fi: those are the host's).
+is the root of trust there, as xnuhost is for a hosted kernel. The native build links the storage, software AES, key
+store, HID, GPU and display archives (no audio or Wi-Fi: those have no device without a host).
 
 For the hosted kernel nothing compiles differently: every changed condition is true there as before, and the added
 `#if XNU_HOSTED` lines keep the hosted code.
+
+## 0077-native-ns16550-uart.patch (native path, 2026-11-23)
+
+A console for the native kernel in a VM of Android's crosvm under the phone's Gunyah (`docs/native.md`, "The native
+kernel in crosvm"). crosvm's only serial ports are ns16550a (8250 with byte-spaced registers) at `0x3f8`, `0x2f8`,
+`0x3e8` and `0x2e8`; AVF's crosvm has no PL011.
+
+| Where | What |
+|---|---|
+| `pexpert/arm/pe_serial.c` | a polled driver for `"ns16550a"` in the serial table (`ns16550_uart_setup`: interrupts off, 8-N-1, FIFOs on and cleared, DTR and RTS; transmit when LSR's THRE is set, receive on DR). The node's `reg` is the absolute physical address, mapped with `ml_io_map`: the ports sit below the arm-io window, which may not start at 0 (`pe_arm_get_soc_base_phys`), so the PL011's soc-base-relative `reg` does not fit them |
+| `pexpert/pexpert/arm/protos.h` | `SERIAL_NS16550_UART` (0x10) among the serial ids |
+
+All under `#if XNU_ONEIOS_NATIVE`: the hosted kernel compiles as before. The kernel takes the console from the node
+that `/defaults serial-device` names (`xnuloader-crosvm` sets it and the node's `AAPL,phandle`). On the S25 (boot 1,
+2026-11-23) it printed the whole start up to the root device's wait.
 
 ## 0049-wifi-association-event.patch (radio2, 2026-11-12)
 

@@ -179,8 +179,8 @@ scripts/bg.sh kernel-hosted env HOSTED_OUT=me kernel/build-hosted.sh
 - The **native** kernel (XNU alone at EL1, the native path of [native.md](native.md); first on QEMU's virt board):
   `scripts/bg.sh kernel-native env LIBDISPATCH_PREFIX=/mnt/tkg-build/oneios/sysroot/usr kernel/build-native.sh`
   -> `out/kernel/current-native/xnu.macho`. It is `build-hosted.sh` with `ONEIOS_MACHINE=native`: the same series
-  (0076 opens the OS layer to it), `oneios_native_defconfig`, the archives `storage board aes keystore`, no hosted
-  fixups; its own trees (`out/kernel-native`, `out/native-device`; `NATIVE_OUT=NAME` for another). On this PC: about
+  (0076 opens the OS layer to it, 0077 adds crosvm's ns16550a console), `oneios_native_defconfig`, the archives
+  `storage board aes keystore hid gpu display`, no hosted fixups; its own trees (`out/kernel-native`, `out/native-device`; `NATIVE_OUT=NAME` for another). On this PC: about
   25 min from an empty tree, 2 min after a one-file change.
 
 The kernel links Apple's `corecrypto` under its Internal Use License: it is built locally and never released.
@@ -212,7 +212,16 @@ A native kernel's collection: `scripts/bg.sh prelink-native env KERNEL=$PWD/out/
 kernel/prelink/build.sh` -> `out/kernel/native-24A446/kernel.kc`. The script sees that the kernel has no hosted machine
 layer (`MACHINE=native`, or set it) and leaves Apple's kexts as they are: no step 3 (the hosted kernel's TPIDR_EL0,
 `ldr [x18]` and `smr_hash` rewrites are wrong at EL1), and never writes over the phone's `out/kernel/24A446`.
-Booting it on QEMU with the image set: [native.md](native.md), "The bench".
+Booting it on QEMU with the image set: [native.md](native.md), "The bench". In a VM of the phone's crosvm under Gunyah
+(native.md, "The native kernel in crosvm"):
+
+```sh
+make -C runtime/loader                    # build/host/xnuloader-crosvm
+runtime/loader/build/host/xnuloader-crosvm out/kernel/native-24A446/kernel.kc out/crosvm/kernel.img --ram-mib 2048 --cpus 1
+# -> out/crosvm/kernel.img (an arm64 Linux Image, 137 MiB; its label at 0x100 names the VM) and kernel.img.adt
+oneios-tool phone hugepool load && oneios-tool phone hugepool grow --want 1536   # once per phone boot, for a VM above ~0.5 GB
+oneios-tool phone vm-boot --image out/crosvm/kernel.img --seconds 90 --thp --out logs/pa3q-vmboot/NAME
+```
 
 ## 4. The runtime (xnuhost, helpers, phone tools)
 

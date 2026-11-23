@@ -1271,6 +1271,8 @@ oneios-tool phone cpu [--trace S] [--out F]   # cores, domains, top and capped c
 oneios-tool phone hw [--out DIR]              # the hardware map: fdt.dtb, iomem, partitions, kernel.config, Gunyah/AVF (read only)
 oneios-tool phone vm-probe [--payload F] [--mem MIB] [--timeout S] [--thp] [--out DIR]
                                               # runtime/vmprobe's payload once as a protected VM under Gunyah (AVF's crosvm)
+oneios-tool phone vm-boot [--image F] [--seconds S] [--thp] [--out DIR]   # the native kernel (xnuloader-crosvm's Image)
+                                              #   in such a VM, its console live; vm-boot --stop ends it sooner
 oneios-tool phone dmesg [--grep RE] [--tail N]  # the kernel's log, filtered on the PC (read only)
 oneios-tool phone hugeblocks [--free]        # free memory in 2 MiB blocks; --free: drop the file cache and compact first
 oneios-tool phone hugepool status|load|grow|unload  # gh_hugepage_reserve: load [--want N]; grow --want N stops One UI and starts it again
@@ -1595,6 +1597,24 @@ read). 5 unit tests (`vmprobe::tests`: stop before kill, crosvm's stdin, the fla
 check, THP set and written back, the verdict). Runs 1 to 4 on the S25 (2026-11-20 and 23): Samsung's Gunyah runs the
 VM at the core's own speed and it ends by itself; 128 MiB of RAM works, 1 GiB stops at 256 MiB; the results are in
 `docs/native.md` "A VM under Gunyah".
+
+**`phone vm-boot [--image FILE] [--seconds N] [--thp] [--out DIR]` and `phone vm-boot --stop`** (native path,
+2026-11-23; `crates/oneios-phone/src/vmboot.rs`). The native kernel as `runtime/loader`'s `xnuloader-crosvm` made it
+(an arm64 Linux Image, default `out/crosvm/kernel.img`) booted in a protected VM of AVF's crosvm under the phone's
+Gunyah, its console (the ns16550a at `0x3f8`, kernel patch 0077) printed as it grows. The VM's RAM and vCPUs are the
+Image's own label (`oneios-crosvm ram-mib=N cpus=N` at `0x100`; an Image without it is refused): the kernel's window
+was cut for them. Refused during a session and while a VM of ours (a crosvm whose line names `oneios-vm`) is up; the
+RAM is checked as `vm-probe` checks it, with gh_hugepage_reserve's free pool counted beside MemAvailable; a VM above
+480 MiB needs `--thp` (and the pool: `phone hugepool`). The Image goes to `/data/local/tmp/oneios-vmboot/kernel.img`,
+its SHA-256 checked there by the script, which is started detached (`setsid`) and runs `vm-probe`'s crosvm line
+(`--mem size=N --cpus num-cores=N`, the serial port to `serial.txt`); after SECONDS (120, 5 to 3600) or at
+`stop.request` (`vm-boot --stop` writes it) it stops the VM through the control socket (`crosvm stop`), and kills
+crosvm only when it is still there 20 s later; `--thp` as `vm-probe`'s, without the compaction. The tool polls
+`serial.txt` every 2 s over adb and prints what is new, ends on the script's `result`, then copies `serial.txt`,
+`crosvm.log`, `dmesg.txt`, `run.txt` and `fdt.dtb` into DIR (`phone-vmboot`) and prints crosvm's last 15 lines.
+Nothing is written under `/sys/power`. 2 unit tests (`vmboot::tests`: the label; stop before kill, the stop request,
+THP written back). Boot 1 on the S25 (2026-11-23, 2 GiB, 1 vCPU, 90 s): the kernel's whole start up to the root
+device's wait, `crosvm stop` at 90 s, One UI on (`docs/native.md` "The native kernel in crosvm").
 
 **`phone dmesg [--grep REGEX]... [--tail N] [--previous]`** (2026-11-23; `crates/oneios-phone/src/hw.rs`). Read only:
 root's `dmesg`, filtered on the PC (any of the REGEXes; `(?i)` for no case), the last N lines (200). The phone's kernel

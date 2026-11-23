@@ -331,14 +331,51 @@ virt", RAM at `0x80000000`, GICv3 (GICD `0x3fff0000`, GICR `0x3ffd0000`), the ar
 assigned, `linux,pci-probe-only`) whose DMA goes through an 8 MiB `restricted-dma-pool` at `0x1_3f800000` (the host
 reads no other guest RAM: protected VM).
 
+### The native kernel in crosvm (2026-11-23)
+Step 1 of the road ("Next" 1): the bench's native kernel as the payload of AVF's crosvm under the S25's Gunyah, with
+its console and nothing else.
+- Kernel patch 0077 (native only): crosvm's serial ports are ns16550a (8250, byte-spaced registers) at `0x3f8`,
+  `0x2f8`, `0x3e8` and `0x2e8`, and AVF's crosvm has no PL011: `pe_serial.c` gets a polled driver for
+  `"ns16550a"`, whose node's `reg` is an absolute physical address (the ports sit below the arm-io window, which may
+  not start at 0).
+- The loader: `runtime/loader/tools/xnuloader-crosvm.c` (`xnuloader-crosvm KERNEL OUT [--cpus N] [--ram-mib N]
+  [--timebase HZ] [--args TEXT] [--args-add TEXT]`) writes one arm64 Linux Image, which crosvm loads at the start of
+  the VM's RAM (`0x80000000`) and enters at EL1 with the MMU off: the Linux header; at `0x40` xnuloader-qemu's stub
+  (interrupts masked, x0 = `boot_args`, a branch to the entry); at `0x100` a label `oneios-crosvm ram-mib=N cpus=N`
+  (the VM the window was cut for, which `vm-boot` starts crosvm with); the kernel's window (`xl_boot_place`: the
+  segments, the device tree, `boot_args`) at RAM + 32 MiB + the kernel's base modulo 32 MiB, ending 16 MiB before the
+  RAM's end (crosvm's FDT and its 8 MiB restricted DMA pool sit there). The device tree is crosvm's machine as run
+  10's `fdt.dtb` describes it: GICD `0x3fff0000` and the redistributors right below (`0x20000` a vCPU), the 19.2 MHz
+  timer, PSCI by HVC, the console on the first ns16550a; arm-io from `0x1000` to 1 GiB. It also writes `OUT.adt`
+  (that tree, for `xnuloader-inspect adt`). No device yet: crosvm's are on PCI.
+- The run: `oneios-tool phone vm-boot --image FILE [--seconds N] [--thp] [--out DIR]` (`tools/oneios-tool/README.md`):
+  vm-probe's crosvm line with the label's RAM and vCPUs, the console followed live, `crosvm stop` after N seconds or
+  at `vm-boot --stop`.
+
+**Boot 1, 2026-11-23: the kernel runs in the VM** (`logs/pa3q-vmboot/boot1/`, local). `xnuloader-crosvm
+out/kernel/native-24A446/kernel.kc out/crosvm/kernel.img --ram-mib 2048 --cpus 1`: the native collection (MH_FILESET
+arm64e, base `0xfffffff007004000`), a 137 MiB Image, the window at PA `0x83004000` (1,982 MiB of the 2,048, 89 MiB
+used), `boot_args` at `0x88950000`, the tree at `0x88951000` (11,624 bytes). `phone vm-boot --seconds 90 --thp` with
+gh_hugepage_reserve's pool loaded: crosvm made the VM ("creating hypervisor: Gunyah"), and the console showed the
+native kernel's whole start (`Darwin Kernel Version 25.5.0 ... DEVELOPMENT_ARM64_BCM2837`): `vm_page_bootstrap:
+476905 free pages, 30487 wired pages` (the 2 GiB), the zones, AppleImage4, AMFI ("Booted in a VM"), Sandbox, the
+CHRP NVRAM, APFS, the hosted storage class, the software key store, the display's framebuffer backend, the HID
+devices (buttons, touch screen, light sensor, each under IOHIDResource with its event driver) and `oneios-cpu`'s
+report every 10 s (the timer's interrupts arrive through the GIC). It stopped where it had to: `Waiting on ...
+IOMedia ... Apple_HFS`, the root device's wait, since this VM has no disk. At 90 s `crosvm stop` ended it (crosvm
+exit 0); One UI ran on. crosvm's vCPU stall detector did not end the VM, which never armed it (its driver is opt-in
+in the guest [I]). Pointer authentication works in the VM too (vmprobe run 11, `logs/pa3q-vmprobe/run11-pac/`:
+the keys written, PACIA and AUTIA round trip, PACGA, and the wrong modifier traps with FPAC, ESR `0x72000000`).
+What it does not show yet: the disks, more than one vCPU, the display and input.
+
 ## Next
 1. The Gunyah VM fits iOS with gh_hugepage_reserve ("Verdict, revised"). Its road to an iOS guest, each step a
-   test on the phone: the native kernel booted by crosvm (a Linux-Image stub that places the kernel collection, its
-   device tree from crosvm's `fdt.dtb` and the boot arguments, as xnuloader-qemu does for QEMU); its console on the
-   8250 at `0x3f8`, PSCI by HVC, the stall detector petted; virtio over PCI with every buffer in the restricted DMA
-   pool (or Droid-VM's crosvm, virtio-mmio as on the bench, BSD-3); the image set's disks as virtio-blk from /data;
-   then the display, input and the GPU (drm2kgsl, as the hosted path's). The pool is grown once per boot after the
-   temporary root (`hugepool load`, `hugepool grow`); `hugepool unload` gives the 3 GiB back.
+   test on the phone: the native kernel booted by crosvm with its console on the 8250 at `0x3f8` (done: "The native
+   kernel in crosvm", boot 1); virtio over PCI with every buffer in the restricted DMA pool (or Droid-VM's crosvm,
+   virtio-mmio as on the bench, BSD-3) and the image set's disks as virtio-blk from /data (step 2, next); more
+   vCPUs (PSCI CPU_ON by HVC); then the display, input and the GPU (drm2kgsl, as the hosted path's). The pool is
+   grown once per boot after the temporary root (`hugepool load`, `hugepool grow`); `hugepool unload` gives the 3 GiB
+   back.
    The other paths stay: the hosted one that runs today, and XNU alone (the hand-off under Samsung's protections,
    the command-mode panel, UFS behind file-based encryption).
 2. **Later, the owner asked (2026-11-23): tell gh_hugepage_reserve's authors about its fragility** (an issue on

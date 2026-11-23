@@ -221,6 +221,16 @@ window at 0x0a000000 + 0x200 * K) and the CPU (`--qemu-cpu`, a Cortex-A710 by de
 `virtio-gpu-device` with that first mode), the boot video right after the kernel's window (`boot_args.Video`, outside the
 tree's DRAM), the tree's display mode and scale, and `offline-legacy-unit-scale` and `sheng-vsync` in the boot arguments.
 
+`tools/xnuloader-crosvm.c` is that loader for a VM of Android's crosvm under the phone's Gunyah (`docs/native.md`, "The
+native kernel in crosvm"): `xnuloader-crosvm KERNEL OUT [--cpus N] [--ram-mib N] [--timebase HZ] [--args TEXT]
+[--args-add TEXT]` writes one arm64 Linux Image (crosvm loads it at the RAM's start, `0x80000000`, and enters it with
+the MMU off): the Linux header, xnuloader-qemu's stub at `0x40`, the label `oneios-crosvm ram-mib=N cpus=N` at `0x100`
+(`oneios-tool phone vm-boot` starts crosvm with it), and the window at RAM + 32 MiB + the kernel base modulo 32 MiB,
+ending 16 MiB before the RAM's end (crosvm's FDT and restricted DMA pool). The machine is crosvm's: GICD `0x3fff0000`
+and the redistributors below it, the 19.2 MHz timer, PSCI by HVC, the console on the ns16550a at `0x3f8`
+(`xl_machine.uart_ns16550`: `/arm-io/uart0` `compatible` `ns16550a` with an absolute `reg`, kernel patch 0077; arm-io
+from `0x1000` to 1 GiB). `OUT.adt` is the tree it gave the kernel. No disks or display yet: crosvm's devices are on PCI.
+
 ### 2.2 Memory
 
 - One memfd is the guest's RAM (its size: section 1, `ram=auto`). xnuhost maps it once at `0x2000000000 + (link base mod 2 MiB)` (retrying

@@ -427,3 +427,12 @@ guest is still iPhone18,2 iOS 27.0.1.
   with the CPU (no 3D); a swipe through VNC reaches backboardd and the lock screen shows "Swipe up to open". Under QEMU
   an hour is minutes of a phone: the unlock did not finish in the run. Found with iOS's own log read from the store:
   rapportd spinning without a network (1.5 million log lines in 14 minutes), turned off on the bench.
+- 2026-11-20 to 23: **a VM under the S25's Gunyah** (`docs/native.md`, "A VM under Gunyah"; read only first: `phone
+  hw`, section 0b). AVF's crosvm runs our payload as a protected VM at the core's own speed (`phone vm-probe`, runs 1
+  and 2); in 4 KiB pages its RAM ends near 0.5 GB (Gunyah's 18 MiB heap; runs 3 to 8). The owner's idea, Droid-VM's
+  gh_hugepage_reserve, loaded after the temporary root and its pool grown with One UI's framework stopped about 37 s
+  (`phone hugepool`, no restart of the phone; one panic first, ours: the insmod line lacked `pageblock_order_val`),
+  gives **a 3 GiB VM, every page written and read back** (run 10). Step 1 of the road to an iOS guest there: **the
+  native kernel boots in that VM** (`xnuloader-crosvm`, `phone vm-boot`, kernel 0077's ns16550a console; boot 1, 2
+  GiB, 1 vCPU) to the root device's wait, and `crosvm stop` ends it with One UI on. Next: the disks (virtio over PCI
+  through the restricted DMA pool).
