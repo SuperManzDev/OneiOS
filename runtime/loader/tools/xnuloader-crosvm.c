@@ -45,6 +45,12 @@
 // kernel's own window stays where it was (32 MiB in, which is above the shim's region). There is no restricted DMA
 // pool: the host reads all of the VM's RAM, and the region where the pool would be is plain RAM that keeps the devices'
 // windows as before (--swiotlb sets its size; crosvm is not given it). The label says shared-ram=1, for vm-boot.
+// Droid-VM's crosvm has an ECAM host where AVF's has a CAM one (its tree: pci-host-ecam-generic, 1 MiB at 0x10000:
+// bus 0, 32 KiB a device, 4 KiB a function; vm-boot shared1, whose disks the kernel looked for 2 KiB apart and found
+// ffff:ffff). Each disk's node is then its function's place in the ECAM (the disk driver reads the function there,
+// wherever it is), and /arm-io/input-pci is device 1's first 2 KiB, where that crosvm puts the multi-touch function
+// (shared1: its interrupt map has the disks at 2 to 6 and the input at 1): the kernel's scan, 2 KiB a step over the
+// node, then finds it as function 0 of its one step, with no change to the kernel.
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -72,6 +78,10 @@
 #define DMA_SLICE     0x110000ull       // a disk's DMA window: its queue page, then 1 MiB of transfer buffer at 64 KiB
 #define INPUT_WINDOW  0x10000ull        // the input devices' window: three 4 KiB pages a device
 #define PCI_BUS0      0x10000ull        // bus 0 of the CAM: 32 devices, 0x800 apart
+#define ECAM_DEV_SHIFT 15               // --shared-ram: Droid-VM's crosvm's ECAM, a device every 32 KiB (bus 0 only)
+#define CAM_DEV_SHIFT  11               // AVF's crosvm's CAM, a device every 2 KiB
+#define ECAM_INPUT_DEV 1u               // --shared-ram: the multi-touch function's device on that ECAM (shared1)
+#define INPUT_STEP    0x800ull          // what the kernel's input scan steps by (staged/hid_transport.rs)
 #define RTC           0x2000ull         // crosvm's PL030 (rtc@2000 in its tree): RTCDR is the host's seconds since 1970
 #define RTC_SIZE      0x1000ull
 
@@ -247,8 +257,12 @@ int main(int argc, char **argv)
   fclose(r);
   // The disks: PCI function 00:(2 + K).0 for disk K, its configuration space the node's reg.
   for (unsigned i = 0; i < ndisk; i++)
-    m.dev[m.ndev++] = (xl_device){ disks[i].writable ? XL_DEV_DATA_STORE : XL_DEV_BLOCK, PCI_CAM + ((uint64_t)(PCI_FIRST_DEV + i) << 11), 0x100, true };
-  if (display_w) m.dev[m.ndev++] = (xl_device){ XL_DEV_INPUT, PCI_CAM, PCI_BUS0, true };   // the input bus
+    m.dev[m.ndev++] = (xl_device){ disks[i].writable ? XL_DEV_DATA_STORE : XL_DEV_BLOCK,
+                                   PCI_CAM + ((uint64_t)(PCI_FIRST_DEV + i) << (shared_ram ? ECAM_DEV_SHIFT : CAM_DEV_SHIFT)), 0x100, true };
+  // the input bus: all of bus 0 on AVF's CAM; on Droid-VM's ECAM the input's device only, one step of the kernel's scan
+  if (display_w)
+    m.dev[m.ndev++] = shared_ram ? (xl_device){ XL_DEV_INPUT, PCI_CAM + ((uint64_t)ECAM_INPUT_DEV << ECAM_DEV_SHIFT), INPUT_STEP, true }
+                                 : (xl_device){ XL_DEV_INPUT, PCI_CAM, PCI_BUS0, true };
   const xh_imageset_file *os = image_dir ? xh_imageset_role(&set, "os") : NULL;
   if (os && *os->volume_uuid) m.root_volume_uuid = os->volume_uuid;
   m.trust_cache = trust.data != NULL;
@@ -373,8 +387,8 @@ int main(int argc, char **argv)
   printf("  %u vCPU%s, timebase %u Hz, GICD 0x%llx, GICR 0x%llx, console ns16550a at 0x%llx; boot args: %s\n", cpus,
          cpus == 1 ? "" : "s", timebase, (unsigned long long)GICD, (unsigned long long)m.gic_redist, (unsigned long long)UART, args);
   if (shared_ram)
-    printf("  shared RAM (Droid-VM's crosvm, --protected-vm-pseudo-unprotected): the devices' region, %u MiB of plain RAM, at PA 0x%llx\n",
-           swiotlb_mib, (unsigned long long)pool);
+    printf("  shared RAM (Droid-VM's crosvm, --protected-vm-pseudo-unprotected): the devices' region, %u MiB of plain RAM, at PA 0x%llx;"
+           " PCI on its ECAM (the disks at 0x%llx + device << 15)\n", swiotlb_mib, (unsigned long long)pool, (unsigned long long)PCI_CAM);
   else
     printf("  restricted DMA pool (crosvm --swiotlb %u) at PA 0x%llx\n", swiotlb_mib, (unsigned long long)pool);
   if (display_w)

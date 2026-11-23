@@ -646,6 +646,30 @@ published, which was wrong.
   inside crosvm's mapping of the guest's RAM, which only a shared-RAM VM may do: a protected VM's other mappings are
   lent memory). Not booted yet: it waits for a pool of about 1000 pages.
 
+### iOS in the shared-RAM VM (step 9, 2026-11-23)
+- **The pool, minutes after a restart.** At 80 min of uptime neither `acquire` beside One UI nor `grow` with it stopped
+  found a new 2 MiB page: with One UI stopped 8.6 GB were free and only 5 free 2 MiB blocks lay outside the CMA areas
+  (`/proc/pagetypeinfo`: every free block of order 9 or 10 was CMA; Movable free pages no larger than 256 KiB), so
+  nearly every block held a page nothing moves. The owner restarted the phone and took the temporary root, and 2.5 min
+  after the start `hugepool load --want 2304` and `grow` took **1961 pages (3.8 GiB) in 31 s**, One UI down about
+  45 s. At 8 min of uptime the same grow had found 59 (18:34). So the pool is filled within minutes of a restart and
+  kept for the session (no unload between VMs).
+- **Boot shared1** (`xnuloader-crosvm --shared-ram --ram-mib 3584 --cpus 8`, `vm-boot --pin`): crosvm put the whole
+  window, 3578 MiB, in the pool's pages (its mthp pass: 1789 of 1789 in 2 MiB, 100 %), shared it as one parcel in 34 ms,
+  the shim accepted it, and the kernel started with 857,685 free pages (3.3 GiB; 1.6 to 1.8 before). But no disk:
+  Droid-VM's crosvm has an **ECAM** PCI host (`pci-host-ecam-generic`, 1 MiB at 0x10000: a device every 32 KiB) where
+  AVF's has a CAM one (2 KiB), and the kernel looked for the disks 2 KiB apart (`PCI ffff:ffff is not a modern
+  virtio-blk function`); the touch was found by chance (ECAM device 1 is the CAM's step 16). crosvm's interrupt map
+  had the disks at 2 to 6, where vm-boot pins them, and the input at 1. Stopped; the pool had 1930 free after it.
+- **The fix, in the loader only:** in shared mode each disk's node is its function's place in the ECAM (`0x10000 +
+  device << 15`) and `/arm-io/input-pci` is device 1's first 2 KiB, one step of the kernel's 2 KiB scan; nothing in
+  the kernel changed.
+- **Boot shared2: iOS with 3.5 GiB and 8 vCPUs.** The five disks (os, systemos, app, seed, the Data store), the
+  root, the GPU add-on mounted, launchd and its boot tasks, backboardd with the touch and the buttons, SpringBoard;
+  the owner's finger (Spotlight). The bridge took the boot video out of crosvm's mapping of the guest's RAM
+  (`displayctl pool --vm shared`: the memfd's offset is the address less 0x80000000). The CPU still draws every
+  frame: about 13 frames a second, backboardd at 111 % of a core. Next: the GPU.
+
 ## Next
 1. The Gunyah VM fits iOS with gh_hugepage_reserve ("Verdict, revised"). Its road to an iOS guest, each step a
    test on the phone: the native kernel booted by crosvm with its console on the 8250 at `0x3f8` (done: "The native

@@ -429,13 +429,21 @@ fn gen_path(dir: &Path, name: &str) -> String {
 /// boot 4b, the pool at 198 pages after boot 4, "gunyah_vm_mgr: Failed to map guest address ...: 10" and crosvm's vCPU
 /// "unknown gh exit reason: 3", 48 s into the run.
 pub const SMALL_PAGES_MIB: u64 = 384;
+/// The shared-RAM VM's: the window is pinned for good when it is shared, and the kernel moves every page of it outside
+/// the pool that lies in a CMA block into 4 KiB pages first (vm-probe shared1: 4 MiB of such pages made ~1000 runs;
+/// shared2: 960 MiB made 126651, which the resource manager refused to map)
+pub const SMALL_PAGES_MIB_SHARED: u64 = 32;
 
-/// A VM above 480 MiB with no more than SMALL_PAGES_MIB of its RAM outside the pool's free pages (`pool_mib`).
-pub fn check_pool(ram_mib: u64, pool_mib: u64) -> Result<()> {
-    if ram_mib > 480 && ram_mib.saturating_sub(pool_mib) > SMALL_PAGES_MIB {
+/// A VM above 480 MiB with no more than SMALL_PAGES_MIB (SMALL_PAGES_MIB_SHARED for the shared-RAM VM) of its RAM
+/// outside the pool's free pages (`pool_mib`).
+pub fn check_pool(ram_mib: u64, pool_mib: u64, shared: bool) -> Result<()> {
+    let small = if shared { SMALL_PAGES_MIB_SHARED } else { SMALL_PAGES_MIB };
+    if ram_mib > 480 && ram_mib.saturating_sub(pool_mib) > small {
         bail!(
-            "gh_hugepage_reserve's pool has {pool_mib} MiB free, and a VM of {ram_mib} MiB may take no more than {SMALL_PAGES_MIB} MiB \
-             in 4 KiB pages (Gunyah's heap): refill the pool first (`phone hugepool acquire`, beside One UI, or `phone hugepool grow`)"
+            "gh_hugepage_reserve's pool has {pool_mib} MiB free, and a{} VM of {ram_mib} MiB may take no more than {small} MiB \
+             outside it ({}): refill the pool first (`phone hugepool acquire`, beside One UI, or `phone hugepool grow`)",
+            if shared { " shared-RAM" } else { "" },
+            if shared { "the rest is moved at its pin and scattered" } else { "4 KiB pages, Gunyah's heap" }
         );
     }
     Ok(())
@@ -503,7 +511,7 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
     let available = crate::vmprobe::mem_available_mib(&meminfo).with_context(|| format!("no MemAvailable in \"{}\"", meminfo.trim()))?;
     let pool_mib = crate::hugepool::stat(&meminfo, "pool_avail").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) * 2;
     crate::vmprobe::check_mem(l.ram, available + pool_mib.min(l.ram as u64))?;
-    check_pool(l.ram as u64, pool_mib)?;
+    check_pool(l.ram as u64, pool_mib, l.shared)?;
     if l.shared {
         let dev = adb.root_ok(&format!("[ -c {} ] && echo there || echo absent\n", crate::hostshare::DEV), "gunyah_share")?;
         if !dev.contains("there") {
@@ -633,11 +641,14 @@ mod tests {
 
     #[test]
     fn the_pool_must_hold_what_gunyah_cannot_map_in_small_pages() {
-        assert!(check_pool(2880, 2688).is_ok());      // boot 3: 192 MiB in 4 KiB pages
-        assert!(check_pool(2400, 2406).is_ok());      // boot 4
-        assert!(check_pool(2400, 396).is_err());      // boot 4b's first try: the VM ended at a fault 48 s in
-        assert!(check_pool(2400, 2016).is_ok() && check_pool(2400, 2014).is_err());
-        assert!(check_pool(256, 0).is_ok());          // a small VM needs no pool
+        assert!(check_pool(2880, 2688, false).is_ok());      // boot 3: 192 MiB in 4 KiB pages
+        assert!(check_pool(2400, 2406, false).is_ok());      // boot 4
+        assert!(check_pool(2400, 396, false).is_err());      // boot 4b's first try: the VM ended at a fault 48 s in
+        assert!(check_pool(2400, 2016, false).is_ok() && check_pool(2400, 2014, false).is_err());
+        assert!(check_pool(256, 0, false).is_ok());          // a small VM needs no pool
+        // the shared-RAM VM: 32 MiB outside the pool at most (shared2)
+        assert!(check_pool(2048, 2016, true).is_ok() && check_pool(2048, 2014, true).is_err());
+        assert!(check_pool(2048, 1664, false).is_ok() && check_pool(2048, 1664, true).is_err());
     }
 
     #[test]
