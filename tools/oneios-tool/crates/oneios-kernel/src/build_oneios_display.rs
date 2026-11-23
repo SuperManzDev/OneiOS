@@ -40,7 +40,7 @@
 
 use crate::gen::{self, fail, Compile, Ctx, Stubs};
 use crate::macho_object::Object;
-use crate::staged::{display::{DISPLAY, SCANOUT}, display_header};
+use crate::staged::{display::{DISPLAY, GOP_BOOT_VIDEO, LEGACY_BOOT_VIDEO, SCANOUT}, display_header};
 use anyhow::{anyhow, Result};
 use oneios_common::pyjson::Value;
 use siphasher::sip::SipHasher24;
@@ -290,6 +290,20 @@ pub fn staged_scanout(text: String) -> Result<String> {
     })
 }
 
+/// NativeLegacyDisplay.cpp with staged/display.rs's LEGACY_BOOT_VIDEO: the boot video write-back in the native kernel.
+pub fn staged_legacy(text: String) -> Result<String> {
+    gen::replace_once(text, LEGACY_BOOT_VIDEO, |anchor| {
+        format!("build-oneios-display: NativeLegacyDisplay.cpp no longer has exactly one {}", anchor.trim())
+    })
+}
+
+/// NativeGOPPresenter.cpp with staged/display.rs's GOP_BOOT_VIDEO.
+pub fn staged_gop(text: String) -> Result<String> {
+    gen::replace_once(text, GOP_BOOT_VIDEO, |anchor| {
+        format!("build-oneios-display: NativeGOPPresenter.cpp no longer has exactly one {}", anchor.trim())
+    })
+}
+
 fn list<T: Into<Value>>(items: impl IntoIterator<Item = T>) -> Value {
     let mut value = Value::list();
     items.into_iter().for_each(|item| value.push(item));
@@ -331,11 +345,16 @@ pub fn main() -> Result<()> {
     let flags = |items: &[&str]| -> Vec<String> { items.iter().map(|item| item.to_string()).collect() };
     let (out_s, display_s, package_s) = (gen::s(&out), gen::s(&display), gen::s(&package));
 
-    let native = compile_cpp(&display.join("NativeLegacyDisplay.cpp"),
-                             &flags(&["-I", &out_s, "-I", &display_s, "-DPE_parse_boot_argn=oneios_display_boot_arg"]))?;
+    // Both staged with the boot video mapped write-back in the native kernel (staged/display.rs LEGACY_BOOT_VIDEO,
+    // GOP_BOOT_VIDEO); their headers still come from NativeMobileDisplay (-I).
+    let legacy = out.join("NativeLegacyDisplay.cpp");
+    gen::write_text(&legacy, &staged_legacy(gen::read_text(&display.join("NativeLegacyDisplay.cpp"))?)?)?;
+    let gop = out.join("NativeGOPPresenter.cpp");
+    gen::write_text(&gop, &staged_gop(gen::read_text(&display.join("NativeGOPPresenter.cpp"))?)?)?;
+    let native = compile_cpp(&legacy, &flags(&["-I", &out_s, "-I", &display_s, "-DPE_parse_boot_argn=oneios_display_boot_arg"]))?;
     let bound = bind(&gen::read_bytes(&native)?, &abi)?;
     let staged = out.join("LegacyDisplayProbe.cpp");
-    let mut objects = vec![late(native)?, late(compile_cpp(&display.join("NativeGOPPresenter.cpp"), &flags(&["-I", &display_s]))?)?];
+    let mut objects = vec![late(native)?, late(compile_cpp(&gop, &flags(&["-I", &display_s]))?)?];
     gen::write_text(&staged, &staged_text(gen::read_text(&package.join("LegacyDisplayProbe.cpp"))?)?)?;
     objects.push(compile_cpp(&staged, &flags(&["-I", &package_s]).into_iter().chain(probe_defines()).collect::<Vec<_>>())?);
     // DYNAMIC as the transport in liboneiosgpu.a: its scratch entries are allocated when the display starts. Staged with

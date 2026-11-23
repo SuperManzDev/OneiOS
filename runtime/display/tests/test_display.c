@@ -6,6 +6,7 @@
 #define _GNU_SOURCE
 #include "xhd.h"
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -343,6 +344,47 @@ static void test_protocol(const char *dir)
   unlink(s.path);
 }
 
+// The pool bridge's pure parts (displayctl pool): crosvm's pool mapping in a maps text, the row copy, the frame count.
+static void test_pool_parts(void)
+{
+  // crosvm's own lines on the S25 (vm-boot maps1, 2026-11-23: the pool is the memfd's last 8 MiB, mapped on its own),
+  // and look-alikes that must not count: a private mapping, another memfd's name, an anonymous one
+  static const char maps[] =
+    "59b38d8000-59b4507000 r-xp 00000000 07:c0 429696                         /apex/com.android.virt/bin/crosvm\n"
+    "6e50600000-6e50e00000 rw-s 7f800000 00:01 2460461                        /memfd:crosvm_guest (deleted)\n"
+    "6e50e00000-6ed0600000 rw-s 00000000 00:01 2460461                        /memfd:crosvm_guest (deleted)\n";
+  static const char others[] =
+    "7000000000-7000800000 rw-p 7f800000 00:01 2460462                        /memfd:crosvm_guest (deleted)\n"
+    "7100000000-7100800000 rw-s 7f800000 00:01 2460463                        /memfd:crosvm_guest2\n"
+    "7200000000-7200800000 rw-s 7f800000 00:00 0 \n";
+  uint64_t start = 0, end = 0, inode = 0;
+  CHECK(xhd_pool_mapping(maps, 0x7f800000, 8 << 20, &start, &end, &inode) == 0 && start == 0x6e50600000ull &&
+        end == 0x6e50e00000ull && inode == 2460461);
+  CHECK(xhd_pool_mapping(maps, 0x7f800000, 16 << 20, &start, &end, &inode) == -ENOENT);   // not the pool's size
+  CHECK(xhd_pool_mapping(maps, 0, 8 << 20, &start, &end, &inode) == -ENOENT);            // the lent RAM's is longer
+  CHECK(xhd_pool_mapping(others, 0x7f800000, 8 << 20, &start, &end, &inode) == -ENOENT);
+
+  // The copy: 16x8 pixels, 64 bytes a row, four rows a 256-byte page; page 1 (rows 4-7) not resident.
+  uint8_t src[512], dst[512];
+  memset(src, 0, sizeof src);
+  memset(dst, 0, sizeof dst);
+  src[1 * 64 + 5] = 9;
+  src[2 * 64] = 7;
+  src[6 * 64] = 3;
+  unsigned char resident[2] = { 1, 0 };
+  struct xhd_rect r;
+  CHECK(xhd_pool_copy(dst, src, 16, 8, 64, resident, 256, 0, &r) == 2 && r.x == 0 && r.y == 1 && r.w == 16 && r.h == 2);
+  CHECK(dst[1 * 64 + 5] == 9 && dst[2 * 64] == 7 && dst[6 * 64] == 0);                   // the absent page is not read
+  CHECK(xhd_pool_copy(dst, src, 16, 8, 64, resident, 256, 0, &r) == 0 && r.w == 0);       // nothing changed since
+  resident[1] = 1;
+  CHECK(xhd_pool_copy(dst, src, 16, 8, 64, resident, 256, 1, &r) == 1 && r.y == 6 && r.h == 1 && dst[6 * 64] == 3);
+  // The count: only with its magic.
+  uint64_t page[2] = { 0, 5 }, count = 0;
+  CHECK(!xhd_frame_seq((const uint8_t *)page, &count));
+  page[0] = XHD_FRAME_SEQ_MAGIC;
+  CHECK(xhd_frame_seq((const uint8_t *)page, &count) && count == 5);
+}
+
 // displayctl with a stand-in for the helper: a shell script that takes the session, and leaves.
 static const char *self_path;
 static void test_displayctl(const char *displayctl, const char *dir)
@@ -413,6 +455,73 @@ static void test_displayctl(const char *displayctl, const char *dir)
   CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 2);                  // a format it does not make: usage
 }
 
+// displayctl pool against a stand-in for crosvm's memfd (--test-guest: a plain file), with this program as the helper.
+// This process plays the guest: the pool at 1 MiB, 1 MiB long, the frame (64x48, 256 bytes a row) at its start, the
+// count's page at 16 KiB; every 50 ms a row changes and the count moves.
+static void test_displayctl_pool(const char *displayctl, const char *dir)
+{
+  char guest[256], out[256], command[2048];
+  snprintf(guest, sizeof guest, "%s/guest.mem", dir);
+  snprintf(out, sizeof out, "%s/out", dir);
+  int fd = open(guest, O_RDWR | O_CREAT | O_TRUNC, 0600);
+  CHECK(fd >= 0 && ftruncate(fd, 2 << 20) == 0);
+  uint8_t *mem = mmap(NULL, 2 << 20, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  CHECK(mem != MAP_FAILED);
+  if (mem == MAP_FAILED) return;
+  uint8_t *pool = mem + (1 << 20);
+  for (int i = 0; i < 64 * 48; i++) {
+    uint8_t *p = pool + (i / 64) * 256 + (i % 64) * 4;
+    p[0] = 10; p[1] = 20; p[2] = 30; p[3] = 255;
+  }
+  uint64_t *seq = (uint64_t *)(pool + 16384);
+  seq[1] = 1;
+  __atomic_store_n(&seq[0], XHD_FRAME_SEQ_MAGIC, __ATOMIC_RELEASE);
+  char pid[32];
+  snprintf(pid, sizeof pid, "%d", (int)getpid());
+  pid_t child = fork();
+  if (child == 0) {
+    setenv("TMPDIR", dir, 1);
+    int o = open(out, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    dup2(o, 1);
+    dup2(o, 2);
+    execl(displayctl, displayctl, "pool", "--pid", pid, "--test-guest", guest, "--pool-offset", "1048576", "--pool-bytes", "1048576",
+          "--size", "64x48", "--stride", "256", "--seq-offset", "16384", "--seconds", "1.5", "--helper", self_path, (char *)NULL);
+    _exit(127);
+  }
+  for (int k = 0; k < 20; k++) {
+    usleep(50000);
+    pool[(5 + k) * 256] = (uint8_t)(100 + k);
+    __atomic_store_n(&seq[1], (uint64_t)(2 + k), __ATOMIC_RELEASE);
+  }
+  int status = -1;
+  waitpid(child, &status, 0);
+  CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  // the stand-in helper passed (a whole first frame, then bands, X = 255), and frames came by the count
+  snprintf(command, sizeof command, "grep -q 'removed its layer and exited 0' %s && grep -q '^displayctl: ok' %s && "
+           "grep -q 'its count at +0x4000: there' %s && awk '/time is up after/ {f=$9+0; s=$16+0} END {exit !(f>=5 && s>=5)}' %s",
+           out, out, out, out);
+  CHECK(system(command) == 0);
+  // refused before a session or a helper: geometry outside the pool, a disruptive helper option, a missing guest
+  snprintf(command, sizeof command, "TMPDIR=%s %s pool --pid %s --test-guest %s --pool-offset 1048576 --pool-bytes 1048576 --size 64x48 "
+           "--stride 256 --seq-offset 8192 --helper %s > %s 2>&1", dir, displayctl, pid, guest, self_path, out);
+  status = system(command);
+  CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 2);                  // the count inside the frame
+  snprintf(command, sizeof command, "TMPDIR=%s %s pool --pid %s --test-guest %s --pool-offset 1048576 --pool-bytes 1048576 --size 64x48 "
+           "--stride 256 --seq-offset 16384 --helper %s -- --takeover > %s 2>&1", dir, displayctl, pid, guest, self_path, out);
+  status = system(command);
+  CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 2);
+  snprintf(command, sizeof command, "grep -q 'refusing --takeover' %s && ! ls -d %s/displayctl.* 2>/dev/null", out, dir);
+  CHECK(system(command) == 0);
+  snprintf(command, sizeof command, "TMPDIR=%s %s pool --pid %s --test-guest /proc/self/mem --pool-offset 1048576 --pool-bytes 1048576 "
+           "--size 64x48 --stride 256 --seq-offset 16384 --helper %s > %s 2>&1", dir, displayctl, pid, self_path, out);
+  status = system(command);
+  CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 1);                  // never /proc as a stand-in
+  munmap(mem, 2 << 20);
+  close(fd);
+  unlink(guest);
+  unlink(out);
+}
+
 // This program as the helper displayctl starts (--socket PATH --wait N): connects, takes the hello,
 // reads flushes until the socket closes, and checks it saw the moving square's damage.
 static int as_helper(const char *socket_path)
@@ -477,10 +586,12 @@ int main(int argc, char **argv)
   test_copy();
   test_formats();
   test_copy_formats();
+  test_pool_parts();
   test_panel_report();
   test_hold_first(dir);
   test_protocol(dir);
   if (argc > 1) test_displayctl(argv[1], dir);
+  if (argc > 1) test_displayctl_pool(argv[1], dir);
   rmdir(dir);
   printf("%s: %d checks, %d failed\n", failed ? "FAILED" : "ok", checks, failed);
   return failed ? 1 : 0;

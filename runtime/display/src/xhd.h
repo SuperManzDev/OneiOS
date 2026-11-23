@@ -103,4 +103,21 @@ int xhd_listen(const char *path);                                        // fd o
 int xhd_send_hello(int fd, uint32_t width, uint32_t height, uint32_t stride, uint32_t format, int memfd);
 int xhd_send_flush(int fd, uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 int xhd_memfd(const char *name, size_t bytes);                           // fd or -errno
+
+// The bridge of a VM of Android's crosvm (displayctl pool): the native kernel's boot video in crosvm's restricted DMA pool.
+// crosvm maps the pool as a mapping of its own of the guest's memfd: in the text of its /proc/PID/maps, the line of a
+// shared, readable mapping of "/memfd:crosvm_guest" at file offset `offset`, `bytes` long. 0 and its start, end and
+// inode, or -ENOENT.
+int xhd_pool_mapping(const char *maps, uint64_t offset, uint64_t bytes, uint64_t *start, uint64_t *end, uint64_t *inode);
+// The guest's frame (src: rows of width * 4 bytes, `stride` apart) into the helper's (dst, the same layout): a row is
+// read only when every page_size page it touches is resident (resident[i] & 1 for page i of src, as mincore says; no
+// read makes the host allocate guest memory), and written only when it differs. `invalidate`: clean and invalidate the
+// row's cache lines first (arm64; the guest's console writes the boot video uncached). The rows written, and in
+// *changed the band they span (w == 0: none).
+uint32_t xhd_pool_copy(uint8_t *dst, const uint8_t *src, uint32_t width, uint32_t height, uint32_t stride,
+                       const unsigned char *resident, size_t page_size, int invalidate, struct xhd_rect *changed);
+// The guest's frame count (OneiOSDisplay.cpp oneios_display_frame_done) in its page: 1 and *count when the page has
+// "OFSQ" version 1, else 0.
+#define XHD_FRAME_SEQ_MAGIC 0x000000015153464full
+int xhd_frame_seq(const uint8_t *page, uint64_t *count);
 #endif

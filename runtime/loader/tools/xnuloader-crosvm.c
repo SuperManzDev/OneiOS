@@ -26,6 +26,12 @@
 // the same set, read for the identities, the hash lists and the trust caches. OUT.disks lists them for vm-boot, one line
 // each: "swiotlb-mib N", "pool 0xPA" (where crosvm's tree must put it), "store FILE GIB", and "block BYTES VALUE" per
 // disk (BYTES the size the phone's file must have, "-" for the store; VALUE crosvm's --block value).
+// --display WxH [--scale N] [--hz N] (with --image): the boot video, B,G,R,X at W * 4 bytes a row, at the START of the
+// pool, the disks' windows after it (the pool then 32 MiB unless --swiotlb says more): the guest's display driver
+// copies every frame into it (it has no virtio scanout here) and maps it write-back (staged/display.rs LEGACY_BOOT_VIDEO),
+// and the phone's bridge (runtime/display displayctl pool) reads it out of the pool and hands it to oneios-display.
+// OUT.disks then has "fb OFFSET BYTES WIDTH HEIGHT STRIDE" (OFFSET in the pool). /chosen display-scale and the boot
+// arguments as xnuloader-qemu gives them (offline-legacy-unit-scale, sheng-vsync).
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -74,7 +80,7 @@ static uint8_t *slurp(const char *path, size_t *size)
 static void usage(void)
 {
   fprintf(stderr, "usage: xnuloader-crosvm KERNEL OUT [--cpus N] [--ram-mib N] [--timebase HZ] [--args TEXT] [--args-add TEXT] [--swiotlb MIB]\n"
-                  "                        [--image DIR [--phone-image DIR] [--phone-data FILE]]\n");
+                  "                        [--image DIR [--phone-image DIR] [--phone-data FILE] [--display WxH [--scale 2|3] [--hz N]]]\n");
   exit(2);
 }
 
@@ -95,7 +101,8 @@ int main(int argc, char **argv)
   if (argc < 3) usage();
   const char *kernel_path = argv[1], *out = argv[2], *args = default_args, *image_dir = NULL;
   const char *phone_image = "/data/local/tmp/oneios/image", *phone_data = "/data/local/tmp/oneios-vmboot/data.img";
-  unsigned cpus = 1, ram_mib = 2048, swiotlb_mib = 8;
+  unsigned cpus = 1, ram_mib = 2048, swiotlb_mib = 0;
+  unsigned display_w = 0, display_h = 0, display_scale = 3, display_hz = 60;
   uint32_t timebase = 19200000;         // the S25's (vm-probe: CNTFRQ_EL0 in the VM)
   for (int i = 3; i < argc; i++) {
     if (i + 1 >= argc) usage();
@@ -112,10 +119,34 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[i], "--image")) image_dir = argv[++i];
     else if (!strcmp(argv[i], "--phone-image")) phone_image = argv[++i];
     else if (!strcmp(argv[i], "--phone-data")) phone_data = argv[++i];
+    else if (!strcmp(argv[i], "--display")) { if (sscanf(argv[++i], "%ux%u", &display_w, &display_h) != 2) usage(); }
+    else if (!strcmp(argv[i], "--scale")) display_scale = (unsigned)strtoul(argv[++i], NULL, 0);
+    else if (!strcmp(argv[i], "--hz")) display_hz = (unsigned)strtoul(argv[++i], NULL, 0);
     else usage();
   }
   if (cpus < 1 || cpus > XL_MAX_CPUS || ram_mib < 512 || ram_mib > 6144) { fprintf(stderr, "xnuloader-crosvm: 1-%d CPUs, 512-6144 MiB\n", XL_MAX_CPUS); return 2; }
+  if (display_w && (!image_dir || display_w < 320 || display_h < 320 || display_w > 4096 || display_h > 4096 ||
+                    (display_scale != 2 && display_scale != 3) || display_hz < 24 || display_hz > 120)) {
+    fprintf(stderr, "xnuloader-crosvm: --display 320x320 to 4096x4096 with --image, --scale 2 or 3, --hz 24 to 120\n");
+    return 2;
+  }
+  // The boot video's slot at the pool's start (2 MiB aligned), the disks' windows after it.
+  // and the frame sequence's page right after it (16 KiB, the guest's page: OneiOSDisplay.cpp oneios_display_frame_done)
+  const uint64_t fb_stride = (uint64_t)display_w * 4, fb_bytes = fb_stride * display_h, seq_off = (fb_bytes + 0x3fff) & ~0x3fffull;
+  const uint64_t fb_slot = display_w ? (seq_off + 0x4000 + 0x1fffff) & ~0x1fffffull : 0;
+  if (!swiotlb_mib) swiotlb_mib = display_w ? 32 : 8;
   if (swiotlb_mib < 2 || swiotlb_mib > 64 || (swiotlb_mib & 1)) { fprintf(stderr, "xnuloader-crosvm: --swiotlb 2 to 64 MiB, even\n"); return 2; }
+  static char with_display[4096];
+  if (display_w) {
+    // what xnuhost passes beside the tree's display-scale: the backend's unit scale and its vsync tick (display/README.md)
+    size_t at = (size_t)snprintf(with_display, sizeof with_display, "%s", args);
+    if (at < sizeof with_display && !strstr(args, "offline-legacy-unit-scale="))
+      at += (size_t)snprintf(with_display + at, sizeof with_display - at, " offline-legacy-unit-scale=%u", display_scale);
+    if (at < sizeof with_display && !strstr(args, "sheng-vsync="))
+      at += (size_t)snprintf(with_display + at, sizeof with_display - at, " sheng-vsync=%u", display_hz);
+    if (at >= sizeof with_display) { fprintf(stderr, "xnuloader-crosvm: boot arguments too long\n"); return 2; }
+    args = with_display;
+  }
   if (image_dir && (!plain_path(phone_image) || !plain_path(phone_data))) {
     fprintf(stderr, "xnuloader-crosvm: --phone-image and --phone-data: absolute paths without commas, quotes or blanks\n");
     return 2;
@@ -144,7 +175,19 @@ int main(int argc, char **argv)
   // crosvm's restricted DMA pool: the RAM's last MIB (aarch64/src/lib.rs get_swiotlb_addr; Gunyah wants it static).
   const uint64_t pool = ram_end - ((uint64_t)swiotlb_mib << 20), top_reserve = ((uint64_t)swiotlb_mib << 20) + FDT_RESERVE;
   if (phys + (256ull << 20) + top_reserve > ram_end) { fprintf(stderr, "xnuloader-crosvm: %u MiB leave the kernel less than 256 MiB\n", ram_mib); return 2; }
-  if (ndisk * DMA_SLICE > ((uint64_t)swiotlb_mib << 20)) { fprintf(stderr, "xnuloader-crosvm: %u disks need %llu KiB of the pool\n", ndisk, (unsigned long long)(ndisk * DMA_SLICE >> 10)); return 2; }
+  if (fb_slot + ndisk * DMA_SLICE > ((uint64_t)swiotlb_mib << 20)) {
+    fprintf(stderr, "xnuloader-crosvm: the boot video and %u disks need %llu KiB of the pool\n", ndisk, (unsigned long long)((fb_slot + ndisk * DMA_SLICE) >> 10));
+    return 2;
+  }
+  const uint64_t fb_pa = pool, disks_pa = pool + fb_slot;
+  if (display_w) {
+    // the page the guest counts its frames in (a new argument: the user's --args cannot have named the pool)
+    size_t at = strlen(with_display);
+    if (snprintf(with_display + at, sizeof with_display - at, " oneios-frame-seq=0x%llx", (unsigned long long)(fb_pa + seq_off)) >= (int)(sizeof with_display - at)) {
+      fprintf(stderr, "xnuloader-crosvm: boot arguments too long\n");
+      return 2;
+    }
+  }
   const uint64_t window = (ram_end - top_reserve - phys) & ~0x1fffffull;
 
   xl_machine m;
@@ -169,6 +212,12 @@ int main(int argc, char **argv)
   m.have_chip_id = true;
   m.chip_id = 0x8150;
   m.unique_chip_id = 0x0ce10511e5000002ull;     // a VM's own: not a phone's, not the bench's
+  if (display_w) {
+    m.display_width = display_w;
+    m.display_height = display_h;
+    m.display_scale = display_scale;
+    m.display_hz = display_hz;
+  }
   FILE *r = fopen("/dev/urandom", "rb");
   if (!r || fread(m.random_seed, 1, sizeof m.random_seed, r) != sizeof m.random_seed) { fprintf(stderr, "/dev/urandom: read failed\n"); return 1; }
   fclose(r);
@@ -187,7 +236,7 @@ int main(int argc, char **argv)
     xl_adt_node *node = xl_adt_find(tree, name);
     if (!node) { fprintf(stderr, "board: no /%s\n", name); return 1; }
     xh_imageset_describe(node, &disks[i].identity);
-    const uint64_t dma[2] = { pool + i * DMA_SLICE, DMA_SLICE };
+    const uint64_t dma[2] = { disks_pa + i * DMA_SLICE, DMA_SLICE };
     if ((disks[i].list && xl_adt_set(node, "oneios,hash-list", disks[i].list, disks[i].list_size)) ||
         xl_adt_set(node, "oneios,dma-window", dma, sizeof dma)) {
       fprintf(stderr, "board: /%s: no room for its hash list or DMA window\n", name);
@@ -204,7 +253,8 @@ int main(int argc, char **argv)
   uint8_t *ram = calloc(1, window);
   if (!ram) { fprintf(stderr, "xnuloader-crosvm: out of memory\n"); return 1; }
   xl_boot_request req = { .image = { image, size }, .kernel = &k, .ram = ram, .window = window, .phys_base = phys,
-                          .virt_base = k.base, .tree = tree, .command_line = args, .trustcache = trust };
+                          .virt_base = k.base, .tree = tree, .command_line = args, .trustcache = trust,
+                          .video = { display_w ? fb_pa : 0, display_w ? 1 : 0, fb_stride, display_w, display_h, display_w ? 32 : 0 } };
   xl_boot_layout lay;
   if (xl_boot_place(&req, &lay, &err)) { fprintf(stderr, "place: %s\n", err); return 1; }
   const uint64_t used = (lay.used + 0x3fff) & ~0x3fffull;
@@ -258,6 +308,9 @@ int main(int argc, char **argv)
     FILE *d = fopen(list, "w");
     if (!d) { fprintf(stderr, "%s: %s\n", list, strerror(errno)); return 1; }
     fprintf(d, "swiotlb-mib %u\npool 0x%llx\nstore %s %u\n", swiotlb_mib, (unsigned long long)pool, phone_data, set.store_gib ? set.store_gib : 16);
+    if (display_w)
+      fprintf(d, "fb %llu %llu %u %u %llu %llu\n", (unsigned long long)(fb_pa - pool), (unsigned long long)fb_bytes, display_w, display_h,
+              (unsigned long long)fb_stride, (unsigned long long)(fb_pa - pool + seq_off));
     for (unsigned i = 0; i < ndisk; i++) {
       char file[1200];
       if (disks[i].writable) snprintf(file, sizeof file, "%s", phone_data);
@@ -281,10 +334,14 @@ int main(int argc, char **argv)
   printf("  %u vCPU%s, timebase %u Hz, GICD 0x%llx, GICR 0x%llx, console ns16550a at 0x%llx; boot args: %s\n", cpus,
          cpus == 1 ? "" : "s", timebase, (unsigned long long)GICD, (unsigned long long)m.gic_redist, (unsigned long long)UART, args);
   printf("  restricted DMA pool (crosvm --swiotlb %u) at PA 0x%llx\n", swiotlb_mib, (unsigned long long)pool);
+  if (display_w)
+    printf("  display: %ux%u @%ux, %u Hz; the boot video at PA 0x%llx (the pool's start, %llu bytes, %llu a row); the disks' windows from 0x%llx\n",
+           display_w, display_h, display_scale, display_hz, (unsigned long long)fb_pa, (unsigned long long)fb_bytes,
+           (unsigned long long)fb_stride, (unsigned long long)disks_pa);
   if (trust.data) printf("  trust caches: %u modules, %zu bytes; root: the OS volume %s\n", (unsigned)trust.data[0], trust.size, m.root_volume_uuid);
   for (unsigned i = 0; i < ndisk; i++)
     printf("  disk %u (PCI 00:%02x.0, config 0x%llx, DMA window 0x%llx+0x%llx): %s, %s%s%s, %s%s\n", i, PCI_FIRST_DEV + i,
-           (unsigned long long)(PCI_CAM + ((uint64_t)(PCI_FIRST_DEV + i) << 11)), (unsigned long long)(pool + i * DMA_SLICE),
+           (unsigned long long)(PCI_CAM + ((uint64_t)(PCI_FIRST_DEV + i) << 11)), (unsigned long long)(disks_pa + i * DMA_SLICE),
            (unsigned long long)DMA_SLICE, disks[i].identity.role, disks[i].writable ? phone_data : phone_image,
            disks[i].writable ? "" : "/", disks[i].writable ? "" : disks[i].rel, disks[i].writable ? "writable" : "read-only",
            disks[i].list ? ", hash list in its node" : "");

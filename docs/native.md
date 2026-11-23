@@ -425,13 +425,59 @@ virtio-gpu. AccessibilityUIServer turns at 99% of the vCPU meanwhile. `crosvm st
 on all along. The tool waited at the VM's start for the whole run (root's `sh -s` waited for its `( ... ) &` child):
 `detached_start` (adb.rs) now starts the VM's and the pool's scripts with a double fork.
 
+### The screen in the crosvm VM (step 3, 2026-11-23)
+A protected VM's host can read nothing of it but the restricted DMA pool, so the screen lies there, and the host
+reads it out of crosvm's own mapping of the pool. crosvm maps the pool apart from the RAM (a short VM before boot 3,
+`logs/pa3q-vmboot/maps1`: `6e50600000-6e50e00000 rw-s 7f800000 ... /memfd:crosvm_guest (deleted)`, the memfd's last 8
+MiB, beside `6e50e00000-6ed0600000 rw-s 00000000`, its 2040 MiB of lent RAM).
+- The loader: `xnuloader-crosvm --display 1440x3120` (with `--image`) puts the boot video (B,G,R,X, 5760 bytes a row,
+  17,971,200 bytes) at the pool's start, a 16 KiB page for the frame count right after it (`+0x1124000`), the disks'
+  windows from the next 2 MiB (`+0x1200000`); the pool is then 32 MiB unless `--swiotlb` says more. It adds
+  `offline-legacy-unit-scale=3 sheng-vsync=60 oneios-frame-seq=PA` to the boot arguments and `fb OFFSET BYTES WIDTH
+  HEIGHT STRIDE SEQ` to `OUT.disks`.
+- The kernel, native only: NativeLegacyDisplay and NativeGOPPresenter map the boot video write-back
+  (`staged/display.rs` LEGACY_BOOT_VIDEO, GOP_BOOT_VIDEO; the recorded IOKit compile line the display archive is built
+  with carries `-DXNU_ONEIOS_NATIVE=1`), as the disk driver maps its windows (`VM_WIMG_COPYBACK`): the host reads the
+  pool through a write-back mapping of the memfd, and with the guest's uncached mapping it would read stale lines (and
+  the guest's copy into Device memory costs 100+ ms a frame). After every frame written into the boot video (the
+  probe's transfer hook, `oneios_display_frame_done` in `OneiOSDisplay.cpp`) the count in that page goes up: "OFSQ"
+  and version 1, then a 64-bit count stored with release order. Without `oneios-frame-seq` nothing is mapped.
+- The bridge on the phone, `displayctl pool` (`runtime/display/README.md`, "The screen of a VM of crosvm"): finds that
+  mapping in `/proc/PID/maps` (exactly the pool's offset and size), opens its memfd through `/proc/PID/map_files`, maps
+  only the frame and the count's page, read-only, reads only resident pages (`mincore`), copies the rows that changed
+  when the count moves (four times a second before there is a count: the kernel's console) and serves them to the
+  staged display helper, a layer over One UI.
+- `phone vm-boot`: for an Image with an `fb` line it pushes the bridge, the script starts it right after the pool
+  check and ends it after the VM.
+
+**Boot 3 on the S25, 2026-11-23: the lock screen on the phone's panel** (`phone vm-boot --image
+out/crosvm/kernel-display.img --seconds 900 --thp`, `logs/pa3q-vmboot/boot3/`): `xnuloader-crosvm ... --ram-mib 2880
+--cpus 1 --args-add oneios-data-wait=1800 --image <the set> --display 1440x3120`, the pool (32 MiB) at `0x132000000`,
+boot 2's store (the seed unpacked already). The bridge found crosvm's mapping of the pool (`0x7b57a00000-0x7b59a00000`,
+offset `0xb2000000` of the 2880 MiB memfd) and the helper's layer was up seconds after crosvm started; then
+backboardd's first swap ('BGRA', 1440x3120, stride 5888), "frame 1 copied to the boot video by the CPU", "the frame
+sequence at 0x133124000", and on the phone "the guest counts its frames". **iOS's lock screen on the panel**
+(`screen1.png`, `screen2.png`: "Thu Jan 1", the clock, "Swipe up to open"), its clock moving, and **SpringBoard up
+for the whole run** (no "Too many corpses"; boot 2 without a screen: 9 starts in 900 s). The shimmer of "Swipe up to
+open" keeps the guest at about 45 frames a second, about 69 changed rows each (280 s: 7,218 frames, 7,209 flushes,
+473,868 rows): crosvm at 100% of its vCPU, the bridge at 14% of a core, the helper at 50% (its copy loop runs at
+uclamp.min 1024, the hosted path's choice); the phone from 44 to 51 °C (thermal_zone0). The date is 1970: the VM's
+clock is the phone's counter since it booted (10 h 57 min, shown as 2:57 in the guest's time zone, UTC-8); crosvm's
+RTC is not in the VM's tree yet. `crosvm stop` at 900 s; the bridge: "the VM ended after 915.4 s: 33293 frames from
+the guest, 431 scans, 33283 flushes (33283 acked), 2157250 rows copied" (36 frames a second over the run, 65 rows a
+flush), the helper "layer removed" and exited 0, One UI's launcher in front again, 45 °C a minute later. One UI ran
+on under the layer all along.
+
 ## Next
 1. The Gunyah VM fits iOS with gh_hugepage_reserve ("Verdict, revised"). Its road to an iOS guest, each step a
    test on the phone: the native kernel booted by crosvm with its console on the 8250 at `0x3f8` (done: "The native
    kernel in crosvm", boot 1); virtio over PCI with every buffer in the restricted DMA pool and the image set's disks
-   as virtio-blk from /data (done: step 2, boot 2: launchd, the 60 boot tasks, the daemons, SpringBoard); next the
-   display (crosvm's virtio-gpu, or a framebuffer the host shows), so that SpringBoard stays up; more vCPUs (PSCI
-   CPU_ON by HVC); then input and the GPU (drm2kgsl, as the hosted path's). The pool is
+   as virtio-blk from /data (done: step 2, boot 2: launchd, the 60 boot tasks, the daemons, SpringBoard); the screen
+   (done: step 3, boot 3: the boot video in the pool, the lock screen on the panel, SpringBoard stays up); next touch
+   (the panel's touches to the VM: a virtio input device, its queues in the pool), the clock (crosvm's RTC in the
+   VM's tree, or the time as a boot argument), less work per frame (the guest copies all 17 MiB of a frame for 69
+   changed rows: the differential copy, `sheng-fb-diff=1`, or the compositor's damage; the helper's copy loop at
+   uclamp.min 1024), more vCPUs (PSCI CPU_ON by HVC); then the GPU (drm2kgsl, as the hosted path's). The pool is
    grown once per boot after the temporary root (`hugepool load`, `hugepool grow`); `hugepool unload` gives the 3 GiB
    back.
    The other paths stay: the hosted one that runs today, and XNU alone (the hand-off under Samsung's protections,

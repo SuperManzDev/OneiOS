@@ -434,5 +434,8 @@ guest is still iPhone18,2 iOS 27.0.1.
   (`phone hugepool`, no restart of the phone; one panic first, ours: the insmod line lacked `pageblock_order_val`),
   gives **a 3 GiB VM, every page written and read back** (run 10). Step 1 of the road to an iOS guest there: **the
   native kernel boots in that VM** (`xnuloader-crosvm`, `phone vm-boot`, kernel 0077's ns16550a console; boot 1, 2
-  GiB, 1 vCPU) to the root device's wait, and `crosvm stop` ends it with One UI on. Next: the disks (virtio over PCI
-  through the restricted DMA pool).
+  GiB, 1 vCPU) to the root device's wait, and `crosvm stop` ends it with One UI on. Step 2, the disks (virtio over
+  PCI, every buffer in the restricted DMA pool; boot 2): launchd, the 60 boot tasks, SpringBoard in about 30 s on one
+  vCPU. Step 3, the screen (the boot video and a frame count in the pool, read by `displayctl pool` out of crosvm's
+  own mapping of it; boot 3): **iOS's lock screen on the S25's panel**, SpringBoard up for the whole run. Next:
+  touch, the clock, less work per frame, more vCPUs.

@@ -1271,8 +1271,9 @@ oneios-tool phone cpu [--trace S] [--out F]   # cores, domains, top and capped c
 oneios-tool phone hw [--out DIR]              # the hardware map: fdt.dtb, iomem, partitions, kernel.config, Gunyah/AVF (read only)
 oneios-tool phone vm-probe [--payload F] [--mem MIB] [--timeout S] [--thp] [--out DIR]
                                               # runtime/vmprobe's payload once as a protected VM under Gunyah (AVF's crosvm)
-oneios-tool phone vm-boot [--image F] [--seconds S] [--thp] [--out DIR]   # the native kernel (xnuloader-crosvm's Image)
-                                              #   in such a VM, its console live; vm-boot --stop ends it sooner
+oneios-tool phone vm-boot [--image F] [--seconds S] [--thp] [--out DIR] [--bridge F]   # the native kernel
+                                              #   (xnuloader-crosvm's Image) in such a VM, its console live, its screen
+                                              #   on a layer when the Image has one; vm-boot --stop ends it sooner
 oneios-tool phone dmesg [--grep RE] [--tail N]  # the kernel's log, filtered on the PC (read only)
 oneios-tool phone hugeblocks [--free]        # free memory in 2 MiB blocks; --free: drop the file cache and compact first
 oneios-tool phone hugepool status|load|grow|unload  # gh_hugepage_reserve: load [--want N]; grow --want N stops One UI and starts it again
@@ -1624,10 +1625,22 @@ DIR (`phone-vmboot`), prints the run's disk, store and pool lines and crosvm's l
   `restricted_dma_reserved@ADDR` in it: the pool where the kernel's DMA windows are. When it is not there the VM is
   stopped at once (`stop.request`) and the result says `refused pool` (a protected VM's host faults on a device access
   outside the pool; crosvm writes the tree before its vCPU starts, the kernel's disks start seconds later).
+- The screen: an Image made with `xnuloader-crosvm --display WxH` lists `fb OFFSET BYTES WIDTH HEIGHT STRIDE SEQ` (in
+  the pool: the frame 16 KiB aligned and `STRIDE * HEIGHT` bytes, the frame count's 16 KiB page after it, both inside
+  the pool; anything else is refused). The tool then pushes `--bridge` (default
+  `runtime/display/build/android/displayctl`, refused when it is not there: `make -C runtime/display`) into the VM's
+  folder, and the script starts `displayctl pool` (`runtime/display/README.md`) right after the pool check passed, with
+  crosvm's pid, the pool's offset in crosvm's memfd (the pool's address less the RAM's base) and size, the frame, the
+  count and the staged runtime's helper (`runtime/bin/oneios-display`): the VM's screen on a layer over One UI, its log
+  `display.txt` (copied into DIR). Touches still go to One UI under the layer. After the VM the script waits for the
+  bridge (it ends when crosvm's process is gone), asks it to end after 3 s and ends it after 8 s; the VM check also
+  refuses while a `displayctl pool` runs. The live console: the poll's status no longer comes from its last command
+  (`cat result`, missing while the VM runs: boot 3 printed the console only at the end).
 
-5 unit tests (`vmboot::tests`: the label with and without the pool; the disks list's refusals; stop before kill, the
-stop request, THP written back; the disks' checks before crosvm and the pool check right after it; the script parses
-under `bash --posix -n`, `sh -n` and `dash -n`). Boot 1 on the S25 (2026-11-23, 2 GiB, 1 vCPU, 90 s, no disk): the
+7 unit tests (`vmboot::tests`: the label with and without the pool; the disks list's refusals; stop before kill, the
+stop request, THP written back; the disks' checks before crosvm and the pool check right after it; the `fb` line in the
+pool and its refusals; the bridge after the pool check and before the main wait, ended after the VM, absent without a
+screen; the scripts parse under `bash --posix -n`, `sh -n` and `dash -n`). Boot 1 on the S25 (2026-11-23, 2 GiB, 1 vCPU, 90 s, no disk): the
 kernel's whole start up to the root device's wait, `crosvm stop` at 90 s, One UI on (`docs/native.md` "The native
 kernel in crosvm").
 

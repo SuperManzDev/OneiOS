@@ -9,7 +9,8 @@ pub const DISPLAY: &[(&str, &str)] = &[
              "extern \"C\" void oneios_display_frame_seen(unsigned,uint64_t,uint64_t);\n",
              "extern \"C\" void oneios_display_swap_seen(bool,unsigned,const void *);\n",
              "extern \"C\" bool oneios_display_wide(void);\n",
-             "extern \"C\" bool oneios_virtio_gpu_offer_format(void *,IOMemoryDescriptor *,uint64_t,uint32_t,uint32_t,uint32_t);\n")),
+             "extern \"C\" bool oneios_virtio_gpu_offer_format(void *,IOMemoryDescriptor *,uint64_t,uint32_t,uint32_t,uint32_t);\n",
+             "extern \"C\" void oneios_display_frame_done(void);\n")),
     // the bindings are for one kernel collection: nothing is registered under another class
     ("    native_legacy_stage=1;void *handle=OSMetaClass::preModLoad(g_kernel_kmod_info.name);\n",
      concat!("    native_legacy_stage=1;if(!oneios_display_parent_bound()){native_legacy_display_checkpoint();return;}\n",
@@ -32,6 +33,11 @@ pub const DISPLAY: &[(&str, &str)] = &[
     ("    offeredToVirtioDisplay=format==1 && droidvm_virtio_gpu_offer(display,memory,stride,width,height);\n",
      concat!("    offeredToVirtioDisplay=(format==1 || (format==2 && oneios_display_wide())) &&\n",
              "        oneios_virtio_gpu_offer_format(display,memory,stride,width,height,format);\n")),
+    // every frame written into the boot video (a copy, a blank) counts in the page a VM's host polls (OneiOSDisplay.cpp
+    // oneios_display_frame_done: only with boot argument oneios-frame-seq, which xnuloader-crosvm --display gives)
+    ("    native_legacy_transfer_status=status;native_legacy_transfer_request=(uintptr_t)request;native_legacy_transfer_bytes=bytes;\n",
+     concat!("    native_legacy_transfer_status=status;native_legacy_transfer_request=(uintptr_t)request;native_legacy_transfer_bytes=bytes;\n",
+             "    if(status==kIOReturnSuccess)oneios_display_frame_done();\n")),
 ];
 
 /// The virtio scanout client's lines that change (DroidVMVirtioGpuDisplay.cpp): a resource and a frame carry their
@@ -81,3 +87,30 @@ pub const SCANOUT: &[(&str, &str)] = &[
      concat!("        pending = {service, memory, stride, width, height, droidvm_virtgpu_submitted(), droidvm_virtgpu_holds(), pid,\n",
              "                   format == 2 ? OneiOSHalf : 0};\n")),
 ];
+
+/// UniXNU's NativeLegacyDisplay.cpp: its GOP path maps the boot video write-back in the native kernel. In a VM of
+/// Android's crosvm the boot video lies in the restricted DMA pool, which the host reads through a write-back mapping of
+/// crosvm's memfd: a non-cacheable one in the guest would leave the host reading stale lines (docs/native.md, "A VM under
+/// Gunyah", the display). The hosted kernel and the bench keep kIOMapInhibitCache.
+pub const LEGACY_BOOT_VIDEO: &[(&str, &str)] = &[(
+    "        IOMemoryMap *mapping=provider->mapDeviceMemoryWithIndex(0,kIOMapInhibitCache);\n",
+    concat!(
+        "#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE\n",
+        "        IOMemoryMap *mapping=provider->mapDeviceMemoryWithIndex(0,kIOMapCopybackCache); // OneiOS native: crosvm's pool\n",
+        "#else\n",
+        "        IOMemoryMap *mapping=provider->mapDeviceMemoryWithIndex(0,kIOMapInhibitCache);\n",
+        "#endif\n"
+    ),
+)];
+
+/// UniXNU's NativeGOPPresenter.cpp: the same for the presenter's own mapping of the boot video.
+pub const GOP_BOOT_VIDEO: &[(&str, &str)] = &[(
+    "    mapping=(memorySource?memorySource:provider)->mapDeviceMemoryWithIndex(0,kIOMapInhibitCache);\n",
+    concat!(
+        "#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE\n",
+        "    mapping=(memorySource?memorySource:provider)->mapDeviceMemoryWithIndex(0,kIOMapCopybackCache); // OneiOS native: crosvm's pool\n",
+        "#else\n",
+        "    mapping=(memorySource?memorySource:provider)->mapDeviceMemoryWithIndex(0,kIOMapInhibitCache);\n",
+        "#endif\n"
+    ),
+)];

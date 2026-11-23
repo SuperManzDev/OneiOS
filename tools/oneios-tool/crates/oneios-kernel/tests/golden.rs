@@ -99,6 +99,27 @@ fn the_display_edits_fit_the_pinned_sources() {
 }
 
 #[test]
+fn the_boot_video_edits_fit_the_pinned_sources() {
+    // native, 2026-11-23: the boot video write-back in the native kernel (staged/display.rs LEGACY_BOOT_VIDEO,
+    // GOP_BOOT_VIDEO): in crosvm's restricted DMA pool the host reads it write-back. The hosted kernel keeps the old.
+    let display = repo().join("external/NativeMobileDisplay");
+    let (legacy, gop) = (display.join("NativeLegacyDisplay.cpp"), display.join("NativeGOPPresenter.cpp"));
+    if !legacy.exists() || !gop.exists() {
+        eprintln!("external/NativeMobileDisplay is not here: the boot video edits were not checked");
+        return;
+    }
+    for staged in [
+        build_oneios_display::staged_legacy(std::fs::read_to_string(&legacy).unwrap()).unwrap(),
+        build_oneios_display::staged_gop(std::fs::read_to_string(&gop).unwrap()).unwrap(),
+    ] {
+        let at = staged.find("#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE\n").unwrap();
+        let block = &staged[at..at + staged[at..].find("#endif\n").unwrap()];
+        assert!(block.contains("kIOMapCopybackCache") && block.contains("#else\n") && block.contains("kIOMapInhibitCache"));
+        assert_eq!(staged.matches("kIOMapCopybackCache); // OneiOS native: crosvm's pool").count(), 1);
+    }
+}
+
+#[test]
 fn the_transport_edits_fit_the_pinned_source() {
     // native, 2026-11-20: the virtio-gpu transport's control queue as long as the device takes (staged/gpu.rs TRANSPORT),
     // against the real DroidVMVirtioGpu.cpp where external/ has it; the kernel build applies the same list and stops on a

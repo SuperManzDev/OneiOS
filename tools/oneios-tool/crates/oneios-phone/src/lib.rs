@@ -140,6 +140,9 @@ pub enum Command {
         /// Stop the running VM now (crosvm stop through its socket) instead
         #[arg(long)]
         stop: bool,
+        /// The screen's bridge, for an Image made with --display (runtime/display: make)
+        #[arg(long, value_name = "FILE", default_value = "runtime/display/build/android/displayctl")]
+        bridge: String,
     },
     /// One run of runtime/vmprobe's payload as a protected VM under Gunyah with AVF's crosvm: 1 vCPU, no device but
     /// the serial port; it powers off by itself, else crosvm stop after SECONDS. Refused during a session
@@ -400,8 +403,8 @@ pub fn main(cli: Cli) -> i32 {
             HugepoolCommand::Acquire { want, mode, seconds } => hugepool::acquire(&adb, want, mode, seconds),
             HugepoolCommand::Unload => hugepool::unload(&adb),
         }),
-        Command::VmBoot { image, seconds, thp, out, stop } => Adb::connect(serial).and_then(|adb| {
-            if stop { vmboot::stop(&adb) } else { vmboot::vm_boot(&adb, &image, &out, &vmboot::Options { seconds, thp }) }
+        Command::VmBoot { image, seconds, thp, out, stop, bridge } => Adb::connect(serial).and_then(|adb| {
+            if stop { vmboot::stop(&adb) } else { vmboot::vm_boot(&adb, &image, &out, &vmboot::Options { seconds, thp, bridge }) }
         }),
         Command::VmProbe { payload, mem, timeout, out, thp } => {
             Adb::connect(serial).and_then(|adb| vmprobe::vm_probe(&adb, &payload, &out, &vmprobe::Options { mem, timeout, thp }))

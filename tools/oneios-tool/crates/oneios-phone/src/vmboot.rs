@@ -20,6 +20,13 @@
 //! control socket after SECONDS or at `stop.request` (`vm-boot --stop`), kills it only when that does not end it, and
 //! writes `result`. The tool prints `serial.txt` as it grows, then keeps `serial.txt`, `crosvm.log`, `dmesg.txt`,
 //! `run.txt` and `fdt.dtb` in DIR.
+//!
+//! The screen: an Image made with xnuloader-crosvm --display has the boot video at the start of the pool and the
+//! guest's frame count after it (FILE.disks: `fb OFFSET BYTES WIDTH HEIGHT STRIDE SEQ`, offsets in the pool). The tool
+//! then pushes runtime/display's displayctl (`--bridge`) beside the Image, and the script starts it the moment the pool
+//! check passed: `displayctl pool` maps only that part of crosvm's pool and serves it to the staged display helper
+//! (runtime/bin/oneios-display), a layer over One UI that goes away when the VM ends. Touches still go to One UI under
+//! it. Its log is `display.txt`.
 use crate::adb::Adb;
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
@@ -71,6 +78,19 @@ pub struct Disks {
     pub store_gib: u32,
     /// The size the phone's file must have (None: the writable store) and crosvm's --block value.
     pub blocks: Vec<(Option<u64>, String)>,
+    /// The boot video and the frame count in the pool (xnuloader-crosvm --display).
+    pub fb: Option<Fb>,
+}
+
+/// `fb OFFSET BYTES WIDTH HEIGHT STRIDE SEQ`: offsets in the pool, the frame first, the count's page after it.
+#[derive(Debug, PartialEq)]
+pub struct Fb {
+    pub offset: u64,
+    pub bytes: u64,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub seq: u64,
 }
 
 /// A value the phone's shell and crosvm's key=value parser take as it is: no blank, quote or shell character.
@@ -79,25 +99,43 @@ fn plain(text: &str) -> bool {
 }
 
 pub fn parse_disks(text: &str) -> Result<Disks> {
-    let (mut swiotlb, mut pool, mut store) = (None, None, None);
+    let (mut swiotlb, mut pool, mut store, mut fb) = (None, None, None, None);
     let mut blocks = Vec::new();
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
-        let mut words = line.split_whitespace();
-        match (words.next(), words.next(), words.next(), words.next()) {
-            (Some("swiotlb-mib"), Some(v), None, None) => swiotlb = Some(v.parse::<u32>().context("swiotlb-mib")?),
-            (Some("pool"), Some(v), None, None) => {
-                pool = Some(u64::from_str_radix(v.strip_prefix("0x").context("pool 0x...")?, 16).context("pool")?)
-            }
-            (Some("store"), Some(path), Some(gib), None) => store = Some((path.to_string(), gib.parse::<u32>().context("store GIB")?)),
-            (Some("block"), Some(size), Some(value), None) => {
-                let size = if size == "-" { None } else { Some(size.parse::<u64>().context("block BYTES")?) };
+        let words: Vec<&str> = line.split_whitespace().collect();
+        match words.as_slice() {
+            ["swiotlb-mib", v] => swiotlb = Some(v.parse::<u32>().context("swiotlb-mib")?),
+            ["pool", v] => pool = Some(u64::from_str_radix(v.strip_prefix("0x").context("pool 0x...")?, 16).context("pool")?),
+            ["store", path, gib] => store = Some((path.to_string(), gib.parse::<u32>().context("store GIB")?)),
+            ["block", size, value] => {
+                let size = if *size == "-" { None } else { Some(size.parse::<u64>().context("block BYTES")?) };
                 blocks.push((size, value.to_string()));
             }
-            _ => bail!("a line of the disks list that is not one of swiotlb-mib, pool, store, block: {line:?}"),
+            ["fb", offset, bytes, width, height, stride, seq] => {
+                fb = Some(Fb {
+                    offset: offset.parse().context("fb OFFSET")?,
+                    bytes: bytes.parse().context("fb BYTES")?,
+                    width: width.parse().context("fb WIDTH")?,
+                    height: height.parse().context("fb HEIGHT")?,
+                    stride: stride.parse().context("fb STRIDE")?,
+                    seq: seq.parse().context("fb SEQ")?,
+                })
+            }
+            _ => bail!("a line of the disks list that is not one of swiotlb-mib, pool, store, block, fb: {line:?}"),
         }
     }
     let (store, store_gib) = store.context("no store line")?;
-    let d = Disks { swiotlb: swiotlb.context("no swiotlb-mib line")?, pool: pool.context("no pool line")?, store, store_gib, blocks };
+    let d = Disks { swiotlb: swiotlb.context("no swiotlb-mib line")?, pool: pool.context("no pool line")?, store, store_gib, blocks, fb };
+    if let Some(f) = &d.fb {
+        // as displayctl pool takes them: the frame page aligned at the pool's start or after, the count after it
+        let pool_bytes = (d.swiotlb as u64) << 20;
+        let ok = (16..=16384).contains(&f.width) && (16..=16384).contains(&f.height) && f.stride as u64 >= f.width as u64 * 4
+            && f.bytes == f.stride as u64 * f.height as u64 && f.offset % 16384 == 0 && f.seq % 16384 == 0
+            && f.seq >= f.offset + f.bytes && f.seq + 16384 <= pool_bytes;
+        if !ok {
+            bail!("the fb line {f:?} does not lie in the pool of {} MiB as the frame and then its count", d.swiotlb);
+        }
+    }
     if d.blocks.is_empty() || d.blocks.len() > 5 || !(1..=256).contains(&d.store_gib) {
         bail!("1 to 5 disks and a store of 1 to 256 GiB");
     }
@@ -128,6 +166,33 @@ pub fn boot_script(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Option<
     let mut checks = String::new();
     let mut blocks = String::new();
     let mut pool_check = String::new();
+    let (mut bridge_start, mut bridge_end) = (String::new(), String::new());
+    if let Some((d, f)) = disks.and_then(|d| d.fb.as_ref().map(|f| (d, f))) {
+        // The screen, once crosvm's tree shows the pool where the Image put it: the bridge maps only the frame and its
+        // count of the pool (displayctl pool), the helper is the staged runtime's
+        bridge_start = format!(
+            "bridge=\nif [ \"$pool\" != bad ] && kill -0 $pid 2>/dev/null; then\n  \
+             if [ -x $D/displayctl ] && [ -x $H ]; then\n    \
+             TMPDIR=$D $D/displayctl pool --pid $pid --pool-offset {po} --pool-bytes {pb} --fb-offset {fo} --size {w}x{h} --stride {s} \
+             --seq-offset {sq} --helper $H </dev/null >>$D/display.txt 2>&1 &\n    \
+             bridge=$!\n    echo \"display: the bridge ($bridge) shows the VM's screen on a layer over One UI: display.txt\"\n  \
+             else\n    echo \"display: no $D/displayctl or no $H: the VM runs without its screen\"\n  fi\nfi\n",
+            po = d.pool - RAM_BASE,
+            pb = (d.swiotlb as u64) << 20,
+            fo = f.offset,
+            w = f.width,
+            h = f.height,
+            s = f.stride,
+            sq = f.seq
+        );
+        // After the VM: the bridge sees crosvm gone and closes its session (the layer goes); a bridge still there after
+        // 3 s is asked to end, and after 8 s ended
+        bridge_end = "if [ -n \"$bridge\" ]; then\n  \
+             t=0; while [ $t -lt 8 ] && kill -0 $bridge 2>/dev/null; do [ $t = 3 ] && kill -TERM $bridge 2>/dev/null; sleep 1; t=$((t + 1)); done\n  \
+             kill -0 $bridge 2>/dev/null && kill -9 $bridge 2>/dev/null\n  wait $bridge 2>/dev/null\n  \
+             echo \"display: $(grep -E '^displayctl pool: (the VM ended|time is up|stopped|the helper left)' $D/display.txt | tail -n 1)\"\nfi\n"
+            .to_string();
+    }
     if let Some(d) = disks {
         for (size, value) in &d.blocks {
             blocks += &format!(" \\\n  --block {value}");
@@ -163,13 +228,14 @@ pub fn boot_script(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Option<
     format!(
         r#"D={DIR}
 C=/apex/com.android.virt/bin/crosvm
+H={stage}/runtime/bin/oneios-display
 exec >>$D/run.txt 2>&1 </dev/null
 cd $D || exit 1
 end() {{ echo "$*" > $D/result; }}
 got=$(sha256sum kernel.img | cut -d' ' -f1)
 [ "$got" = "{sha}" ] || {{ echo "sha256 $got, not {sha}"; end "refused sha256"; exit 1; }}
 [ -c /dev/gunyah ] || {{ echo "no /dev/gunyah"; end "refused no /dev/gunyah"; exit 1; }}
-{checks}rm -f serial.txt crosvm.log crosvm.sock fdt.dtb dmesg.txt stop.request
+{checks}rm -f serial.txt crosvm.log crosvm.sock fdt.dtb dmesg.txt display.txt stop.request
 ulimit -l unlimited 2>/dev/null || echo "ulimit -l unlimited: refused"
 T=/sys/kernel/mm/transparent_hugepage
 thp_done=1
@@ -200,7 +266,7 @@ $C --log-level debug run --disable-sandbox --no-balloon --no-rng --no-usb --hype
   --socket $D/crosvm.sock --serial type=file,hardware=serial,num=1,path=$D/serial.txt,console \
   --dump-device-tree-blob $D/fdt.dtb{blocks} $D/kernel.img </dev/null >$D/crosvm.log 2>&1 &
 pid=$!
-{pool_check}t=0
+{pool_check}{bridge_start}t=0
 while [ $t -lt {seconds} ] && [ ! -e $D/stop.request ] && kill -0 $pid 2>/dev/null; do sleep 1; t=$((t + 1)); done
 how=itself
 if kill -0 $pid 2>/dev/null; then
@@ -210,17 +276,20 @@ fi
 if kill -0 $pid 2>/dev/null; then how=kill; kill -9 $pid; fi
 wait $pid; rc=$?
 thp_restore
-echo "end $(date +%s) up $(cut -d' ' -f1 /proc/uptime) how $how exit $rc"
+{bridge_end}echo "end $(date +%s) up $(cut -d' ' -f1 /proc/uptime) how $how exit $rc"
 dmesg 2>/dev/null | grep -i -E 'gunyah|folio|gh_|crosvm|scm|memextent' | tail -n 80 > $D/dmesg.txt
 if [ "$pool" = bad ]; then end "refused pool: end how $how exit $rc"; else end "end how $how exit $rc"; fi
 "#,
-        thp = if thp { 1 } else { 0 }
+        thp = if thp { 1 } else { 0 },
+        stage = crate::adb::STAGE
     )
 }
 
 pub struct Options {
     pub seconds: u32,
     pub thp: bool,
+    /// displayctl for the phone, pushed when the Image has a screen
+    pub bridge: String,
 }
 
 /// `phone vm-boot --stop`: ask the running VM's script to stop it now (crosvm stop through its socket).
@@ -255,7 +324,13 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
     let sha = format!("{:x}", Sha256::digest(&data));
     adb.need_root()?;
     adb.refuse_in_session()?;
-    let up = adb.root_ok("ps -A -o PID=,ARGS= | grep -F 'oneios-vm' | grep -F crosvm | grep -v grep || true\n", "the VM check")?;
+    if disks.as_ref().is_some_and(|d| d.fb.is_some()) && !Path::new(&o.bridge).is_file() {
+        bail!("the Image has a screen and {} is not there: make -C runtime/display (or name it with --bridge)", o.bridge);
+    }
+    let up = adb.root_ok(
+        "ps -A -o PID=,ARGS= | grep -F -e 'oneios-vm' -e 'displayctl pool' | grep -F -e crosvm -e displayctl | grep -v grep || true\n",
+        "the VM check",
+    )?;
     if !up.trim().is_empty() {
         bail!("a VM of ours is still up on the phone: {}", up.trim());
     }
@@ -269,6 +344,11 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
     adb.root_ok(&format!("mkdir -p {DIR} && chmod 777 {DIR} && rm -f {DIR}/result {DIR}/run.txt {DIR}/serial.txt\n"), "the VM's folder")?;
     println!("vm-boot: {} MiB Image, sha256 {sha}: pushing", data.len() >> 20);
     adb.push(image, &format!("{DIR}/kernel.img"))?;
+    if let Some(f) = disks.as_ref().and_then(|d| d.fb.as_ref()) {
+        adb.push(&o.bridge, &format!("{DIR}/displayctl"))?;
+        adb.root_ok(&format!("chmod 755 {DIR}/displayctl\n"), "the bridge's mode")?;
+        println!("vm-boot: the screen ({}x{}) on a layer over One UI while the VM runs (touches still go to One UI under it)", f.width, f.height);
+    }
     fs::create_dir_all(out).with_context(|| format!("cannot make {out}"))?;
     let script = Path::new(out).join("boot.sh");
     fs::write(&script, boot_script(&l, o.seconds, o.thp, &sha, disks.as_ref()))?;
@@ -295,7 +375,7 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
             bail!("no end after {} s: read {DIR}/run.txt", t0.elapsed().as_secs());
         }
         let r = match adb.root(&format!(
-            "tail -c +{} {DIR}/serial.txt 2>/dev/null | head -c 262144; echo; echo '=== oneios result'; cat {DIR}/result 2>/dev/null\n",
+            "tail -c +{} {DIR}/serial.txt 2>/dev/null | head -c 262144; echo; echo '=== oneios result'; cat {DIR}/result 2>/dev/null; true\n",
             shown + 1
         )) {
             Ok(r) if r.ok() => r,
@@ -314,7 +394,7 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
         }
     };
     println!();
-    for name in ["serial.txt", "crosvm.log", "dmesg.txt", "run.txt", "fdt.dtb"] {
+    for name in ["serial.txt", "crosvm.log", "dmesg.txt", "run.txt", "fdt.dtb", "display.txt"] {
         let path = Path::new(out).join(name);
         let mut child = adb.exec_out(&format!("su -c 'cat {DIR}/{name}'"))?;
         let mut file = fs::File::create(&path)?;
@@ -322,7 +402,9 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
         child.wait()?;
     }
     let run = fs::read_to_string(Path::new(out).join("run.txt")).unwrap_or_default();
-    for line in run.lines().filter(|l| l.starts_with("disk") || l.starts_with("store:") || l.starts_with("pool:") || l.starts_with("/data:")) {
+    for line in run.lines().filter(|l| {
+        l.starts_with("disk") || l.starts_with("store:") || l.starts_with("pool:") || l.starts_with("/data:") || l.starts_with("display:")
+    }) {
         println!("vm-boot: {line}");
     }
     let log = fs::read_to_string(Path::new(out).join("crosvm.log")).unwrap_or_default();
@@ -416,11 +498,56 @@ mod tests {
         assert!(s.contains("end \"refused pool: end how $how exit $rc\""));
     }
 
+    /// xnuloader-crosvm --display's list (2880 MiB, a pool of 32 MiB: the frame at its start, the count at 17973248).
+    const SCREEN: &str = "swiotlb-mib 32\npool 0x132000000\nstore /data/local/tmp/oneios-vmboot/data.img 16\n\
+        fb 0 17971200 1440 3120 5760 17973248\n\
+        block 10359930880 path=/data/local/tmp/oneios/image/os.img,ro=true,id=os,pci-address=00:02.0\n\
+        block - path=/data/local/tmp/oneios-vmboot/data.img,ro=false,id=data,pci-address=00:06.0\n";
+
+    #[test]
+    fn the_screen_is_in_the_pool() {
+        let d = parse_disks(SCREEN).unwrap();
+        assert_eq!(d.fb, Some(Fb { offset: 0, bytes: 17971200, width: 1440, height: 3120, stride: 5760, seq: 17973248 }));
+        assert_eq!(parse_disks(DISKS).unwrap().fb, None);
+        // the count inside the frame, past the pool's end, a frame that is not stride x height, an odd offset
+        assert!(parse_disks(&SCREEN.replace(" 17973248\n", " 16384\n")).is_err());
+        assert!(parse_disks(&SCREEN.replace(" 17973248\n", " 33554432\n")).is_err());
+        assert!(parse_disks(&SCREEN.replace("fb 0 17971200", "fb 0 17971204")).is_err());
+        assert!(parse_disks(&SCREEN.replace("fb 0 17971200", "fb 4096 17971200")).is_err());
+        assert!(parse_disks(&SCREEN.replace("fb 0 17971200 1440 3120 5760 17973248", "fb 0 17971200 1440 3120")).is_err());
+    }
+
+    #[test]
+    fn the_bridge_starts_after_the_pool_check_and_ends_after_the_vm() {
+        let d = parse_disks(SCREEN).unwrap();
+        let l = Label { ram: 2880, cpus: 1, swiotlb: 32 };
+        let s = boot_script(&l, 900, true, "ab12", Some(&d));
+        let pool = s.find("grep -q -F restricted_dma_reserved@132000000 $D/fdt.dtb").unwrap();
+        let bridge = s.find("TMPDIR=$D $D/displayctl pool --pid $pid").unwrap();
+        let wait = s.find("while [ $t -lt 900 ]").unwrap();
+        assert!(pool < bridge && bridge < wait);
+        // the pool's offset in the memfd and its size, the frame and the count; the staged helper
+        assert!(s.contains("--pool-offset 2986344448 --pool-bytes 33554432 --fb-offset 0 --size 1440x3120 --stride 5760 --seq-offset 17973248 --helper $H"));
+        assert!(s.contains("H=/data/local/tmp/oneios/runtime/bin/oneios-display\n"));
+        assert!(s.contains("if [ \"$pool\" != bad ] && kill -0 $pid 2>/dev/null; then"));
+        // after the VM, the bridge is waited for, asked to end, then ended
+        let end = s.find("if [ -n \"$bridge\" ]; then").unwrap();
+        assert!(s.find("wait $pid; rc=$?\nthp_restore\n").unwrap() < end);
+        assert!(s[end..].find("kill -TERM $bridge").unwrap() < s[end..].find("kill -9 $bridge").unwrap());
+        assert!(s.contains("--swiotlb 32 --hugepages --mem size=2880"));
+        assert!(!boot_script(&l, 60, true, "x", Some(&parse_disks(DISKS).unwrap())).contains("displayctl"));
+    }
+
     #[test]
     fn the_boot_parses_as_posix_sh() {
         let d = parse_disks(DISKS).unwrap();
+        let screen = parse_disks(SCREEN).unwrap();
         let l = Label { ram: 3072, cpus: 1, swiotlb: 8 };
-        for (n, script) in [boot_script(&l, 600, true, "ab12", Some(&d)), boot_script(&l, 60, false, "ab12", None)].iter().enumerate() {
+        let l32 = Label { ram: 2880, cpus: 1, swiotlb: 32 };
+        for (n, script) in [boot_script(&l, 600, true, "ab12", Some(&d)), boot_script(&l, 60, false, "ab12", None), boot_script(&l32, 900, true, "ab12", Some(&screen))]
+            .iter()
+            .enumerate()
+        {
             let path = std::env::temp_dir().join(format!("oneios-vmboot-{}-{n}.sh", std::process::id()));
             fs::write(&path, script).unwrap();
             for shell in ["bash", "sh", "dash"] {

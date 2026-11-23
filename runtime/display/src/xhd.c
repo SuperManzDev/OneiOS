@@ -295,3 +295,73 @@ int xhd_memfd(const char *name, size_t bytes)
   if (ftruncate(fd, (off_t)bytes)) { int e = errno; close(fd); return -e; }
   return fd;
 }
+
+int xhd_pool_mapping(const char *maps, uint64_t offset, uint64_t bytes, uint64_t *start, uint64_t *end, uint64_t *inode)
+{
+  static const char name[] = "/memfd:crosvm_guest";
+  for (const char *line = maps; line && *line;) {
+    const char *next = strchr(line, '\n');
+    size_t length = next ? (size_t)(next - line) : strlen(line);
+    char text[512];
+    if (length < sizeof text) {
+      memcpy(text, line, length);
+      text[length] = 0;
+      unsigned long long s, e, off, ino;
+      unsigned major, minor;
+      char perms[8];
+      int at = 0;
+      if (sscanf(text, "%llx-%llx %7s %llx %x:%x %llu %n", &s, &e, perms, &off, &major, &minor, &ino, &at) == 7 && at > 0 &&
+          strlen(perms) == 4 && perms[0] == 'r' && perms[3] == 's' && off == offset && e > s && e - s == bytes &&
+          !strncmp(text + at, name, sizeof name - 1) && (text[at + sizeof name - 1] == 0 || text[at + sizeof name - 1] == ' ')) {
+        *start = s;
+        *end = e;
+        *inode = ino;
+        return 0;
+      }
+    }
+    line = next ? next + 1 : NULL;
+  }
+  return -ENOENT;
+}
+
+static void invalidate_lines(const uint8_t *p, size_t n)
+{
+#if defined(__aarch64__)
+  // EL0 may clean and invalidate by VA on Linux (SCTLR_EL1.UCI); it needs only read permission. DminLine: log2 words.
+  uint64_t ctr;
+  __asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
+  const uintptr_t line = (uintptr_t)4 << ((ctr >> 16) & 0xf);
+  for (uintptr_t a = (uintptr_t)p & ~(line - 1); a < (uintptr_t)p + n; a += line) __asm__ volatile("dc civac, %0" ::"r"(a) : "memory");
+  __asm__ volatile("dsb ish" ::: "memory");
+#else
+  (void)p;
+  (void)n;
+#endif
+}
+
+uint32_t xhd_pool_copy(uint8_t *dst, const uint8_t *src, uint32_t width, uint32_t height, uint32_t stride,
+                       const unsigned char *resident, size_t page_size, int invalidate, struct xhd_rect *changed)
+{
+  const size_t row = (size_t)width * 4;
+  uint32_t first = 0, last = 0, rows = 0;
+  for (uint32_t y = 0; y < height; y++) {
+    const size_t at = (size_t)y * stride;
+    int in = 1;
+    for (size_t p = at / page_size; in && p <= (at + row - 1) / page_size; p++) in = resident[p] & 1;
+    if (!in) continue;
+    if (invalidate) invalidate_lines(src + at, row);
+    if (!memcmp(dst + at, src + at, row)) continue;
+    memcpy(dst + at, src + at, row);
+    if (!rows++) first = y;
+    last = y;
+  }
+  *changed = rows ? (struct xhd_rect){ 0, first, width, last - first + 1 } : (struct xhd_rect){ 0, 0, 0, 0 };
+  return rows;
+}
+
+int xhd_frame_seq(const uint8_t *page, uint64_t *count)
+{
+  if (__atomic_load_n((const uint64_t *)page, __ATOMIC_ACQUIRE) != XHD_FRAME_SEQ_MAGIC) return 0;
+  *count = __atomic_load_n((const uint64_t *)(page + 8), __ATOMIC_ACQUIRE);
+  return 1;
+}

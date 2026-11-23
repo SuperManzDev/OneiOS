@@ -27,7 +27,7 @@ or the SDK the NDK is in). No `android.jar`: the Java source reaches the framewo
 | `src/jni.c` | `liboneios-display.so`: the socket, the mapped frame, the copy into the layer's buffers, the stop signals |
 | `java/OneiOSDisplay.java` | `oneios-display.dex`: the layers (`SurfaceControl`, `BLASTBufferQueue`), the panel's mode, the placement |
 | `src/launcher.c` | `oneios-display`: finds the dex and the library next to itself and execs `app_process` (same pid) |
-| `src/displayctl.c` | `displayctl`: the phone test; stands in for xnuhost with a moving pattern |
+| `src/displayctl.c` | `displayctl`: the phone test (`test`: stands in for xnuhost with a moving pattern) and the screen of a VM of crosvm (`pool`) |
 | `tests/test_display.c` | the host tests |
 
 ## How the layer is made, and why
@@ -210,6 +210,35 @@ extended sRGB: components below 0 and above 1), white at 1.0, white at 2.0. What
 - the line `panel colour mode ...; HDR types ..., luminance max ...`: the panel's own numbers (what the guest's EDR
   headroom and nits should be set from, `drivers/brightness`).
 - after it, One UI's colours, brightness and resolution as before (nothing of the display was changed).
+
+## The screen of a VM of crosvm: `displayctl pool`
+
+The native path (`docs/native.md`, the display) boots the native kernel in a protected VM of Android's own crosvm. Such
+a VM's memory is lent to the guest, and the host faults on an access to it, all but crosvm's restricted DMA pool:
+`xnuloader-crosvm --display WxH` puts the boot video at the pool's start (B,G,R,X, `W * 4` bytes a row) and a page for
+the guest's frame count after it, and the kernel's display driver copies every frame into the boot video (mapped
+write-back in the native kernel) and then counts it (`OneiOSDisplay.cpp` `oneios_display_frame_done`). `oneios-tool
+phone vm-boot` starts the bridge beside crosvm:
+
+```sh
+displayctl pool --pid CROSVM --pool-offset N --pool-bytes N --size 1440x3120 --stride 5760 --seq-offset N [--fb-offset 0]
+                [--seconds N] [--helper PATH] [-- helper options]
+```
+
+It finds crosvm's own mapping of the pool in `/proc/PID/maps` (a shared mapping of `/memfd:crosvm_guest` at the
+pool's offset, exactly the pool's size: anything else is refused), opens the memfd through `/proc/PID/map_files`
+(checked: the same inode, long enough), and maps **only** the frame and the count's page, read-only. It serves a frame
+of its own (a memfd) to the helper as `test` does (the same session folder, the same refusal of `--takeover` and the
+other disruptive options). While the guest has not counted a frame yet (the kernel's console during boot) it compares
+the frame four times a second, its cache lines cleaned and invalidated first (the console writes uncached); once the
+count is there, it copies when the count moves, and every 2 s as well. Only rows whose pages are resident are read
+(`mincore`: no read makes the host allocate the VM's memory) and only rows that changed are written and flushed (one
+band), each after the helper's ack of the last. It polls the count every 2 ms while frames come and every 16 ms when the
+screen is still. It ends when crosvm's process is gone (or a zombie), at `--seconds`, on SIGTERM or SIGINT; the layer
+goes with the socket. `--test-guest FILE` is for the host tests only: a plain file stands for the memfd (never one
+under `/proc` or `/dev`). The host tests (`make test`) check the maps lookup on crosvm's lines from the S25, the
+row copy with a page that is not resident, the count, a whole run against the stand-in helper with a moving count,
+and the refusals.
 
 ## Not done
 

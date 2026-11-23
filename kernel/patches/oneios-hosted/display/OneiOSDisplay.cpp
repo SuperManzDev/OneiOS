@@ -23,6 +23,7 @@
 //
 // The surface factory and allocation are Droid-VM's LegacyDisplaySupport27.cpp (build-droidvm-legacy-display.py,
 // BSD-2-Clause-Patent).
+#include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOService.h>
@@ -315,6 +316,47 @@ void oneios_display_frame_seen(unsigned kind, uint64_t width, uint64_t height)
         if (kind == 2) IOLog("oneios-display: frame %u %s (%llux%llu)\n", n + 1, kinds[kind], width, height);
         else IOLog("oneios-display: frame %u %s\n", n + 1, kinds[kind]);
     }
+}
+
+// ---- the frame sequence (the native kernel in a VM of Android's crosvm: docs/native.md, the display)
+// The phone's bridge (runtime/display: displayctl pool) reads the boot video out of crosvm's restricted DMA pool, the one
+// part of the VM's memory the host may read. So that it copies a frame only when there is a new one, it polls one page,
+// which boot argument oneios-frame-seq=PA names (xnuloader-crosvm --display: the 16 KiB right after the boot video, in
+// the pool). After each frame written into the boot video (a copy or a blank: the probe calls this when its transfer
+// succeeded, after the frame's stores and a dsb), the count there goes up by one. The page is mapped write-back, as the
+// boot video is in the native kernel (staged/display.rs LEGACY_BOOT_VIDEO), and the host maps it write-back too.
+//   +0  "OFSQ" and the version, 1          written once, when the page is mapped
+//   +8  the frames written so far          64 bits, stored with release order after the frame
+// Without the boot argument (the hosted kernel, the bench) nothing is mapped and nothing is written.
+static volatile uint64_t *frameSequence;
+static uint64_t framesWritten;
+static bool frameSequenceTried;
+
+extern "C" void oneios_display_frame_done(void)
+{
+    if (!frameSequenceTried) {
+        frameSequenceTried = true;
+        uint64_t pa = 0;
+        if (!PE_parse_boot_argn("oneios-frame-seq", &pa, sizeof pa) || !pa) return;
+        const uint64_t video = native_legacy_gop_physical, bytes = native_legacy_gop_bytes;
+        if ((pa & 16383) || (video && pa < video + bytes && pa + 16384 > video)) {
+            IOLog("oneios-display: oneios-frame-seq=0x%llx is not a 16 KiB page outside the boot video: no frame sequence\n", pa);
+            return;
+        }
+        IODeviceMemory *memory = IODeviceMemory::withRange(pa, 16384);
+        IOMemoryMap *map = memory ? memory->map(kIOMapAnywhere | kIOMapCopybackCache) : nullptr;
+        OSSafeReleaseNULL(memory);
+        if (!map || !map->getVirtualAddress()) {
+            OSSafeReleaseNULL(map);
+            IOLog("oneios-display: the frame sequence page 0x%llx could not be mapped\n", pa);
+            return;
+        }
+        frameSequence = reinterpret_cast<volatile uint64_t *>(map->getVirtualAddress());   // the map stays for the boot
+        frameSequence[1] = 0;
+        __atomic_store_n(&frameSequence[0], 0x000000015153464fULL, __ATOMIC_RELEASE);      // "OFSQ", version 1
+        IOLog("oneios-display: the frame sequence at 0x%llx (the host's bridge copies a frame when it moves)\n", pa);
+    }
+    if (frameSequence) __atomic_store_n(&frameSequence[1], ++framesWritten, __ATOMIC_RELEASE);
 }
 
 // ---- what Droid-VM's LegacyDisplaySupport27.cpp gives the display

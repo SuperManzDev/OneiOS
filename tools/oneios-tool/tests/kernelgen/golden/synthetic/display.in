@@ -13,4 +13,6 @@ native_legacy_display_static_init();native_gop_presenter_static_init();native_le
     if(accepted)native_legacy_swap_stage(0);
 // (before anchor 6)
     offeredToVirtioDisplay=format==1 && droidvm_virtio_gpu_offer(display,memory,stride,width,height);
+// (before anchor 7)
+    native_legacy_transfer_status=status;native_legacy_transfer_request=(uintptr_t)request;native_legacy_transfer_bytes=bytes;
 // (the end)
