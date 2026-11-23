@@ -1273,6 +1273,7 @@ oneios-tool phone vm-probe [--payload F] [--mem MIB] [--timeout S] [--thp] [--ou
                                               # runtime/vmprobe's payload once as a protected VM under Gunyah (AVF's crosvm)
 oneios-tool phone dmesg [--grep RE] [--tail N]  # the kernel's log, filtered on the PC (read only)
 oneios-tool phone hugeblocks [--free]        # free memory in 2 MiB blocks; --free: drop the file cache and compact first
+oneios-tool phone hugepool status|load|grow|unload  # gh_hugepage_reserve: load [--want N]; grow --want N stops One UI and starts it again
 oneios-tool phone pull-data OUT [--ioslog]    # data/data.img in chunks, each checked against the phone's sha256, zero runs as holes;
                                               #   run again after a stop and it goes on (OUT.part, OUT.part.progress)
                                               #   [--chunk MIB] [--retries 5] [--backoff 2] [--stall 120] [--verify chunk|end] [--restart]
@@ -1605,6 +1606,37 @@ zone), with buddyinfo's line by order. `--free` first runs `sync`, `echo 3 > /pr
 /proc/sys/vm/compact_memory` (one-shot actions: Android reads its files again, nothing is lost, no setting stays
 changed), then reads again and says how long it took. 2 unit tests (`huge_free` counts, the read-only script without
 `--free`). On the S25 (2026-11-23): 2.9 GB free after `--free`, 52 to 248 MiB of it in 2 MiB blocks.
+
+**`phone hugepool status | load | grow | unload`** (2026-11-23; `crates/oneios-phone/src/hugepool.rs`). Droid-VM's
+gh_hugepage_reserve (GPL-2.0, its source and build outside this repository: `scripts/hugepage/build.sh` fetches the
+authors' DDK image for android15-6.6 by digest and builds the .ko and its ABI preflight `kapi_check` under bubblewrap,
+in `/mnt/tkg-build/oneios/hugepage/out/`). The module keeps a pool of 2 MiB pages and gives them to a VM's huge page
+allocations, so that Gunyah lends a VM's RAM in 2 MiB pieces (`docs/native.md` "A VM under Gunyah").
+- `status` (read only): `refill_stat`, `pool_size_max`, `system_reserve_mb_default`, `vm_owners` (named files under
+  `/sys/module/gh_hugepage_reserve/parameters`), `shmem_enabled`, the module's kernel lines.
+- `load [--want N] [--ko F] [--kapi-check F] [--out DIR]`: refused during a session or when loaded. The phone's BTF
+  (`/sys/kernel/btf/vmlinux`) is copied to DIR and `kapi_check` runs on it on the PC with the phone's kernel version
+  from `uname -r` (run with the PC's own it picks the PC kernel's rows); its `disable=` list becomes `disable_kapi`.
+  The .ko goes to `/data/local/tmp/oneios-hugepool/`, its SHA-256 checked there; then `sync` and `insmod ...
+  pool_want=N [disable_kapi=...]` beside One UI (N 64 = 128 MiB by default; the CMA reservoir stays off: no
+  `migrate_cma_val`). Then `status`.
+- `grow --want N [--mode 3] [--limit 180] [--out DIR]`: refused during a session, when the module is not loaded, or
+  while a VM holds pool pages or an acquire runs. Pushes `cycle.sh` (the `CYCLE` text) and starts it detached
+  (`setsid`). The script refuses unless One UI's framework runs; records the zygotes' and zygote's restart list's
+  states and the watchdog nodes system_server keeps open; starts its failsafe and sets its trap; stops One UI's
+  zygote as oneios_switch.sh does (a stop loop keeps it stopped, Samsung's software watchdog closed with "V" and fed
+  every 2 s); `sync` and `drop_caches` 3; writes `pool_want` N and `acquire` MODE and waits while
+  `acquire_active=1` (cancelled LIMIT-40 s after it began); then starts One UI as oneios_return.sh does
+  (`vdc volume abort_fuse`, the boot animation, audioserver, cameraserver, media, wificond, perfmond and media.tuner
+  where they ran, zygote_next, netd, zygote and zygote_secondary), ends the feeder once system_server is back and
+  waits for user 0 RUNNING_UNLOCKED and 20 s more. One UI is started once (a lock) by whichever of the main flow,
+  its trap and the failsafe (LIMIT s after the stop) comes first; a system_server that is not up 90 s after the
+  start, or dies, makes the phone restart (`sys.powerctl`, the return's last resort). Nothing is written under
+  `/sys/power`. The tool follows `cycle.log` over adb, waits through adb's absence, and ends on `result`.
+- `unload`: `rmmod`, refused while a VM holds pages or an acquire runs.
+3 unit tests (the preflight's parsing; the cycle's order: preflight before any change, the way back before the stop,
+the feeder's end after system_server, one start, the only writes; the cycle parses under `bash --posix -n` and
+`sh -n`, and was checked with `dash -n`). Not yet run on the phone.
 
 **`phone cpu [--trace SECONDS] [--out FILE]`** (fix-host-overhead, 2026-11-15; `crates/oneios-phone/src/cpu.rs`). Read
 only, with or without a session: for each of cpu0-7 by name, the core (`regs/identification/midr_el1`), `cpu_capacity`,

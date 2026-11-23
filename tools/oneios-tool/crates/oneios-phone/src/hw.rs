@@ -53,8 +53,10 @@ timeout 20 /apex/com.android.virt/bin/crosvm run --help"),
 ];
 
 /// The binary files, copied as they are: (file in DIR, the phone's file). `config.gz` is also unpacked to
-/// `kernel.config`.
-pub const BINARIES: &[(&str, &str)] = &[("fdt.dtb", "/sys/firmware/fdt"), ("config.gz", "/proc/config.gz")];
+/// `kernel.config`; `btf.vmlinux` is the running kernel's types, which gh_hugepage_reserve's ABI preflight
+/// (`kapi_check`, scripts/hugepage/build.sh) reads on the PC.
+pub const BINARIES: &[(&str, &str)] =
+    &[("fdt.dtb", "/sys/firmware/fdt"), ("config.gz", "/proc/config.gz"), ("btf.vmlinux", "/sys/kernel/btf/vmlinux")];
 
 /// The one script for all the texts: each one's output after a line `=== NAME`. Each runs in a subshell whose stdin
 /// is /dev/null: the script itself comes on root shell's stdin, and a program that reads it would wait for ever.
@@ -139,13 +141,16 @@ pub fn hw(adb: &Adb, out: &str) -> Result<()> {
                 let total = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
                 format!("{name}: {n} bytes, the header says {total}\n")
             }
-            _ => match unpack(&data) {
+            "config.gz" => match unpack(&data) {
                 Some(text) => {
                     fs::write(Path::new(out).join("kernel.config"), &text)?;
                     format!("{name}: {n} bytes, kernel.config {} lines\n", text.lines().count())
                 }
                 None => format!("{name}: {n} bytes, not gzip (the phone's kernel has no {remote}?)\n"),
             },
+            // BTF's magic is 0xeB9F, little-endian on arm64
+            _ if data.len() >= 4 && data[..2] == [0x9f, 0xeb] => format!("{name}: {n} bytes (BTF)\n"),
+            _ => format!("{name}: {n} bytes, not BTF (the phone's kernel has no {remote}?)\n"),
         };
     }
     fs::write(Path::new(out).join("hw.txt"), &report)?;

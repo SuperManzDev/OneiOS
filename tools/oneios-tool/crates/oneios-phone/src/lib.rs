@@ -9,6 +9,7 @@ pub mod adb;
 pub mod app;
 pub mod cpu;
 pub mod cycle;
+pub mod hugepool;
 pub mod hw;
 pub mod local;
 pub mod log;
@@ -110,6 +111,12 @@ pub enum Command {
         #[arg(long)]
         free: bool,
     },
+    /// Droid-VM's gh_hugepage_reserve (scripts/hugepage/build.sh), a pool of 2 MiB pages for a VM's RAM: status, load
+    /// beside One UI, grow with One UI's framework stopped and started again (no restart of the phone), unload
+    Hugepool {
+        #[command(subcommand)]
+        command: HugepoolCommand,
+    },
     /// One run of runtime/vmprobe's payload as a protected VM under Gunyah with AVF's crosvm: 1 vCPU, no device but
     /// the serial port; it powers off by itself, else crosvm stop after SECONDS. Refused during a session
     VmProbe {
@@ -204,6 +211,47 @@ pub enum TouchCommand {
     Status,
     /// Write `2,0` then `2,1` (what One UI's input HAL writes when the panel comes on), then read the node back
     Wake,
+}
+
+#[derive(clap::Subcommand)]
+pub enum HugepoolCommand {
+    /// The module's state: refill_stat, pool_size_max, vm_owners, shmem_enabled, its kernel lines (read only)
+    Status,
+    /// The ABI preflight (kapi_check on the phone's BTF, on the PC), the .ko pushed and checked, a sync, then insmod with
+    /// pool_want=N beside One UI (the CMA side off). Refused during a session or when it is loaded already
+    Load {
+        /// The module (scripts/hugepage/build.sh)
+        #[arg(long, value_name = "FILE", default_value = "/mnt/tkg-build/oneios/hugepage/out/android15-6.6.ko")]
+        ko: String,
+        /// Its preflight, built for the PC by the same script
+        #[arg(long, value_name = "FILE", default_value = "/mnt/tkg-build/oneios/hugepage/out/kapi_check")]
+        kapi_check: String,
+        /// The pool's want at load, in pages of 2 MiB (64 = 128 MiB)
+        #[arg(long, value_name = "N", default_value_t = 64)]
+        want: u32,
+        /// Where the preflight's files go (btf.vmlinux, kapi_check.txt, load.txt)
+        #[arg(long, value_name = "DIR", default_value = "phone-hugepool")]
+        out: String,
+    },
+    /// One UI's framework stopped (as the switch stops it), the file cache dropped, the pool's want raised to N and its
+    /// acquire pressed, One UI started again (as the return starts it): a script on the phone, detached, with a
+    /// failsafe that starts One UI LIMIT s after the stop. No restart of the phone unless One UI does not come back
+    Grow {
+        /// The pool's new want, in pages of 2 MiB (1536 = 3 GiB)
+        #[arg(long, value_name = "N")]
+        want: u32,
+        /// The module's acquire: 3 sweep and per-window evict, 2 sweep and system-wide reclaim
+        #[arg(long, value_name = "MODE", default_value_t = 3)]
+        mode: u32,
+        /// Seconds One UI may be down before the failsafe starts it (90..600)
+        #[arg(long, value_name = "SECONDS", default_value_t = 180)]
+        limit: u32,
+        /// Where the cycle's script and log go
+        #[arg(long, value_name = "DIR", default_value = "phone-hugepool")]
+        out: String,
+    },
+    /// rmmod, when no VM holds pool pages and no acquire runs
+    Unload,
 }
 
 #[derive(clap::Subcommand)]
@@ -308,6 +356,12 @@ pub fn main(cli: Cli) -> i32 {
         Command::Hw { out } => Adb::connect(serial).and_then(|adb| hw::hw(&adb, &out)),
         Command::Dmesg { grep, tail } => Adb::connect(serial).and_then(|adb| hw::dmesg(&adb, &grep, tail)),
         Command::Hugeblocks { free } => Adb::connect(serial).and_then(|adb| vmprobe::hugeblocks(&adb, free)),
+        Command::Hugepool { command } => Adb::connect(serial).and_then(|adb| match command {
+            HugepoolCommand::Status => hugepool::status(&adb),
+            HugepoolCommand::Load { ko, kapi_check, want, out } => hugepool::load(&adb, &ko, &kapi_check, want, &out),
+            HugepoolCommand::Grow { want, mode, limit, out } => hugepool::grow(&adb, want, mode, limit, &out),
+            HugepoolCommand::Unload => hugepool::unload(&adb),
+        }),
         Command::VmProbe { payload, mem, timeout, out, thp } => {
             Adb::connect(serial).and_then(|adb| vmprobe::vm_probe(&adb, &payload, &out, &vmprobe::Options { mem, timeout, thp }))
         }
