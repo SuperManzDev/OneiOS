@@ -4,7 +4,8 @@
 #   make android    cross-build for aarch64-linux-android into build/android
 # xnuloader-qemu places a standalone kernel for qemu-system-aarch64's virt board (scripts/qemu/boot-vm.sh, docs/native.md),
 # with an image set's disks: it compiles xnuhost's imageset.c (the manifest, hash lists and trust caches as xnuhost reads them).
-# xnuloader-crosvm makes the native kernel a Linux Image for a VM of Android's crosvm under the phone's Gunyah (docs/native.md).
+# xnuloader-crosvm makes the native kernel a Linux Image for a VM of Android's crosvm under the phone's Gunyah (docs/native.md),
+# with the same disks on PCI. Both take the disks from tools/image_disks.c.
 include $(dir $(lastword $(MAKEFILE_LIST)))../host.mk
 ANDROID_CC ?= $(TOOLS)/aarch64-linux-android30-clang
 ANDROID_AR ?= $(TOOLS)/llvm-ar
@@ -22,10 +23,11 @@ build/host/libxnuloader.a: $(SRC:src/%.c=build/host/%.o)
 	$(AR) rcs $@ $^
 build/host/xnuloader-inspect: tools/xnuloader-inspect.c build/host/libxnuloader.a
 	$(CC) $(CFLAGS) $^ -o $@
-build/host/xnuloader-qemu: tools/xnuloader-qemu.c ../xnuhost/src/imageset.c ../xnuhost/src/imageset.h build/host/libxnuloader.a
-	$(CC) $(CFLAGS) -I../xnuhost/src tools/xnuloader-qemu.c ../xnuhost/src/imageset.c build/host/libxnuloader.a -lpthread -o $@
-build/host/xnuloader-crosvm: tools/xnuloader-crosvm.c build/host/libxnuloader.a
-	$(CC) $(CFLAGS) $^ -o $@
+IMAGE_DISKS := tools/image_disks.c tools/image_disks.h ../xnuhost/src/imageset.c ../xnuhost/src/imageset.h
+build/host/xnuloader-qemu: tools/xnuloader-qemu.c $(IMAGE_DISKS) build/host/libxnuloader.a
+	$(CC) $(CFLAGS) -I../xnuhost/src tools/xnuloader-qemu.c tools/image_disks.c ../xnuhost/src/imageset.c build/host/libxnuloader.a -lpthread -o $@
+build/host/xnuloader-crosvm: tools/xnuloader-crosvm.c $(IMAGE_DISKS) build/host/libxnuloader.a
+	$(CC) $(CFLAGS) -I../xnuhost/src tools/xnuloader-crosvm.c tools/image_disks.c ../xnuhost/src/imageset.c build/host/libxnuloader.a -lpthread -o $@
 build/host/test_loader: tests/test_loader.c build/host/libxnuloader.a $(HDR)
 	$(CC) $(CFLAGS) -fsanitize=address,undefined tests/test_loader.c $(SRC) -o $@
 

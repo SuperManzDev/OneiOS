@@ -180,6 +180,16 @@ impl Adb {
     }
 }
 
+/// Root's shell starts SCRIPT detached and says "started": a double fork, the outer subshell gone at once, so that the
+/// root shell that started it ends at once too and adb's shell returns. A single `( ... ) &` kept root's `sh -s` waiting
+/// (sigsuspend) for as long as the script ran, and with it the tool (vm-boot boot 2, 2026-11-23; hugepool grow 1 only
+/// went on because adb dropped). setsid where the phone has it: a new session, no controlling terminal.
+pub fn detached_start(script: &str) -> String {
+    format!(
+        "chmod 755 {script}; ( ( if command -v setsid >/dev/null; then exec setsid /system/bin/sh {script}; else exec /system/bin/sh {script}; fi ) </dev/null >/dev/null 2>&1 & ); echo started\n"
+    )
+}
+
 /// The session check's script for root's shell (`Adb::session_open`). The stand-in phone answers it with its own
 /// /proc on a host without one (tests/phone/fake-rewrite.sh): the script is the phone's on every host.
 pub fn session_check_script() -> String {

@@ -19,6 +19,8 @@
 #   VNC=N ...                   QEMU's VNC server on 127.0.0.1:590N (this PC only), to watch it: krdc vnc://127.0.0.1:590N
 #   INPUT=tablet,keyboard ...   QEMU's virtio-tablet-device (the VNC client's mouse: one finger while the button is down)
 #                               and virtio-keyboard-device, for the kernel's touch screen and keys (the hid archive)
+#   PCI=1 IMAGE=DIR ...         the disks as virtio-blk-pci functions (00:02.0 to 00:06.0) with DMA windows, as in a VM of
+#                               the phone's crosvm (xnuloader-qemu --pci; docs/native.md "A VM under Gunyah")
 # Out: OUT (out/qemu/vm) serial.log (the kernel's console on the PL011), qemu.log (QEMU's -d log, the first 64 MB), and
 # xnuloader-qemu's layout files; monitor.sock, QEMU's monitor while it runs (scripts/qemu/shot.sh takes a picture of the
 # display), and qmp.sock, its QMP socket (scripts/qemu/touch.sh taps and swipes on the tablet). A guest restart ends the run (-no-reboot). QEMU comes from the project's sysroot
@@ -56,6 +58,7 @@ if [ -n "$IMAGE" ]; then
     echo "boot-vm: a new Data store $DATA (${gib:-16} GiB, sparse): the kernel formats it and unpacks the seed"
   fi
   opts+=(--image "$IMAGE" --data "$DATA")
+  [ "${PCI:-0}" = 0 ] || opts+=(--pci)
   debug=${QEMU_DEBUG:-guest_errors,unimp}
 fi
 "$ROOT/runtime/loader/build/host/xnuloader-qemu" "$KERNEL" "$OUT" "${opts[@]}" | tee "$OUT/layout.txt"

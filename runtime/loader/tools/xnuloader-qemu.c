@@ -20,11 +20,16 @@
 // xnuhost gives it. A read-only image's node also carries its hash list ("oneios,hash-list"): the native kernel's
 // OneiOSHostedDisk checks every chunk it reads against it, as xnuhost does for a hosted kernel. /chosen root-matching
 // names the OS volume; the trust caches go where the hosted kernel's do.
+// --pci: the disks as virtio-blk PCI functions instead (QEMU's virtio-blk-pci on virt's PCIe host, 00:02.0 to 00:06.0),
+// the bench of the crosvm VM's disks (xnuloader-crosvm, docs/native.md "A VM under Gunyah"): each node is the function's
+// configuration space in virt's ECAM, with a window for the BAR the kernel places (virt has no firmware to assign it)
+// and a DMA window, as crosvm's restricted DMA pool gives one: everything the device touches lies there, after the
+// window and the boot video, outside the RAM the kernel manages.
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
+#include "image_disks.h"
 #include "imageset.h"
 #include "xnuloader/adt.h"
 #include "xnuloader/boot.h"
@@ -37,7 +42,12 @@
 #define VIRTIO_BASE   0x0a000000ull     // virt's 32 virtio-mmio transports; QEMU's bus virtio-mmio-bus.K is transport K
 #define VIRTIO_SIZE   0x200ull
 #define VIRTIO_INTID  48u               // transport K's line: SPI 16 + K (the driver polls; the node says it all the same)
-#define MAX_DISKS     5
+#define PCI_ECAM      0x3f000000ull     // virt's PCIe ECAM with highmem=off: bus << 20 | device << 15 | function << 12
+#define PCI_FIRST_DEV 2u                // disk K is 00:(2 + K).0, as xnuloader-crosvm pins them in crosvm
+#define PCI_BARS      0x10000000ull     // virt's 32-bit PCI memory window: 1 MiB of it for each disk's BAR
+#define PCI_BAR_SLOT  0x100000ull
+#define DMA_SLICE     0x110000ull       // a disk's DMA window: its queue page, then 1 MiB of transfer buffer at 64 KiB
+#define DMA_POOL      (8ull << 20)      // the pool of all of them, as crosvm's --swiotlb 8
 
 // The machine's own arguments from xnuhost's default (runtime/xnuhost/src/config.c), less the hosted kernel's devices.
 static const char default_args[] =
@@ -69,65 +79,8 @@ static void spit(const char *dir, const char *name, const void *data, size_t siz
 
 static void usage(void)
 {
-  fprintf(stderr, "usage: xnuloader-qemu KERNEL OUTDIR [--cpus N] [--ram-mib N] [--timebase HZ] [--args TEXT] [--args-add TEXT] [--qemu-cpu M] [--image DIR --data FILE] [--display WxH [--scale 2|3] [--hz N]] [--input tablet,keyboard]\n");
+  fprintf(stderr, "usage: xnuloader-qemu KERNEL OUTDIR [--cpus N] [--ram-mib N] [--timebase HZ] [--args TEXT] [--args-add TEXT] [--qemu-cpu M] [--image DIR --data FILE [--pci]] [--display WxH [--scale 2|3] [--hz N]] [--input tablet,keyboard]\n");
   exit(2);
-}
-
-// A disk of the image set on transport K: the file QEMU serves, read-only or not, and what its node says.
-typedef struct {
-  char             path[1024];
-  bool             writable;
-  xh_disk_identity identity;
-  const uint8_t   *list;             // the hash list of a read-only image, or NULL
-  size_t           list_size;
-} disk;
-
-static void image_disk(disk *d, const xh_imageset *set, const xh_imageset_file *f)
-{
-  snprintf(d->path, sizeof d->path, "%s/%s", set->dir, f->path);
-  struct stat st;
-  if (stat(d->path, &st) || (uint64_t)st.st_size != f->size || (f->size & 511)) {
-    fprintf(stderr, "%s: not the %llu bytes (whole sectors) manifest.json lists\n", d->path, (unsigned long long)f->size);
-    exit(1);
-  }
-}
-
-// The image set's five disks, in the order of their transports, as xnuhost describes its own (main.c image_set_disk).
-static unsigned image_disks(const char *dir, const char *data, xh_imageset *set, disk *disks, char seed_hex[65])
-{
-  const char *error = NULL;
-  int rc = xh_imageset_load(dir, set, &error);
-  if (rc) { fprintf(stderr, "%s: %s\n", dir, rc > 0 ? "no manifest.json" : error); exit(1); }
-  unsigned n = 0;
-  static const char *const images[] = { "os", "systemos", "app" };
-  for (unsigned i = 0; i < 3; i++) {
-    const xh_imageset_file *f = xh_imageset_role(set, images[i]);
-    if (!f) { fprintf(stderr, "%s: no %s image in manifest.json\n", dir, images[i]); exit(1); }
-    disk *d = &disks[n++];
-    image_disk(d, set, f);
-    xh_verify *v = xh_verify_open(set, f, &error);   // the hash list, checked against the manifest
-    if (!v) { fprintf(stderr, "%s: %s\n", d->path, error); exit(1); }
-    d->list = xh_verify_list(v, &d->list_size);
-    d->identity = (xh_disk_identity){ .role = f->role, .verified = xh_verify_digest(v), .volume_uuid = f->volume_uuid };
-  }
-  const xh_imageset_file *seed = xh_imageset_role(set, "data-seed");
-  seed_hex[0] = 0;
-  for (unsigned i = 0; seed && i < 32; i++) snprintf(seed_hex + i * 2, 3, "%02x", seed->sha256[i]);
-  if (seed) {
-    disk *d = &disks[n++];
-    image_disk(d, set, seed);
-    d->identity = (xh_disk_identity){ .role = "seed", .bytes = seed->size, .sha256_hex = seed_hex };
-  }
-  disk *d = &disks[n++];
-  struct stat st;
-  if (stat(data, &st) || st.st_size < (1ll << 30) || (st.st_size & 511)) {
-    fprintf(stderr, "%s: the Data store must be a raw file of whole sectors, 1 GiB or more\n", data);
-    exit(1);
-  }
-  snprintf(d->path, sizeof d->path, "%s", data);
-  d->writable = true;
-  d->identity = (xh_disk_identity){ .role = "data", .volume_uuid = set->data_uuid, .volume_name = set->data_name, .sha256_hex = seed_hex };
-  return n;
 }
 
 int main(int argc, char **argv)
@@ -148,7 +101,9 @@ int main(int argc, char **argv)
   // timebase says (--timebase and cntfrq= go together).
   const char *qemu_cpu = "cortex-a710,pauth-impdef=on,sve=off,cntfrq=1000000000";
   uint32_t timebase = 1000000000;
+  bool pci = false;
   for (int i = 3; i < argc; i++) {
+    if (!strcmp(argv[i], "--pci")) { pci = true; continue; }
     if (i + 1 >= argc) usage();
     if (!strcmp(argv[i], "--cpus")) cpus = (unsigned)strtoul(argv[++i], NULL, 0);
     else if (!strcmp(argv[i], "--qemu-cpu")) qemu_cpu = argv[++i];
@@ -183,10 +138,11 @@ int main(int argc, char **argv)
   }
   if (cpus < 1 || cpus > XL_MAX_CPUS || ram_mib < 256 || ram_mib > 3072) { fprintf(stderr, "xnuloader-qemu: 1-%d CPUs, 256-3072 MiB\n", XL_MAX_CPUS); return 2; }
   if (!image_dir != !data_path) { fprintf(stderr, "xnuloader-qemu: --image and --data go together\n"); return 2; }
+  if (pci && !image_dir) { fprintf(stderr, "xnuloader-qemu: --pci is for the image set's disks (--image)\n"); return 2; }
   static xh_imageset set;
-  static disk disks[MAX_DISKS];
+  static image_disk disks[IMAGE_DISKS_MAX];
   static char seed_hex[65];
-  unsigned ndisk = image_dir ? image_disks(image_dir, data_path, &set, disks, seed_hex) : 0;
+  unsigned ndisk = image_dir ? image_disks(image_dir, data_path, true, &set, disks, seed_hex) : 0;
   xl_blob trust = { 0 };
   if (image_dir) {
     const char *error = NULL;
@@ -226,16 +182,22 @@ int main(int argc, char **argv)
   FILE *r = fopen("/dev/urandom", "rb");
   if (!r || fread(m.random_seed, 1, sizeof m.random_seed, r) != sizeof m.random_seed) { fprintf(stderr, "/dev/urandom: read failed\n"); return 1; }
   fclose(r);
-  // The disks: transport K for disk K, read-only ones as virtio,mmio nodes (virtio-mmio-0..), the store as data-store.
+  // The disks: transport K for disk K, read-only ones as virtio,mmio nodes (virtio-mmio-0..), the store as data-store;
+  // with --pci PCI function 00:(2 + K).0 for disk K (virtio-pci-0.., data-store), no virtio-mmio transport.
   for (unsigned i = 0; i < ndisk; i++)
-    m.dev[m.ndev++] = (xl_device){ disks[i].writable ? XL_DEV_DATA_STORE : XL_DEV_BLOCK, VIRTIO_BASE + i * VIRTIO_SIZE, VIRTIO_SIZE };
+    m.dev[m.ndev++] = pci ? (xl_device){ disks[i].writable ? XL_DEV_DATA_STORE : XL_DEV_BLOCK, PCI_ECAM + ((uint64_t)(PCI_FIRST_DEV + i) << 15), 0x1000, true }
+                          : (xl_device){ disks[i].writable ? XL_DEV_DATA_STORE : XL_DEV_BLOCK, VIRTIO_BASE + i * VIRTIO_SIZE, VIRTIO_SIZE, false };
+  const unsigned disk_transports = pci ? 0 : ndisk;
   // The display: /arm-io/virtio-gpu on the next transport (Droid-VM's transport maps it and takes "droidvm,intid"), and
   // the boot video, which the display driver presents until the compositor's first frame, after the window (as xnuhost
   // puts it after the window and its pools: not RAM the kernel manages).
-  const unsigned gpu_transport = ndisk;
+  const unsigned gpu_transport = disk_transports;
   const uint64_t fb_pa = phys + window, fb_bytes = display_w ? ((uint64_t)display_w * display_h * 4 + 0x1fffff) & ~0x1fffffull : 0;
+  // --pci: the DMA pool after the boot video (a slice per disk), as crosvm's restricted DMA pool sits after a VM's RAM.
+  const uint64_t pool_pa = (fb_pa + fb_bytes + 0xffff) & ~0xffffull, pool_bytes = pci ? DMA_POOL : 0;
+  if (pci && ndisk * DMA_SLICE > DMA_POOL) { fprintf(stderr, "xnuloader-qemu: %u disks do not fit the DMA pool\n", ndisk); return 2; }
   if (display_w) {
-    m.dev[m.ndev++] = (xl_device){ XL_DEV_GPU, VIRTIO_BASE + gpu_transport * VIRTIO_SIZE, VIRTIO_SIZE };
+    m.dev[m.ndev++] = (xl_device){ XL_DEV_GPU, VIRTIO_BASE + gpu_transport * VIRTIO_SIZE, VIRTIO_SIZE, false };
     m.display_width = display_w;
     m.display_height = display_h;
     m.display_scale = display_scale;
@@ -252,17 +214,17 @@ int main(int argc, char **argv)
   }
   // The input devices on the transports after the GPU's (or the disks', without a display): input-0 the tablet, then the
   // keyboard, in that order (xl_machine_tree numbers the input nodes as it meets them).
-  unsigned next_transport = ndisk + (display_w ? 1 : 0), tablet_transport = 0, keyboard_transport = 0, ninput = 0;
+  unsigned next_transport = disk_transports + (display_w ? 1 : 0), tablet_transport = 0, keyboard_transport = 0, ninput = 0;
   unsigned input_transport[2];
   if (input_tablet) {
     tablet_transport = next_transport++;
     input_transport[ninput++] = tablet_transport;
-    m.dev[m.ndev++] = (xl_device){ XL_DEV_INPUT, VIRTIO_BASE + tablet_transport * VIRTIO_SIZE, VIRTIO_SIZE };
+    m.dev[m.ndev++] = (xl_device){ XL_DEV_INPUT, VIRTIO_BASE + tablet_transport * VIRTIO_SIZE, VIRTIO_SIZE, false };
   }
   if (input_keyboard) {
     keyboard_transport = next_transport++;
     input_transport[ninput++] = keyboard_transport;
-    m.dev[m.ndev++] = (xl_device){ XL_DEV_INPUT, VIRTIO_BASE + keyboard_transport * VIRTIO_SIZE, VIRTIO_SIZE };
+    m.dev[m.ndev++] = (xl_device){ XL_DEV_INPUT, VIRTIO_BASE + keyboard_transport * VIRTIO_SIZE, VIRTIO_SIZE, false };
   }
   const xh_imageset_file *os = image_dir ? xh_imageset_role(&set, "os") : NULL;
   if (os && *os->volume_uuid) m.root_volume_uuid = os->volume_uuid;
@@ -272,7 +234,7 @@ int main(int argc, char **argv)
   for (unsigned i = 0, blocks = 0; i < ndisk; i++) {
     char name[40];
     if (disks[i].writable) snprintf(name, sizeof name, "arm-io/data-store");
-    else snprintf(name, sizeof name, "arm-io/virtio-mmio-%u", blocks++);
+    else snprintf(name, sizeof name, pci ? "arm-io/virtio-pci-%u" : "arm-io/virtio-mmio-%u", blocks++);
     xl_adt_node *node = xl_adt_find(tree, name);
     if (!node) { fprintf(stderr, "board: no /%s\n", name); return 1; }
     xh_imageset_describe(node, &disks[i].identity);
@@ -280,7 +242,15 @@ int main(int argc, char **argv)
       fprintf(stderr, "board: /%s: no room for its hash list\n", name);
       return 1;
     }
-    xl_adt_set_u32(node, "droidvm,intid", VIRTIO_INTID + i);
+    if (pci) {
+      const uint64_t dma[2] = { pool_pa + i * DMA_SLICE, DMA_SLICE }, bar[2] = { PCI_BARS + i * PCI_BAR_SLOT, PCI_BAR_SLOT };
+      if (xl_adt_set(node, "oneios,dma-window", dma, sizeof dma) || xl_adt_set(node, "oneios,pci-bar-window", bar, sizeof bar)) {
+        fprintf(stderr, "board: /%s: no room for its windows\n", name);
+        return 1;
+      }
+    } else {
+      xl_adt_set_u32(node, "droidvm,intid", VIRTIO_INTID + i);
+    }
   }
   if (display_w) {
     xl_adt_node *gpu = xl_adt_find(tree, "arm-io/virtio-gpu");
@@ -323,7 +293,7 @@ int main(int argc, char **argv)
   memcpy(&stub[6], &lay.entry_pa, 8);
   spit(out, "stub.bin", stub, sizeof stub);
 
-  uint64_t ram_end = phys + window + fb_bytes;
+  uint64_t ram_end = pci ? pool_pa + pool_bytes : phys + window + fb_bytes;
   uint64_t qemu_mib = ((ram_end - RAM_BASE) + (256ull << 20) - 1) >> 20 & ~255ull;
   if (RAM_BASE + (qemu_mib << 20) > 0x100000000ull) { fprintf(stderr, "xnuloader-qemu: the window and the boot video end above 4 GiB (highmem=off)\n"); return 2; }
   char line[16384];
@@ -344,9 +314,14 @@ int main(int argc, char **argv)
     n += snprintf(line + n, sizeof line - n, "-device\nvirtio-keyboard-device,bus=virtio-mmio-bus.%u\n", keyboard_transport);
   for (unsigned i = 0; i < ndisk && n >= 0 && (size_t)n < sizeof line; i++) {
     if (strchr(disks[i].path, ',') || strchr(disks[i].path, '\n')) { fprintf(stderr, "%s: a disk path with a comma\n", disks[i].path); return 1; }
-    n += snprintf(line + n, sizeof line - n, "-drive\nif=none,id=disk%u,format=raw,file=%s,readonly=%s\n"
-                  "-device\nvirtio-blk-device,drive=disk%u,bus=virtio-mmio-bus.%u\n",
-                  i, disks[i].path, disks[i].writable ? "off" : "on", i, i);
+    n += snprintf(line + n, sizeof line - n, "-drive\nif=none,id=disk%u,format=raw,file=%s,readonly=%s\n",
+                  i, disks[i].path, disks[i].writable ? "off" : "on");
+    // --pci: modern only (device 0x1042, its regions in BAR 4), no MSI-X (the driver polls), at 00:(2 + K).0
+    if (pci && n >= 0 && (size_t)n < sizeof line)
+      n += snprintf(line + n, sizeof line - n, "-device\nvirtio-blk-pci,drive=disk%u,bus=pcie.0,addr=0x%x,disable-legacy=on,disable-modern=off,vectors=0\n",
+                    i, PCI_FIRST_DEV + i);
+    else if (n >= 0 && (size_t)n < sizeof line)
+      n += snprintf(line + n, sizeof line - n, "-device\nvirtio-blk-device,drive=disk%u,bus=virtio-mmio-bus.%u\n", i, i);
   }
   if (n < 0 || (size_t)n >= sizeof line) { fprintf(stderr, "xnuloader-qemu: OUTDIR or the disks' paths too long\n"); return 1; }
   spit(out, "qemu.args", line, (size_t)n);
@@ -359,9 +334,16 @@ int main(int argc, char **argv)
   printf("  stub at PA 0x%llx; QEMU RAM %llu MiB; %u CPU%s (%s), timebase %u Hz; boot args: %s\n", (unsigned long long)STUB_PA,
          (unsigned long long)qemu_mib, cpus, cpus == 1 ? "" : "s", qemu_cpu, timebase, args);
   if (trust.data) printf("  trust caches: %u modules, %zu bytes; root: the OS volume %s\n", (unsigned)trust.data[0], trust.size, m.root_volume_uuid);
-  for (unsigned i = 0; i < ndisk; i++)
-    printf("  disk %u (transport 0x%llx): %s, %s, %s%s\n", i, (unsigned long long)(VIRTIO_BASE + i * VIRTIO_SIZE), disks[i].identity.role,
-           disks[i].path, disks[i].writable ? "writable" : "read-only", disks[i].list ? ", hash list in its node" : "");
+  for (unsigned i = 0; i < ndisk; i++) {
+    if (pci)
+      printf("  disk %u (PCI 00:%02x.0, config 0x%llx, BAR window 0x%llx, DMA window 0x%llx+0x%llx): %s, %s, %s%s\n", i, PCI_FIRST_DEV + i,
+             (unsigned long long)(PCI_ECAM + ((uint64_t)(PCI_FIRST_DEV + i) << 15)), (unsigned long long)(PCI_BARS + i * PCI_BAR_SLOT),
+             (unsigned long long)(pool_pa + i * DMA_SLICE), (unsigned long long)DMA_SLICE, disks[i].identity.role, disks[i].path,
+             disks[i].writable ? "writable" : "read-only", disks[i].list ? ", hash list in its node" : "");
+    else
+      printf("  disk %u (transport 0x%llx): %s, %s, %s%s\n", i, (unsigned long long)(VIRTIO_BASE + i * VIRTIO_SIZE), disks[i].identity.role,
+             disks[i].path, disks[i].writable ? "writable" : "read-only", disks[i].list ? ", hash list in its node" : "");
+  }
   if (display_w)
     printf("  display: %ux%u @%ux, %u Hz, virtio-gpu on transport 0x%llx, boot video at PA 0x%llx (%llu MiB)\n", display_w, display_h,
            display_scale, display_hz, (unsigned long long)(VIRTIO_BASE + gpu_transport * VIRTIO_SIZE), (unsigned long long)fb_pa,

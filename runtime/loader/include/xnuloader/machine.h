@@ -28,7 +28,10 @@ typedef enum {
   XL_DEV_MEDIA,       // "droidvm,virtio-media": the video encoder (runtime/bridges/encoder), with a media-host-pool
 } xl_device_kind;
 
-typedef struct { xl_device_kind kind; uint64_t base, size; } xl_device;
+// pci (a block or the Data store only): a virtio-blk PCI function instead of a virtio-mmio window, base and size its
+// configuration space (crosvm's CAM: 0x100; QEMU's ECAM: 0x1000); node "virtio-pci-N" or "data-store", compatible
+// "oneios,virtio-pci", no "droidvm,intid" (OneiOSHostedDisk polls; the line is the PCI host's, not the board's).
+typedef struct { xl_device_kind kind; uint64_t base, size; bool pci; } xl_device;
 
 typedef struct {
   unsigned    ncpu;

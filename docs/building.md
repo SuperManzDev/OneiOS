@@ -217,11 +217,16 @@ Booting it on QEMU with the image set: [native.md](native.md), "The bench". In a
 
 ```sh
 make -C runtime/loader                    # build/host/xnuloader-crosvm
-runtime/loader/build/host/xnuloader-crosvm out/kernel/native-24A446/kernel.kc out/crosvm/kernel.img --ram-mib 2048 --cpus 1
-# -> out/crosvm/kernel.img (an arm64 Linux Image, 137 MiB; its label at 0x100 names the VM) and kernel.img.adt
+runtime/loader/build/host/xnuloader-crosvm out/kernel/native-24A446/kernel.kc out/crosvm/kernel.img --ram-mib 3072 --cpus 1 \
+  --image /mnt/giochi/Linux/oneios/out-image/24A446
+# -> out/crosvm/kernel.img (an arm64 Linux Image, 137 MiB; its label at 0x100 names the VM), kernel.img.adt, and
+#    kernel.img.disks (the image set's disks on crosvm's PCI, the phone's staged files; without --image: no disk)
 oneios-tool phone hugepool load && oneios-tool phone hugepool grow --want 1536   # once per phone boot, for a VM above ~0.5 GB
-oneios-tool phone vm-boot --image out/crosvm/kernel.img --seconds 90 --thp --out logs/pa3q-vmboot/NAME
+oneios-tool phone vm-boot --image out/crosvm/kernel.img --seconds 900 --thp --out logs/pa3q-vmboot/NAME
 ```
+
+The bench of those disks: `scripts/qemu/boot-vm.sh` with `PCI=1` beside `IMAGE=` (QEMU's virtio-blk-pci, the same
+nodes).
 
 ## 4. The runtime (xnuhost, helpers, phone tools)
 

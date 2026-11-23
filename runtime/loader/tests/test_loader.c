@@ -320,6 +320,31 @@ static void test_machine(void)
   if (pool && pool->length == 16) memcpy(pv, pool->value, 16);
   CHECK(pv[0] == 0x8ff800000ull && pv[1] == 8 << 20);
   xl_adt_free(gt);
+
+  // disks on PCI (xnuloader-crosvm, xnuloader-qemu --pci): a node per function, its configuration space as reg,
+  // OneiOSHostedDisk's compatible, no board line
+  machine_default(&m);
+  m.ndev = 3;
+  m.dev[0] = (xl_device){ XL_DEV_BLOCK, 0x10000 + (2 << 11), 0x100, true };
+  m.dev[1] = (xl_device){ XL_DEV_BLOCK, 0x10000 + (3 << 11), 0x100, true };
+  m.dev[2] = (xl_device){ XL_DEV_DATA_STORE, 0x10000 + (6 << 11), 0x100, true };
+  xl_adt_node *pt = xl_machine_tree(&m, &err);
+  CHECK(pt != NULL);
+  if (pt) {
+    const xl_adt_node *second = xl_adt_find(pt, "arm-io/virtio-pci-1"), *store = xl_adt_find(pt, "arm-io/data-store");
+    CHECK(second && store && !xl_adt_find(pt, "arm-io/virtio-mmio-0"));
+    p = second ? xl_adt_get(second, "compatible") : NULL;
+    CHECK(p && p->length == 18 && !memcmp(p->value, "oneios,virtio-pci", 18));
+    p = store ? xl_adt_get(store, "compatible") : NULL;
+    CHECK(p && p->length == 18 && !memcmp(p->value, "oneios,virtio-pci", 18));
+    p = second ? xl_adt_get(second, "reg") : NULL;
+    if (p && p->length == 16) memcpy(r, p->value, 16);
+    CHECK(p && p->length == 16 && r[0] == 0x10000 + (3 << 11) - 0x1000 && r[1] == 0x100);
+    CHECK(store && !xl_adt_get(store, "droidvm,intid") && xl_adt_get(store, "dma-coherent"));
+    xl_adt_free(pt);
+  }
+  machine_default(&m); m.dev[3].pci = true;     // an input device on PCI: not a disk
+  CHECK(xl_machine_tree(&m, &err) == NULL);
 }
 
 static void test_sidecars(void)

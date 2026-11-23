@@ -347,7 +347,8 @@ its console and nothing else.
   RAM's end (crosvm's FDT and its 8 MiB restricted DMA pool sit there). The device tree is crosvm's machine as run
   10's `fdt.dtb` describes it: GICD `0x3fff0000` and the redistributors right below (`0x20000` a vCPU), the 19.2 MHz
   timer, PSCI by HVC, the console on the first ns16550a; arm-io from `0x1000` to 1 GiB. It also writes `OUT.adt`
-  (that tree, for `xnuloader-inspect adt`). No device yet: crosvm's are on PCI.
+  (that tree, for `xnuloader-inspect adt`). Boot 1 had no device; the disks came with step 2 (below), and with them
+  the label's `swiotlb-mib=N` and the window's end at the pool's MiB + 8 MiB before the RAM's end.
 - The run: `oneios-tool phone vm-boot --image FILE [--seconds N] [--thp] [--out DIR]` (`tools/oneios-tool/README.md`):
   vm-probe's crosvm line with the label's RAM and vCPUs, the console followed live, `crosvm stop` after N seconds or
   at `vm-boot --stop`.
@@ -368,12 +369,69 @@ in the guest [I]). Pointer authentication works in the VM too (vmprobe run 11, `
 the keys written, PACIA and AUTIA round trip, PACGA, and the wrong modifier traps with FPAC, ESR `0x72000000`).
 What it does not show yet: the disks, more than one vCPU, the display and input.
 
+### The image set's disks in the crosvm VM (step 2, 2026-11-23)
+AVF's crosvm has its virtio devices on PCI only (`pci-host-cam-generic`, CAM at `0x10000`, BARs assigned by crosvm,
+`linux,pci-probe-only`), and in a protected VM its host reads and writes **only the restricted DMA pool**: crosvm
+lends the VM's RAM to it and shares the pool (`hypervisor/src/gunyah/mod.rs`: `GUNYAH_MEM_FORCE_LEND` for the guest's
+memory, `GUNYAH_MEM_FORCE_SHARE` for `StaticSwiotlbRegion`), so a device given any other guest address makes crosvm
+touch memory its host no longer has (lyc8503's Debian kernel without a restricted DMA pool put a phone into
+Qualcomm's crash dump mode that way). The pool is the RAM's last `--swiotlb` MiB (`aarch64/src/lib.rs`
+`get_swiotlb_addr`), as every tree the S25 made shows: `restricted_dma_reserved@87800000` for 128 MiB, `bf800000` for
+1 GiB, `ff800000` for 2 GiB, `13f800000` for 3 GiB. (crosvm's source read: AOSP `platform/external/crosvm`.)
+- The kernel's disk driver (`storage/OneiOSHostedDisk.cpp`, native only; `kernel/patches/oneios-hosted/README.md`
+  "0076"): a node with compatible `oneios,virtio-pci` is a modern virtio-blk PCI function (`1af4:1042`), its `reg` the
+  function's configuration space. The driver walks its capabilities (common configuration, notification, ISR, device
+  configuration: VirtIO 1.2 section 4.1), maps their BAR (as the VMM assigned it, else placed in the node's
+  `oneios,pci-bar-window`, which only QEMU needs), turns on memory decoding and bus mastering, and drives the same one
+  polled queue of 8 as on virtio-mmio, accepting `VIRTIO_F_ACCESS_PLATFORM` (crosvm offers it to a protected VM).
+  Everything the device touches (the queue page, the request header, the status byte and the 1 MiB transfer buffer)
+  lies in the node's `oneios,dma-window`, mapped write-back (`VM_WIMG_COPYBACK`, as the host maps the pool; a device
+  mapping would not be coherent with it), and the driver refuses any address outside it. The registers are reached
+  with single loads and stores of one register (inline assembly): Gunyah emulates an access from its syndrome, which
+  a load or store pair or one with writeback does not give.
+- The loader: `xnuloader-crosvm ... --image DIR [--phone-image DIR] [--phone-data FILE] [--swiotlb MIB]`
+  (`docs/booter.md`): the image set's five disks (`tools/image_disks.c`, shared with xnuloader-qemu) as PCI functions
+  00:02.0 to 00:06.0 (os, systemos, app, the Data seed, the Data store), each with its identity, its hash list and a
+  1 MiB + 64 KiB slice of the pool as its DMA window; the trust caches and root matching as on the bench; the label
+  `oneios-crosvm ram-mib=N cpus=N swiotlb-mib=N`; and `OUT.disks` for vm-boot: the pool's address, the store, and
+  crosvm's `--block` values (`path=...,ro=true,id=os,pci-address=00:02.0`, ...). The files are the staged set on the
+  phone (`/data/local/tmp/oneios/image/`, read-only); the Data store is the VM's own
+  (`/data/local/tmp/oneios-vmboot/data.img`, sparse at the manifest's 16 GiB), never the hosted session's.
+- The run: `phone vm-boot` reads `FILE.disks`, refuses a list whose pool is not the label's, checks on the phone
+  that each read-only file has the manifest's size, makes the store when it is missing and wants 4 GiB free on
+  /data; crosvm gets `--swiotlb` from the label and the `--block` values. The moment crosvm has written its tree,
+  the script checks `restricted_dma_reserved@ADDR` in it and stops the VM if the pool is elsewhere: crosvm writes the
+  tree before the vCPU starts, and the kernel's disks start seconds later.
+- The bench: `xnuloader-qemu --pci` (`scripts/qemu/boot-vm.sh` `PCI=1`) gives QEMU's virtio-blk-pci the same nodes
+  (virt's ECAM at `0x3f000000`, a BAR window each, the pool after the boot video).
+
+**Bench, 2026-11-23 (`PCI=1`, the native collection of this kernel, `out/qemu/pci`):** the five functions found
+(`PCI 1af4:1042, BAR 4 at 0x10000000 ...`, each DMA window in the pool after the boot video), the three images
+verified chunk by chunk, the Data store writable; "Got boot device = .../virtio-pci-0@3F00F000/OneiOSHostedDisk/...
+Rave24A446.V54OS@1", BSD root, launchd. Stopped there: it had shown the path.
+
+**Boot 2 on the S25, 2026-11-23: iOS's launchd and its boot in the VM** (`phone vm-boot --image
+out/crosvm/kernel-disks.img --seconds 900 --thp`, `logs/pa3q-vmboot/boot2/`): `xnuloader-crosvm ... --ram-mib 2880
+--cpus 1 --args-add oneios-data-wait=1800 --image <the set>` (window 2814 MiB, the pool at `0x133800000`), the RAM from
+gh_hugepage_reserve's pool (1,405 pages of 2 MiB). The script found crosvm's tree with `restricted_dma_reserved@133800000`
+as the disks' windows. The five functions at crosvm's BARs (`BAR 0 at 0x2000000` ... `0x2020000`), os, systemos and app
+verified, the seed, the new store (16 GiB, sparse, the VM's own); "Got boot device = .../virtio-pci-0@10000/
+OneiOSHostedDisk/... Rave24A446.V54OS@1", BSD root `disk7s1`, launchd ("hello, launchd"), the seed unpacked into
+/private/var, **all 60 boot tasks**, the daemons (wifid, securityd, cfprefsd, backboardd, dasd, logd and the rest),
+and **SpringBoard about 30 s into the CPU reports**: on one vCPU, against about 75 s on the phone's hosted path and
+hours on QEMU. SpringBoard then ends with status 0x5 and starts again (9 times in 900 s, "Too many corpses"): the VM
+has no display ("oneios-display: panel 0x0 at 0 (0 bytes); virtio scanout state 0"), as the bench had none before its
+virtio-gpu. AccessibilityUIServer turns at 99% of the vCPU meanwhile. `crosvm stop` ended the VM at 900 s; One UI ran
+on all along. The tool waited at the VM's start for the whole run (root's `sh -s` waited for its `( ... ) &` child):
+`detached_start` (adb.rs) now starts the VM's and the pool's scripts with a double fork.
+
 ## Next
 1. The Gunyah VM fits iOS with gh_hugepage_reserve ("Verdict, revised"). Its road to an iOS guest, each step a
    test on the phone: the native kernel booted by crosvm with its console on the 8250 at `0x3f8` (done: "The native
-   kernel in crosvm", boot 1); virtio over PCI with every buffer in the restricted DMA pool (or Droid-VM's crosvm,
-   virtio-mmio as on the bench, BSD-3) and the image set's disks as virtio-blk from /data (step 2, next); more
-   vCPUs (PSCI CPU_ON by HVC); then the display, input and the GPU (drm2kgsl, as the hosted path's). The pool is
+   kernel in crosvm", boot 1); virtio over PCI with every buffer in the restricted DMA pool and the image set's disks
+   as virtio-blk from /data (done: step 2, boot 2: launchd, the 60 boot tasks, the daemons, SpringBoard); next the
+   display (crosvm's virtio-gpu, or a framebuffer the host shows), so that SpringBoard stays up; more vCPUs (PSCI
+   CPU_ON by HVC); then input and the GPU (drm2kgsl, as the hosted path's). The pool is
    grown once per boot after the temporary root (`hugepool load`, `hugepool grow`); `hugepool unload` gives the 3 GiB
    back.
    The other paths stay: the hosted one that runs today, and XNU alone (the hand-off under Samsung's protections,

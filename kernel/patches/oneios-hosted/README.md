@@ -1195,6 +1195,19 @@ set's `*.hashes`), and calls the disk verified only when that list's SHA-256 is 
 is the root of trust there, as xnuhost is for a hosted kernel. The native build links the storage, software AES, key
 store, HID, GPU and display archives (no audio or Wi-Fi: those have no device without a host).
 
+A native disk can also be a virtio-blk **PCI** function (2026-11-23; compatible `oneios,virtio-pci`, node `reg` = the
+function's configuration space; `docs/native.md` "The image set's disks in the crosvm VM"): AVF's crosvm has its
+devices on PCI only, and in a protected VM its host reads and writes only the restricted DMA pool. `pciStart` reads
+the function's virtio capabilities (common configuration, notification, ISR, device configuration, all in one memory
+BAR), takes the BAR as the VMM assigned it or places it in `oneios,pci-bar-window` (QEMU's virt, which has no firmware),
+turns on memory decoding and bus mastering, and maps `oneios,dma-window` write-back (`ml_io_map_unmappable` with
+`VM_WIMG_COPYBACK`: the host maps the pool cacheable, and a device mapping would not be coherent with it); the queue
+page sits at the window's start and the transfer buffer 64 KiB in. `configurePci` is `configureQueue` over the common
+configuration (features: read-only, flush, `VERSION_1` and `ACCESS_PLATFORM`; one queue of 8, no MSI-X vector, polled);
+`transfer` notifies through the notification region and reads the ISR, and refuses to run when its buffers are not in
+the window. Every register access is one load or store of one register (inline assembly): Gunyah emulates a device
+access from its syndrome, which a pair or a writeback access does not give.
+
 For the hosted kernel nothing compiles differently: every changed condition is true there as before, and the added
 `#if XNU_HOSTED` lines keep the hosted code.
 

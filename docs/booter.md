@@ -220,16 +220,28 @@ window at 0x0a000000 + 0x200 * K) and the CPU (`--qemu-cpu`, a Cortex-A710 by de
 [--hz N]` adds the display as xnuhost gives it: `/arm-io/virtio-gpu` on the transport after the disks (QEMU's 2D
 `virtio-gpu-device` with that first mode), the boot video right after the kernel's window (`boot_args.Video`, outside the
 tree's DRAM), the tree's display mode and scale, and `offline-legacy-unit-scale` and `sheng-vsync` in the boot arguments.
+`--pci` puts the disks on QEMU's virtio-blk-pci instead (00:02.0 to 00:06.0 on virt's PCIe host, modern only, no
+MSI-X): each node (`virtio-pci-N`, `data-store`, compatible `oneios,virtio-pci`, `xl_device.pci`) is the function's
+configuration space in virt's ECAM (`0x3f000000`), with `oneios,pci-bar-window` (1 MiB of the 32-bit PCI window, where
+the kernel places the BAR: virt has no firmware to assign it) and `oneios,dma-window` (a slice of an 8 MiB pool after
+the boot video): the bench of the crosvm VM's disks.
 
 `tools/xnuloader-crosvm.c` is that loader for a VM of Android's crosvm under the phone's Gunyah (`docs/native.md`, "The
 native kernel in crosvm"): `xnuloader-crosvm KERNEL OUT [--cpus N] [--ram-mib N] [--timebase HZ] [--args TEXT]
-[--args-add TEXT]` writes one arm64 Linux Image (crosvm loads it at the RAM's start, `0x80000000`, and enters it with
-the MMU off): the Linux header, xnuloader-qemu's stub at `0x40`, the label `oneios-crosvm ram-mib=N cpus=N` at `0x100`
-(`oneios-tool phone vm-boot` starts crosvm with it), and the window at RAM + 32 MiB + the kernel base modulo 32 MiB,
-ending 16 MiB before the RAM's end (crosvm's FDT and restricted DMA pool). The machine is crosvm's: GICD `0x3fff0000`
-and the redistributors below it, the 19.2 MHz timer, PSCI by HVC, the console on the ns16550a at `0x3f8`
-(`xl_machine.uart_ns16550`: `/arm-io/uart0` `compatible` `ns16550a` with an absolute `reg`, kernel patch 0077; arm-io
-from `0x1000` to 1 GiB). `OUT.adt` is the tree it gave the kernel. No disks or display yet: crosvm's devices are on PCI.
+[--args-add TEXT] [--swiotlb MIB] [--image DIR [--phone-image DIR] [--phone-data FILE]]` writes one arm64 Linux Image
+(crosvm loads it at the RAM's start, `0x80000000`, and enters it with the MMU off): the Linux header, xnuloader-qemu's
+stub at `0x40`, the label `oneios-crosvm ram-mib=N cpus=N swiotlb-mib=N` at `0x100` (`oneios-tool phone vm-boot` starts
+crosvm with it), and the window at RAM + 32 MiB + the kernel base modulo 32 MiB, ending the pool's MiB + 8 MiB before
+the RAM's end (crosvm's FDT and its restricted DMA pool, the RAM's last `--swiotlb` MiB, 8 by default). The machine is
+crosvm's: GICD `0x3fff0000` and the redistributors below it, the 19.2 MHz timer, PSCI by HVC, the console on the
+ns16550a at `0x3f8` (`xl_machine.uart_ns16550`: `/arm-io/uart0` `compatible` `ns16550a` with an absolute `reg`, kernel
+patch 0077; arm-io from `0x1000` to 1 GiB). With `--image DIR` the image set's disks (`tools/image_disks.c`, the code
+xnuloader-qemu uses) are crosvm's virtio-blk PCI functions 00:02.0 to 00:06.0, each node the function's configuration
+space in crosvm's CAM (`0x10000 + device << 11`) with its identity, hash list and `oneios,dma-window` (1 MiB + 64 KiB of
+the pool: in a protected VM crosvm reads and writes no other guest memory); the files are the phone's
+(`--phone-image`, default the staged set `/data/local/tmp/oneios/image`; `--phone-data`, default the VM's own store
+`/data/local/tmp/oneios-vmboot/data.img`). `OUT.adt` is the tree it gave the kernel; `OUT.disks` lists the pool's
+address, the store and crosvm's `--block` values for vm-boot. No display yet.
 
 ### 2.2 Memory
 

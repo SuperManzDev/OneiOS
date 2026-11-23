@@ -27,6 +27,14 @@
 //     chunk that differs is a read error and stays unchecked. The disk is a verified one ("oneios,verified") only when
 //     that list's SHA-256 is the one the node names. The loader is the root of trust here: it writes the kernel's
 //     memory, as xnuhost does for a hosted kernel.
+// A native disk can also be a virtio-blk PCI function (compatible "oneios,virtio-pci": a VM of Android's crosvm under the
+// phone's Gunyah, docs/native.md "A VM under Gunyah"; QEMU's virtio-blk-pci on the bench). Its node's reg is the function's
+// configuration space; the virtio capabilities there name the regions of its BAR (VirtIO 1.2 section 4.1). Its BAR is
+// the VMM's (crosvm assigns them, linux,pci-probe-only), else placed in the node's "oneios,pci-bar-window" (QEMU without
+// a firmware). In a protected VM the host reads and writes no guest memory but a pool it shares (crosvm's restricted DMA
+// pool), and a device access anywhere else faults in the host: everything the device touches (the queue, the request
+// header, the status byte, the transfer buffer) lies in the node's "oneios,dma-window", the loader's piece of that pool,
+// mapped cacheable as the host maps it, and the driver refuses any address outside it. The queue is polled as above.
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOLib.h>
@@ -51,6 +59,9 @@ void oneios_hosted_mmio_write32(uint64_t physical, uint32_t value);
 // The native kernel's chunk checks, for a debugger and the boot log: chunks checked, chunks that differed.
 volatile uint64_t oneios_native_chunks_checked = 0;
 volatile uint32_t oneios_native_chunk_failures = 0;
+// A PCI disk's DMA window: a cacheable mapping of memory outside the kernel's window (osfmk/arm64/machine_routines.c).
+vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
+void ml_io_unmap(vm_offset_t addr, vm_size_t sz);
 #endif
 
 int native_verified_block_root_authorized(dev_t device);
@@ -79,6 +90,37 @@ struct Used { uint32_t id; uint32_t length; };
 static_assert(sizeof(Descriptor) == 16 && sizeof(Request) == 16 && sizeof(Used) == 8, "VirtIO wire layout");
 inline void dmaBarrier() { __asm__ volatile("dmb osh" ::: "memory"); }
 const char apfsVolumeContent[] = "41504653-0000-11AA-AA11-00306543ECAC";
+
+#if !XNU_HOSTED
+// virtio-pci (VirtIO 1.2 section 4.1). The registers are reached with one load or store of one register and an
+// immediate-free address: under a hypervisor a device access is emulated from its syndrome, which a load or store with
+// writeback or of a pair does not give (Gunyah would end the VM), so the compiler is not left to pick the instruction.
+inline uint8_t rd8(volatile const uint8_t *p) { uint32_t v; __asm__ volatile("ldrb %w0, [%1]" : "=r"(v) : "r"(p) : "memory"); return static_cast<uint8_t>(v); }
+inline uint16_t rd16(volatile const uint8_t *p) { uint32_t v; __asm__ volatile("ldrh %w0, [%1]" : "=r"(v) : "r"(p) : "memory"); return static_cast<uint16_t>(v); }
+inline uint32_t rd32(volatile const uint8_t *p) { uint32_t v; __asm__ volatile("ldr %w0, [%1]" : "=r"(v) : "r"(p) : "memory"); return v; }
+inline void wr8(volatile uint8_t *p, uint8_t v) { __asm__ volatile("strb %w0, [%1]" :: "r"(static_cast<uint32_t>(v)), "r"(p) : "memory"); }
+inline void wr16(volatile uint8_t *p, uint16_t v) { __asm__ volatile("strh %w0, [%1]" :: "r"(static_cast<uint32_t>(v)), "r"(p) : "memory"); }
+inline void wr32(volatile uint8_t *p, uint32_t v) { __asm__ volatile("str %w0, [%1]" :: "r"(v), "r"(p) : "memory"); }
+// The configuration space (its first 256 bytes, as crosvm's CAM has them).
+enum : unsigned { pciVendor = 0x00, pciDevice = 0x02, pciCommand = 0x04, pciStatus = 0x06, pciBar0 = 0x10, pciCapabilities = 0x34,
+                  pciConfigBytes = 0x100 };
+enum : uint16_t { pciVendorVirtio = 0x1af4, pciDeviceVirtioBlock = 0x1042,   // modern virtio-blk: 0x1040 + device 2
+                  pciCommandMemory = 1U << 1, pciCommandBusMaster = 1U << 2, pciStatusCapabilities = 1U << 4 };
+// The vendor capabilities that name the regions: common configuration, notification, ISR, device configuration.
+enum : uint8_t { capVendor = 0x09, capCommon = 1, capNotify = 2, capISR = 3, capDevice = 4 };
+// virtio_pci_common_cfg
+enum : unsigned { ccDeviceFeatureSelect = 0x00, ccDeviceFeature = 0x04, ccDriverFeatureSelect = 0x08, ccDriverFeature = 0x0c,
+                  ccDeviceStatus = 0x14, ccConfigGeneration = 0x15, ccQueueSelect = 0x16, ccQueueSize = 0x18,
+                  ccQueueMsixVector = 0x1a, ccQueueEnable = 0x1c, ccQueueNotifyOff = 0x1e, ccQueueDesc = 0x20,
+                  ccQueueDriver = 0x28, ccQueueDevice = 0x30, ccBytes = 0x38 };
+// The high feature word: VIRTIO_F_VERSION_1 (32) and VIRTIO_F_ACCESS_PLATFORM (33: the device's DMA is the platform's,
+// which crosvm offers a protected VM; here its addresses are the pool's physical ones).
+enum : uint32_t { featureVersion1 = 1U << 0, featureAccessPlatform = 1U << 1 };
+// The DMA window: the queue page at its start, the transfer buffer 64 KiB in.
+constexpr uint64_t dmaTransferOffset = 0x10000;
+// The kernel's normal memory attributes (VM_WIMG_COPYBACK, osfmk/arm/memory_types.h): write-back, as the host maps the pool.
+constexpr unsigned wimgCopyback = 0x2;
+#endif
 }
 
 class OneiOSHostedDisk : public IOBlockStorageDevice {
@@ -118,7 +160,23 @@ class OneiOSHostedDisk : public IOBlockStorageDevice {
   uint64_t imageBytes = 0;
   bool loadHashList(IOService *provider);
   IOReturn readChecked(IOMemoryDescriptor *buffer, uint64_t into, uint64_t at, uint32_t *bytes);
+  // A virtio-pci disk: the config space (registerMap, the node's reg), its BAR's regions, the DMA window.
+  bool pci = false;
+  volatile uint8_t *configSpace = nullptr;
+  IOMemoryMap *barMap = nullptr;
+  volatile uint8_t *common = nullptr, *notifyBase = nullptr, *notifyAt = nullptr, *isr = nullptr, *deviceConfig = nullptr;
+  uint32_t notifyLength = 0, notifyMultiplier = 0;
+  vm_offset_t dmaVirtual = 0;
+  uint64_t dmaPhysical = 0, dmaBytes = 0;
+  bool pciStart(IOService *provider);
+  bool configurePci();
+  bool dmaInside(uint64_t address, uint64_t length) const {
+    return address >= dmaPhysical && length <= dmaBytes && address - dmaPhysical <= dmaBytes - length;
+  }
 #endif
+  // The queue page and the transfer buffer: the two buffers' bytes, or a PCI disk's DMA window.
+  uint8_t *queueBytes = nullptr;
+  uint8_t *transferBytes = nullptr;
   void writeAddress(unsigned offset, uint64_t value) {
     write32(offset, static_cast<uint32_t>(value));
     write32(offset + 4, static_cast<uint32_t>(value >> 32));
@@ -177,7 +235,11 @@ static bool compatibleWith(IOService *provider, const char *name)
 IOService *OneiOSHostedDisk::probe(IOService *provider, SInt32 *score)
 {
   // The read-only disks and the Data store, as runtime/loader/src/machine.c names them.
-  if (!compatibleWith(provider, "virtio,mmio") && !compatibleWith(provider, "droidvm,data-store")) return nullptr;
+  if (!compatibleWith(provider, "virtio,mmio") && !compatibleWith(provider, "droidvm,data-store")
+#if !XNU_HOSTED
+      && !compatibleWith(provider, "oneios,virtio-pci")
+#endif
+      ) return nullptr;
   return IOBlockStorageDevice::probe(provider, score);
 }
 
@@ -185,6 +247,15 @@ bool OneiOSHostedDisk::reset()
 {
   if (!registers) return true;
   online = false;
+#if !XNU_HOSTED
+  if (pci) {
+    if (!common) return true;
+    // Writing 0 resets the device; it is done when the status reads 0 again.
+    wr8(common + ccDeviceStatus, 0);
+    for (unsigned wait = 0; wait < 10000 && rd8(common + ccDeviceStatus); ++wait) IODelay(10);
+    return rd8(common + ccDeviceStatus) == 0;
+  }
+#endif
   write32(0x70, 0);
   return read32(0x70) == 0;
 }
@@ -218,9 +289,11 @@ bool OneiOSHostedDisk::configureQueue()
   queuePhysical = queueMemory->getPhysicalSegment(0, &queueLength);
   transferPhysical = transferMemory->getPhysicalSegment(0, &transferLength);
   if (!queuePhysical || !transferPhysical || queueLength < 4096 || transferLength < transferSize) return false;
-  bzero(queueMemory->getBytesNoCopy(), 4096);
+  queueBytes = static_cast<uint8_t *>(queueMemory->getBytesNoCopy());
+  transferBytes = static_cast<uint8_t *>(transferMemory->getBytesNoCopy());
+  bzero(queueBytes, 4096);
   // No used-buffer interrupts: the host serves the queue inside the notify call.
-  *reinterpret_cast<volatile uint16_t *>(static_cast<unsigned char *>(queueMemory->getBytesNoCopy()) + 128) = 1;
+  *reinterpret_cast<volatile uint16_t *>(queueBytes + 128) = 1;
   availableIndex = usedIndex = 0;
   dmaBarrier();
   write32(0x38, queueSize);
@@ -244,13 +317,188 @@ bool OneiOSHostedDisk::configureQueue()
   return online;
 }
 
+#if !XNU_HOSTED
+// A BAR's address, 0 when the VMM left it unassigned; *wide for a 64-bit one (it takes the next BAR too).
+static uint64_t barAddress(volatile uint8_t *config, unsigned index, bool *wide)
+{
+  uint32_t low = rd32(config + pciBar0 + index * 4);
+  *wide = (low & 0x7) == 0x4;
+  if (low & 1) return 0;                           // an I/O BAR: not one of virtio's regions
+  uint64_t address = low & ~UINT64_C(0xf);
+  if (*wide) address |= static_cast<uint64_t>(rd32(config + pciBar0 + index * 4 + 4)) << 32;
+  return address;
+}
+
+// The function's capabilities, its BAR (placed from the node's window when the VMM did not assign it), the regions
+// mapped, the DMA window mapped cacheable: everything configurePci needs. Called with nothing of the device started.
+bool OneiOSHostedDisk::pciStart(IOService *provider)
+{
+  volatile uint8_t *config = configSpace;
+  uint16_t vendor = rd16(config + pciVendor), device = rd16(config + pciDevice);
+  if (vendor != pciVendorVirtio || device != pciDeviceVirtioBlock) {
+    printf("OneiOSHostedDisk: %s: PCI %04x:%04x is not a modern virtio-blk function\n", provider->getName(), vendor, device);
+    return false;
+  }
+  if (!(rd16(config + pciStatus) & pciStatusCapabilities)) return false;
+  struct Region { uint8_t bar; uint32_t offset, length; bool found; } regions[capDevice + 1] = {};
+  uint32_t multiplier = 0;
+  uint8_t at = rd8(config + pciCapabilities) & 0xfc;
+  for (unsigned walked = 0; at >= 0x40 && at <= pciConfigBytes - 20 && walked < 48; ++walked) {
+    uint8_t id = rd8(config + at), next = rd8(config + at + 1) & 0xfc;
+    uint8_t type = rd8(config + at + 3);
+    if (id == capVendor && type >= capCommon && type <= capDevice && !regions[type].found) {
+      regions[type] = { rd8(config + at + 4), rd32(config + at + 8), rd32(config + at + 12), true };
+      if (type == capNotify) multiplier = rd32(config + at + 16);
+    }
+    at = next;
+  }
+  // The four regions in one memory BAR (crosvm's BAR 0, QEMU's BAR 4), each large enough for what is read there.
+  const unsigned bar = regions[capCommon].bar;
+  uint64_t span = 0;
+  for (unsigned type = capCommon; type <= capDevice; ++type) {
+    const Region &r = regions[type];
+    if (!r.found || r.bar != bar || bar > 5 || r.offset > UINT32_MAX - r.length) {
+      printf("OneiOSHostedDisk: %s: virtio capability %u missing or not in BAR %u\n", provider->getName(), type, bar);
+      return false;
+    }
+    if (r.offset + static_cast<uint64_t>(r.length) > span) span = r.offset + static_cast<uint64_t>(r.length);
+  }
+  if (regions[capCommon].length < ccBytes || regions[capISR].length < 1 || regions[capDevice].length < 8 ||
+      regions[capNotify].length < 2 || span > (16U << 20)) return false;
+  span = (span + 0xfff) & ~UINT64_C(0xfff);
+  bool wide = false;
+  uint64_t base = barAddress(config, bar, &wide);
+  if (!base) {
+    // Not assigned (QEMU's virt has no firmware to do it): sized with all ones, placed at the window's start.
+    OSData *window = OSDynamicCast(OSData, provider->getProperty("oneios,pci-bar-window"));
+    uint64_t place[2] = {};
+    if (!window || window->getLength() != sizeof(place)) {
+      printf("OneiOSHostedDisk: %s: BAR %u not assigned and no oneios,pci-bar-window\n", provider->getName(), bar);
+      return false;
+    }
+    memcpy(place, window->getBytesNoCopy(), sizeof(place));
+    wr16(config + pciCommand, static_cast<uint16_t>(rd16(config + pciCommand) & ~(pciCommandMemory | pciCommandBusMaster)));
+    volatile uint8_t *low = config + pciBar0 + bar * 4;
+    uint32_t flags = rd32(low) & 0xf;
+    wr32(low, 0xffffffff);
+    uint64_t mask = rd32(low) & ~UINT64_C(0xf);
+    if (wide) {
+      wr32(low + 4, 0xffffffff);
+      mask |= static_cast<uint64_t>(rd32(low + 4)) << 32;
+    } else {
+      mask |= UINT64_C(0xffffffff00000000);
+    }
+    uint64_t size = ~mask + 1;
+    if (!mask || (size & (size - 1)) || size < span || (place[0] & (size - 1)) || size > place[1] || (!wide && place[0] + size > (UINT64_C(1) << 32))) {
+      printf("OneiOSHostedDisk: %s: BAR %u of 0x%llx bytes does not fit its window 0x%llx+0x%llx\n", provider->getName(), bar, size, place[0], place[1]);
+      return false;
+    }
+    wr32(low, static_cast<uint32_t>(place[0]) | flags);
+    if (wide) wr32(low + 4, static_cast<uint32_t>(place[0] >> 32));
+    base = barAddress(config, bar, &wide);
+    if (base != place[0]) return false;
+  }
+  wr16(config + pciCommand, static_cast<uint16_t>(rd16(config + pciCommand) | pciCommandMemory | pciCommandBusMaster));
+  IODeviceMemory *barMemory = IODeviceMemory::withRange(base, span);
+  barMap = barMemory ? barMemory->map() : nullptr;
+  OSSafeReleaseNULL(barMemory);
+  if (!barMap) return false;
+  auto *mappedBar = reinterpret_cast<volatile uint8_t *>(barMap->getVirtualAddress());
+  common = mappedBar + regions[capCommon].offset;
+  isr = mappedBar + regions[capISR].offset;
+  deviceConfig = mappedBar + regions[capDevice].offset;
+  notifyBase = mappedBar + regions[capNotify].offset;   // queue 0's notify address: configurePci adds its offset
+  notifyLength = regions[capNotify].length;
+  notifyMultiplier = multiplier;
+  // The DMA window: the queue page, then the transfer buffer.
+  OSData *dma = OSDynamicCast(OSData, provider->getProperty("oneios,dma-window"));
+  uint64_t window[2] = {};
+  if (!dma || dma->getLength() != sizeof(window)) {
+    printf("OneiOSHostedDisk: %s: no oneios,dma-window: the device may touch no memory, not started\n", provider->getName());
+    return false;
+  }
+  memcpy(window, dma->getBytesNoCopy(), sizeof(window));
+  if (!window[0] || (window[0] & 0xfff) || (window[1] & 0xfff) || window[1] < dmaTransferOffset + transferSize ||
+      window[0] > UINT64_MAX - window[1]) return false;
+  dmaVirtual = ml_io_map_unmappable(static_cast<vm_offset_t>(window[0]), static_cast<vm_size_t>(window[1]), wimgCopyback);
+  if (!dmaVirtual) return false;
+  dmaPhysical = window[0];
+  dmaBytes = window[1];
+  queueBytes = reinterpret_cast<uint8_t *>(dmaVirtual);
+  queuePhysical = dmaPhysical;
+  transferBytes = queueBytes + dmaTransferOffset;
+  transferPhysical = dmaPhysical + dmaTransferOffset;
+  if (!dmaInside(queuePhysical, 4096) || !dmaInside(transferPhysical, transferSize)) return false;
+  printf("OneiOSHostedDisk: %s: PCI %04x:%04x, BAR %u at 0x%llx (notify x%u), DMA window 0x%llx+0x%llx\n", provider->getName(),
+         vendor, device, bar, base, multiplier, dmaPhysical, dmaBytes);
+  return true;
+}
+
+// The virtio-pci form of configureQueue: one queue of queueSize in the DMA window, polled, no MSI-X vector.
+bool OneiOSHostedDisk::configurePci()
+{
+  if (!reset()) return false;
+  wr8(common + ccDeviceStatus, 1);
+  wr8(common + ccDeviceStatus, 3);
+  wr32(common + ccDeviceFeatureSelect, 0);
+  uint32_t lowFeatures = rd32(common + ccDeviceFeature);
+  wr32(common + ccDeviceFeatureSelect, 1);
+  uint32_t highFeatures = rd32(common + ccDeviceFeature);
+  if (!(highFeatures & featureVersion1)) return false;
+  writable = !(lowFeatures & featureReadOnly);
+  flushes = (lowFeatures & featureFlush) != 0;
+  wr32(common + ccDriverFeatureSelect, 0);
+  wr32(common + ccDriverFeature, lowFeatures & (featureReadOnly | featureFlush));
+  wr32(common + ccDriverFeatureSelect, 1);
+  wr32(common + ccDriverFeature, highFeatures & (featureVersion1 | featureAccessPlatform));
+  wr8(common + ccDeviceStatus, 11);
+  if (!(rd8(common + ccDeviceStatus) & 8)) return false;
+  wr16(common + ccQueueSelect, 0);
+  if (rd16(common + ccQueueSize) < queueSize || rd16(common + ccQueueEnable)) return false;
+  uint64_t notifyOffset = static_cast<uint64_t>(rd16(common + ccQueueNotifyOff)) * notifyMultiplier;
+  if (notifyOffset + 2 > notifyLength) return false;
+  notifyAt = notifyBase + notifyOffset;
+  bzero(queueBytes, 4096);
+  *reinterpret_cast<volatile uint16_t *>(queueBytes + 128) = 1;   // no used-buffer interrupts: the queue is polled
+  availableIndex = usedIndex = 0;
+  dmaBarrier();
+  wr16(common + ccQueueSize, queueSize);
+  wr16(common + ccQueueMsixVector, 0xffff);                       // VIRTIO_MSI_NO_VECTOR
+  const uint64_t rings[3] = { queuePhysical, queuePhysical + 128, queuePhysical + 256 };
+  for (unsigned i = 0; i < 3; ++i) {
+    wr32(common + ccQueueDesc + i * 8, static_cast<uint32_t>(rings[i]));
+    wr32(common + ccQueueDesc + i * 8 + 4, static_cast<uint32_t>(rings[i] >> 32));
+  }
+  wr16(common + ccQueueEnable, 1);
+  bool stable = false;
+  for (unsigned attempt = 0; attempt < 8; ++attempt) {
+    uint8_t generation = rd8(common + ccConfigGeneration);
+    uint64_t low = rd32(deviceConfig), high = rd32(deviceConfig + 4);
+    if (generation == rd8(common + ccConfigGeneration)) {
+      capacity = low | (high << 32);
+      stable = true;
+      break;
+    }
+  }
+  if (!stable || !capacity || capacity > UINT64_MAX / 512) return false;
+  wr8(common + ccDeviceStatus, 15);
+  uint8_t status = rd8(common + ccDeviceStatus);
+  online = (status & 15) == 15 && !(status & 0x40);                // not DEVICE_NEEDS_RESET
+  return online;
+}
+#endif
+
 // One request: header, the transfer buffer (not for a flush), status. Called with the gate held.
 IOReturn OneiOSHostedDisk::transfer(uint32_t operation, uint64_t sector, uint32_t bytes)
 {
   if (!online) return kIOReturnNotReady;
   if (operation != opFlush && (!bytes || bytes > transferSize || (bytes & 511) || sector >= capacity ||
       bytes / 512 > capacity - sector)) return kIOReturnBadArgument;
-  auto *queue = static_cast<unsigned char *>(queueMemory->getBytesNoCopy());
+#if !XNU_HOSTED
+  // A PCI disk's device touches nothing outside the DMA window (a protected VM's host faults on any other address).
+  if (pci && (!dmaInside(queuePhysical, 4096) || !dmaInside(transferPhysical, transferSize))) return kIOReturnInternalError;
+#endif
+  auto *queue = queueBytes;
   auto *descriptors = reinterpret_cast<Descriptor *>(queue);
   auto *request = reinterpret_cast<Request *>(queue + 512);
   volatile uint8_t *status = queue + 528;
@@ -270,6 +518,10 @@ IOReturn OneiOSHostedDisk::transfer(uint32_t operation, uint64_t sector, uint32_
   ++availableIndex;
   available[1] = availableIndex;
   dmaBarrier();
+#if !XNU_HOSTED
+  if (pci) wr16(notifyAt, 0);                // queue 0
+  else
+#endif
   write32(0x50, 0);
   auto *used = reinterpret_cast<volatile uint16_t *>(queue + 256);
   uint64_t deadline;
@@ -288,8 +540,15 @@ IOReturn OneiOSHostedDisk::transfer(uint32_t operation, uint64_t sector, uint32_
   bool valid = used[1] == static_cast<uint16_t>(usedIndex + 1) && element->id == 0 && *status == 0 &&
                (operation != opRead || element->length >= bytes + 1);
   ++usedIndex;
-  uint32_t interrupts = read32(0x60) & 3;
-  if (interrupts) write32(0x64, interrupts);
+#if !XNU_HOSTED
+  if (pci) {
+    (void)rd8(isr);                          // reading the ISR status clears it (and a level INTx it raised)
+  } else
+#endif
+  {
+    uint32_t interrupts = read32(0x60) & 3;
+    if (interrupts) write32(0x64, interrupts);
+  }
   if (!valid) {
     // A read the host refuses is a chunk that failed its hash: the disk stays up, the read fails.
     __atomic_fetch_add(&oneios_hosted_disk_failures, 1, __ATOMIC_RELAXED);
@@ -375,7 +634,7 @@ IOReturn OneiOSHostedDisk::readChecked(IOMemoryDescriptor *buffer, uint64_t into
   uint64_t chunk = at / chunkBytes, start = chunk * chunkBytes;
   if (chunk >= chunkCount) return kIOReturnIOError;           // past what the list describes
   if (*bytes > start + chunkBytes - at) *bytes = static_cast<uint32_t>(start + chunkBytes - at);
-  auto *data = static_cast<uint8_t *>(transferMemory->getBytesNoCopy());
+  auto *data = transferBytes;
   IOReturn result;
   if (checkedChunks[chunk / 8] & (1U << (chunk % 8))) {
     if ((result = transfer(opRead, at / 512, *bytes))) return result;
@@ -408,17 +667,34 @@ bool OneiOSHostedDisk::start(IOService *provider)
 {
   if (!IOBlockStorageDevice::start(provider)) return false;
   IODeviceMemory *window = provider->getDeviceMemoryWithIndex(0);
+#if !XNU_HOSTED
+  pci = compatibleWith(provider, "oneios,virtio-pci");
+  if (!window || window->getLength() < (pci ? pciConfigBytes : 0x108)) return false;
+#else
   if (!window || window->getLength() < 0x108) return false;
+#endif
   registers = window->getPhysicalAddress();
 #if !XNU_HOSTED
   // Native: the window mapped as device memory (uncached, the default for a device's memory).
   registerMap = provider->mapDeviceMemoryWithIndex(0);
   mapped = registerMap ? reinterpret_cast<volatile uint32_t *>(registerMap->getVirtualAddress()) : nullptr;
   if (!mapped) { registers = 0; return false; }
+  if (pci) {
+    // A virtio-pci function: the window is its configuration space.
+    configSpace = reinterpret_cast<volatile uint8_t *>(registerMap->getVirtualAddress());
+    gate = IOLockAlloc();
+    if (!gate || !pciStart(provider) || !configurePci()) {
+      printf("OneiOSHostedDisk: %s: the virtio-pci disk did not start\n", provider->getName());
+      reset();
+      return false;
+    }
+  } else
 #endif
-  if (read32(0x00) != 0x74726976 || read32(0x04) != 2 || read32(0x08) != 2) { registers = 0; return false; }
-  gate = IOLockAlloc();
-  if (!gate || !configureQueue()) return false;
+  {
+    if (read32(0x00) != 0x74726976 || read32(0x04) != 2 || read32(0x08) != 2) { registers = 0; return false; }
+    gate = IOLockAlloc();
+    if (!gate || !configureQueue()) return false;
+  }
 #if !XNU_HOSTED
   if (!loadHashList(provider)) {
     printf("OneiOSHostedDisk: %s: its hash list does not describe it: not started\n", provider->getName());
@@ -470,13 +746,13 @@ IOReturn OneiOSHostedDisk::doAsyncReadWrite(IOMemoryDescriptor *buffer, UInt64 b
       continue;
     }
 #endif
-    if (!reading && buffer->readBytes(actual, transferMemory->getBytesNoCopy(), bytes) != bytes) {
+    if (!reading && buffer->readBytes(actual, transferBytes, bytes) != bytes) {
       result = kIOReturnIOError;
       break;
     }
     result = transfer(reading ? opRead : opWrite, block + actual / 512, bytes);
     if (result) break;
-    if (reading && buffer->writeBytes(actual, transferMemory->getBytesNoCopy(), bytes) != bytes) {
+    if (reading && buffer->writeBytes(actual, transferBytes, bytes) != bytes) {
       result = kIOReturnIOError;
       break;
     }
@@ -506,7 +782,7 @@ IOReturn OneiOSHostedDisk::zero(uint64_t bytes)
   bytes &= ~UINT64_C(511);
   IOReturn result = kIOReturnSuccess;
   IOLockLock(gate);
-  bzero(transferMemory->getBytesNoCopy(), transferSize);
+  bzero(transferBytes, transferSize);
   for (uint64_t at = 0; at < bytes && !result;) {
     uint32_t part = static_cast<uint32_t>(bytes - at > transferSize ? transferSize : bytes - at);
     result = transfer(opWrite, at / 512, part);
@@ -533,7 +809,9 @@ void OneiOSHostedDisk::free()
 #if !XNU_HOSTED
   if (checkedChunks) { IOFreeData(checkedChunks, static_cast<vm_size_t>((chunkCount + 7) / 8)); checkedChunks = nullptr; }
   if (hashList) { hashList->release(); hashList = nullptr; }
-  if (registerMap) { registerMap->release(); registerMap = nullptr; mapped = nullptr; }
+  if (dmaVirtual) { ml_io_unmap(dmaVirtual, static_cast<vm_size_t>(dmaBytes)); dmaVirtual = 0; queueBytes = transferBytes = nullptr; }
+  if (barMap) { barMap->release(); barMap = nullptr; common = notifyBase = notifyAt = isr = deviceConfig = nullptr; }
+  if (registerMap) { registerMap->release(); registerMap = nullptr; mapped = nullptr; configSpace = nullptr; }
 #endif
   IOBlockStorageDevice::free();
 }

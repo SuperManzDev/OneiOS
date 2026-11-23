@@ -361,9 +361,7 @@ pub fn grow(adb: &Adb, want: u32, mode: u32, limit: u32, out: &str) -> Result<()
     println!("grow: One UI's framework stops for at most {limit} s while the pool grows to {want} pages of 2 MiB");
     // started is started: the adb shell that starts it may end with 255 when One UI's framework goes (grow 1,
     // 2026-11-23: the cycle ran to its end while the tool had given up on that status)
-    let r = adb.root(&format!(
-        "chmod 755 {DIR}/cycle.sh; (command -v setsid >/dev/null && setsid /system/bin/sh {DIR}/cycle.sh || /system/bin/sh {DIR}/cycle.sh) </dev/null >/dev/null 2>&1 &\necho started\n"
-    ))?;
+    let r = adb.root(&crate::adb::detached_start(&format!("{DIR}/cycle.sh")))?;
     if !r.out.contains("started") {
         bail!("the cycle did not start (status {}): {}", r.status, r.err.trim());
     }

@@ -1601,20 +1601,35 @@ VM at the core's own speed and it ends by itself; 128 MiB of RAM works, 1 GiB st
 **`phone vm-boot [--image FILE] [--seconds N] [--thp] [--out DIR]` and `phone vm-boot --stop`** (native path,
 2026-11-23; `crates/oneios-phone/src/vmboot.rs`). The native kernel as `runtime/loader`'s `xnuloader-crosvm` made it
 (an arm64 Linux Image, default `out/crosvm/kernel.img`) booted in a protected VM of AVF's crosvm under the phone's
-Gunyah, its console (the ns16550a at `0x3f8`, kernel patch 0077) printed as it grows. The VM's RAM and vCPUs are the
-Image's own label (`oneios-crosvm ram-mib=N cpus=N` at `0x100`; an Image without it is refused): the kernel's window
-was cut for them. Refused during a session and while a VM of ours (a crosvm whose line names `oneios-vm`) is up; the
-RAM is checked as `vm-probe` checks it, with gh_hugepage_reserve's free pool counted beside MemAvailable; a VM above
-480 MiB needs `--thp` (and the pool: `phone hugepool`). The Image goes to `/data/local/tmp/oneios-vmboot/kernel.img`,
-its SHA-256 checked there by the script, which is started detached (`setsid`) and runs `vm-probe`'s crosvm line
-(`--mem size=N --cpus num-cores=N`, the serial port to `serial.txt`); after SECONDS (120, 5 to 3600) or at
-`stop.request` (`vm-boot --stop` writes it) it stops the VM through the control socket (`crosvm stop`), and kills
-crosvm only when it is still there 20 s later; `--thp` as `vm-probe`'s, without the compaction. The tool polls
-`serial.txt` every 2 s over adb and prints what is new, ends on the script's `result`, then copies `serial.txt`,
-`crosvm.log`, `dmesg.txt`, `run.txt` and `fdt.dtb` into DIR (`phone-vmboot`) and prints crosvm's last 15 lines.
-Nothing is written under `/sys/power`. 2 unit tests (`vmboot::tests`: the label; stop before kill, the stop request,
-THP written back). Boot 1 on the S25 (2026-11-23, 2 GiB, 1 vCPU, 90 s): the kernel's whole start up to the root
-device's wait, `crosvm stop` at 90 s, One UI on (`docs/native.md` "The native kernel in crosvm").
+Gunyah, its console (the ns16550a at `0x3f8`, kernel patch 0077) printed as it grows. The VM's RAM, vCPUs and
+restricted DMA pool are the Image's own label (`oneios-crosvm ram-mib=N cpus=N swiotlb-mib=N` at `0x100`, swiotlb 8
+when the label is older; an Image without a label is refused): the kernel's window was cut for them. Refused during a
+session and while a VM of ours (a crosvm whose line names `oneios-vm`) is up; the RAM is checked as `vm-probe` checks
+it, with gh_hugepage_reserve's free pool counted beside MemAvailable; a VM above 480 MiB needs `--thp` (and the pool:
+`phone hugepool`). The Image goes to `/data/local/tmp/oneios-vmboot/kernel.img`, its SHA-256 checked there by the
+script, which is started detached (`setsid`) and runs `vm-probe`'s crosvm line (`--swiotlb N --mem size=N --cpus
+num-cores=N`, the serial port to `serial.txt`); after SECONDS (120, 5 to 3600) or at `stop.request` (`vm-boot --stop`
+writes it) it stops the VM through the control socket (`crosvm stop`), and kills crosvm only when it is still there 20
+s later; `--thp` as `vm-probe`'s, without the compaction. The tool polls `serial.txt` every 2 s over adb and prints what
+is new, ends on the script's `result`, then copies `serial.txt`, `crosvm.log`, `dmesg.txt`, `run.txt` and `fdt.dtb` into
+DIR (`phone-vmboot`), prints the run's disk, store and pool lines and crosvm's last 15 lines. Nothing is written under
+`/sys/power`.
+- The disks: `FILE.disks` beside the Image (`xnuloader-crosvm --image`) lists the pool's address, the store and one
+  crosvm `--block` value per disk. The list is refused unless every value is a plain path under `/data` (no blank,
+  quote or shell character) with a pinned `pci-address=`, the store is its one writable disk and every other disk is
+  read-only with its size, and its pool is the label's (RAM base + RAM - pool). Before crosvm starts, the script checks
+  each read-only file's size on the phone (`stat -c %s`), makes the store with `truncate -s GIBG` when it is missing
+  (sparse; the kernel formats it), and wants 4 GiB free on `/data` (`df -k`); crosvm gets a `--block` per disk. Right
+  after crosvm starts, the script waits for its tree (`fdt.dtb`, at most 10 s) and looks for
+  `restricted_dma_reserved@ADDR` in it: the pool where the kernel's DMA windows are. When it is not there the VM is
+  stopped at once (`stop.request`) and the result says `refused pool` (a protected VM's host faults on a device access
+  outside the pool; crosvm writes the tree before its vCPU starts, the kernel's disks start seconds later).
+
+5 unit tests (`vmboot::tests`: the label with and without the pool; the disks list's refusals; stop before kill, the
+stop request, THP written back; the disks' checks before crosvm and the pool check right after it; the script parses
+under `bash --posix -n`, `sh -n` and `dash -n`). Boot 1 on the S25 (2026-11-23, 2 GiB, 1 vCPU, 90 s, no disk): the
+kernel's whole start up to the root device's wait, `crosvm stop` at 90 s, One UI on (`docs/native.md` "The native
+kernel in crosvm").
 
 **`phone dmesg [--grep REGEX]... [--tail N] [--previous]`** (2026-11-23; `crates/oneios-phone/src/hw.rs`). Read only:
 root's `dmesg`, filtered on the PC (any of the REGEXes; `(?i)` for no case), the last N lines (200). The phone's kernel

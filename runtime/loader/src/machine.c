@@ -334,9 +334,13 @@ xl_adt_node *xl_machine_tree(const xl_machine *m, const char **error)
     const xl_device *d = &m->dev[i];
     char name[32];
     const char *compat;
+    if (d->pci && d->kind != XL_DEV_BLOCK && d->kind != XL_DEV_DATA_STORE) FAIL("only a disk can be a PCI function");
     switch (d->kind) {
-    case XL_DEV_BLOCK:      snprintf(name, sizeof name, "virtio-mmio-%u", blocks++); compat = "virtio,mmio"; break;
-    case XL_DEV_DATA_STORE: snprintf(name, sizeof name, "data-store"); compat = "droidvm,data-store"; break;
+    case XL_DEV_BLOCK:
+      snprintf(name, sizeof name, d->pci ? "virtio-pci-%u" : "virtio-mmio-%u", blocks++);
+      compat = d->pci ? "oneios,virtio-pci" : "virtio,mmio";
+      break;
+    case XL_DEV_DATA_STORE: snprintf(name, sizeof name, "data-store"); compat = d->pci ? "oneios,virtio-pci" : "droidvm,data-store"; break;
     case XL_DEV_INPUT:      snprintf(name, sizeof name, "input-%u", inputs++); compat = "droidvm,virtio-input"; break;
     case XL_DEV_NET:        snprintf(name, sizeof name, "net"); compat = "droidvm,net"; break;
     case XL_DEV_GPU:        snprintf(name, sizeof name, "virtio-gpu"); compat = "droidvm,virtio-gpu"; break;
@@ -354,7 +358,7 @@ xl_adt_node *xl_machine_tree(const xl_machine *m, const char **error)
     // The line of the window on the board's GIC: SPI INTID 32 + its index, under the name UniXNU-droidvm's
     // transports read. Not "interrupts": the tree has no interrupt-controller node (ArmCpu owns the GIC), and
     // IOKit's IODTMapOneInterrupt walks the parents of a node with "interrupts" forever looking for one.
-    xl_adt_set_u32(n, "droidvm,intid", XL_BOARD_VIRTIO_SPI + i);
+    if (!d->pci) xl_adt_set_u32(n, "droidvm,intid", XL_BOARD_VIRTIO_SPI + i);
     if (d->kind == XL_DEV_GPU && m->gpu_pool_size) {
       uint64_t pool[2] = { m->gpu_pool_base, m->gpu_pool_size };
       xl_adt_set(n, "drm-host-pool", pool, sizeof pool);
