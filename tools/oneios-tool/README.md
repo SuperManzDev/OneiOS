@@ -1603,7 +1603,7 @@ VM at the core's own speed and it ends by itself; 128 MiB of RAM works, 1 GiB st
 2026-11-23; `crates/oneios-phone/src/vmboot.rs`). The native kernel as `runtime/loader`'s `xnuloader-crosvm` made it
 (an arm64 Linux Image, default `out/crosvm/kernel.img`) booted in a protected VM of AVF's crosvm under the phone's
 Gunyah, its console (the ns16550a at `0x3f8`, kernel patch 0077) printed as it grows. The VM's RAM, vCPUs and
-restricted DMA pool are the Image's own label (`oneios-crosvm ram-mib=N cpus=N swiotlb-mib=N` at `0x100`, swiotlb 8
+restricted DMA pool are the Image's own label (`oneios-crosvm ram-mib=N cpus=N swiotlb-mib=N` at `0x100`, 2 to 1024 MiB, swiotlb 8
 when the label is older; an Image without a label is refused): the kernel's window was cut for them. Refused during a
 session and while a VM of ours (a crosvm whose line names `oneios-vm`) is up; the RAM is checked as `vm-probe` checks
 it, with gh_hugepage_reserve's free pool counted beside MemAvailable; a VM above 480 MiB needs `--thp` (and the pool:

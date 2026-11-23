@@ -8,7 +8,7 @@
 //   xnuloader-crosvm KERNEL OUT [--cpus N] [--ram-mib N] [--timebase HZ] [--args TEXT] [--args-add TEXT] [--swiotlb MIB]
 //                    [--image DIR [--phone-image DIR] [--phone-data FILE]]
 // --ram-mib is the VM's (crosvm --mem): the window ends below crosvm's FDT and its restricted DMA pool (--swiotlb, 8 MiB
-// by default, the RAM's last MIB). Writes OUT (the Image), OUT.adt (the device tree the kernel is given:
+// by default, 32 with --display, up to 1024; the RAM's last MIB). Writes OUT (the Image), OUT.adt (the device tree the kernel is given:
 // xnuloader-inspect adt FILE) and, with --image, OUT.disks; prints the layout.
 // The machine is crosvm's, as its FDT for a VM described it (vm-probe run 10, `fdt.dtb`): "linux,dummy-virt", RAM at
 // 0x80000000, a GICv3 distributor at 0x3fff0000 and the redistributors right below it (0x20000 a vCPU), the arch timer
@@ -144,7 +144,8 @@ int main(int argc, char **argv)
   const uint64_t fb_stride = (uint64_t)display_w * 4, fb_bytes = fb_stride * display_h, seq_off = (fb_bytes + 0x3fff) & ~0x3fffull;
   const uint64_t fb_slot = display_w ? (seq_off + 0x4000 + 0x1fffff) & ~0x1fffffull : 0;
   if (!swiotlb_mib) swiotlb_mib = display_w ? 32 : 8;
-  if (swiotlb_mib < 2 || swiotlb_mib > 64 || (swiotlb_mib & 1)) { fprintf(stderr, "xnuloader-crosvm: --swiotlb 2 to 64 MiB, even\n"); return 2; }
+  // up to 1 GiB: the GPU's buffers would lie there (docs/native.md, the GPU: Android's GPU writes into the pool)
+  if (swiotlb_mib < 2 || swiotlb_mib > 1024 || (swiotlb_mib & 1)) { fprintf(stderr, "xnuloader-crosvm: --swiotlb 2 to 1024 MiB, even\n"); return 2; }
   static char with_display[4096];
   if (display_w) {
     // what xnuhost passes beside the tree's display-scale: the backend's unit scale and its vsync tick (display/README.md)

@@ -442,4 +442,6 @@ guest is still iPhone18,2 iOS 27.0.1.
   PCI with its queues in the pool; boot 4b): a test swipe opened **iOS's Home screen**, then the owner's finger (Settings, Control
   Center; boot 5). Step 5, four vCPUs (ArmCpu's PSCI CPU_ON by HVC; boot 6): the Home screen and the apps in about two
   minutes. Step 6 (boots 7 and 8): the screen's path at about 5% of a core (write-only buffers in the helper, 1080x2340)
-  and the real date (crosvm's PL030, patch 0078). Next: the GPU.
+  and the real date (crosvm's PL030, patch 0078). Step 7 (boots 8 and 9): Android's GPU writes into the VM's shared pool
+  (`runtime/gpuprobe`: kgsl's MAP_USER_MEM on crosvm's mapping of it), and a pool of 128 MiB works. Next: the GPU's
+  device for the VM (drm2kgsl) with its buffers in the pool.

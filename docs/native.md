@@ -574,6 +574,30 @@ The helper's uclamp.min of 1024 only moved that onto the prime cores (52% of a c
   (`oneios,rtc`) and the kernel reads it. Boot 8: "oneios-native: the real-time clock at 0x2000 (crosvm's PL030)", the
   lock screen's "Mon Nov 23". The time zone is iOS's own (Settings, General, Date & Time).
 
+### The GPU's first question: can Android's GPU work in the VM's pool? (step 7, 2026-11-23)
+What is left of the heat is the guest drawing with its CPU. The Adreno stays Android's (One UI needs it; its power,
+clocks and GMU firmware are kgsl's), so the VM's GPU work would go to Android's kgsl, and its buffers must lie in
+memory both sides keep: the SMMU's stage 2 keeps every device of the host's off the memory crosvm lends the VM, and
+crosvm shares only its restricted DMA pool. `runtime/gpuprobe` (`make -C runtime/gpuprobe`; kgsl's UAPI header from
+external/virglrenderer, Droid-VM's drm2kgsl) asks it: it maps a part of crosvm's own mapping of the pool the VM does not
+use (as `displayctl pool` finds the pool), gives it to kgsl, has the GPU write a word there (CP_MEM_WRITE in an indirect
+buffer of its own) and reads the word back.
+- kgsl takes such memory by its user address only with a length: IOCTL_KGSL_GPUOBJ_IMPORT with
+  KGSL_USER_MEM_TYPE_ADDR answered EINVAL, the legacy IOCTL_KGSL_MAP_USER_MEM (I/O-coherent, write-back, as drm2kgsl
+  imports a guest's memory) gave a GPU address.
+- Boot 8 (a pool of 32 MiB): its last 2 MiB mapped for the GPU, **the GPU's word in the VM's pool** ("the word at
+  +0x1e00100 is 0xc0ffee42"), no SMMU or kgsl fault in the kernel's log.
+- A larger pool: `xnuloader-crosvm --swiotlb` up to 1024 MiB now (`phone vm-boot` takes the label's). Boot 9 (1792 MiB,
+  a pool of **128 MiB** at `0xe8000000`, 4 vCPUs): crosvm's tree put the pool where the Image wanted it, crosvm maps it
+  for huge pages (`VmFlags ... hg`, `ShmemPmdMapped` growing as the VM uses it), iOS ran as before (Settings, dark mode;
+  no restart, no jetsam), and 64 MiB of the pool mapped for the GPU took its word too.
+So a GPU for the VM can work in shared memory: the guest's GPU buffers in a large pool, Android's kgsl given them by
+their address in a host process, the GPU Android's throughout. The road (the hosted path has each piece): iOS's
+Metal plug-in and the kernel's virtio-gpu client (DroidVMVirtioGpu.cpp, the gpu3d patches) speak virtio-gpu with
+drm2kgsl's native context; the VM needs that device on crosvm's PCI (crosvm's own `--gpu backend=virglrenderer` with a
+render server of Droid-VM's virglrenderer and drm2kgsl, or crosvm's `--vhost-user type=gpu` with xnuhost's virtio-gpu
+device model in a process of its own), and the kernel's GPU buffers placed in the pool.
+
 ## Next
 1. The Gunyah VM fits iOS with gh_hugepage_reserve ("Verdict, revised"). Its road to an iOS guest, each step a
    test on the phone: the native kernel booted by crosvm with its console on the 8250 at `0x3f8` (done: "The native
@@ -583,8 +607,10 @@ The helper's uclamp.min of 1024 only moved that onto the prime cores (52% of a c
    (done: step 4, boot 4b: crosvm's multi-touch device fed by `displayctl touch`, the kernel's virtio-input on PCI, the
    Home screen from the test swipe, boot 5: the owner's finger, Settings and Control Center); more vCPUs (done: step 5,
    boot 6: four, ArmCpu's PSCI CPU_ON by HVC); the screen's work and the clock (done: step 6, boots 7 and 8: write-only
-   buffers in the helper, 1080x2340, crosvm's PL030 read by patch 0078); next the GPU (drm2kgsl, as the hosted path's:
-   what is left of the heat is the guest's drawing on its CPU). Still to try for the guest's copy: the differential
+   buffers in the helper, 1080x2340, crosvm's PL030 read by patch 0078); the GPU's first question (done: step 7, boots 8
+   and 9: Android's GPU writes into the VM's pool, a pool of 128 MiB works); next the GPU's device on crosvm's PCI and
+   its buffers in the pool (drm2kgsl, as the hosted path's: what is left of the heat is the guest's drawing on its
+   CPU). Still to try for the guest's copy: the differential
    copy (`sheng-fb-diff=1`) and the changed rows told to the bridge. The GPU, the
    owner's question (2026-11-23: a host module that shares memory with the VM, "gunyah_host_share", none such is
    published): the Adreno stays Android's (One UI needs it, and its power, clocks and GMU firmware are kgsl's), so the

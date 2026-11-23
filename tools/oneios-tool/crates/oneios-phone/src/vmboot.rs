@@ -416,8 +416,8 @@ pub fn stop(adb: &Adb) -> Result<()> {
 pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
     let data = fs::read(image).with_context(|| format!("cannot read {image} (runtime/loader's xnuloader-crosvm makes it)"))?;
     let l = label(&data).context("no `oneios-crosvm ram-mib=N cpus=N` label at 0x100: not an Image of xnuloader-crosvm")?;
-    if !(5..=3600).contains(&o.seconds) || !(1..=8).contains(&l.cpus) || !(2..=64).contains(&l.swiotlb) {
-        bail!("--seconds 5..3600; the Image's vCPUs 1..8, its pool 2..64 MiB");
+    if !(5..=3600).contains(&o.seconds) || !(1..=8).contains(&l.cpus) || !(2..=1024).contains(&l.swiotlb) {
+        bail!("--seconds 5..3600; the Image's vCPUs 1..8, its pool 2..1024 MiB");
     }
     if l.ram > 480 && !o.thp {
         bail!("a VM of {} MiB needs --thp and gh_hugepage_reserve's pool (Gunyah's own memory ends near 0.5 GB of 4 KiB pages)", l.ram);
