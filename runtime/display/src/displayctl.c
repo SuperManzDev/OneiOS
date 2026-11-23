@@ -4,7 +4,7 @@
 //   displayctl test [--seconds N] [--size WxH] [--format bgrx|rgba16f] [--helper PATH] [-- helper options]
 //     a moving pattern: the helper's own test.
 //   displayctl pool --pid PID --pool-offset N --pool-bytes N --size WxH --stride N --seq-offset N [--fb-offset N]
-//                   [--seconds N] [--helper PATH] [-- helper options]
+//                   [--vm protected|shared] [--seconds N] [--helper PATH] [-- helper options]
 //     the screen of the native kernel in a VM of Android's crosvm (docs/native.md, the display; `oneios-tool phone
 //     vm-boot --display` starts it beside crosvm). A protected VM's memory is lent to the guest, and a host access to it
 //     faults, all but crosvm's restricted DMA pool, where the VM's boot video lies (xnuloader-crosvm --display). crosvm
@@ -16,6 +16,9 @@
 //     boot) the frame is compared four times a second. Pages that are not resident are not read: no read here makes
 //     the host allocate the VM's memory. It ends with the VM (crosvm's process gone), at --seconds, on SIGTERM or
 //     SIGINT, or when the helper leaves. --test-guest FILE (the host tests): a plain file stands for crosvm's memfd.
+//     --vm shared: Droid-VM's shared-RAM VM (xnuloader-crosvm --shared-ram), whose whole RAM the host may read: the
+//     devices' region (the pool's place) is then inside crosvm's longer mapping of the guest's RAM, and that mapping
+//     counts; still only the boot video and the count's page are mapped here.
 //   displayctl touch --evdev /dev/input/eventN --socket PATH [--wait S] [--swipe-at S [--swipe-every S]]
 //     the touch of that VM: the phone's touchscreen to crosvm's multi-touch device (crosvm --input
 //     multi-touch[path=PATH,...] connects to PATH and reads virtio_input_event's from it). AVF's crosvm cannot take the
@@ -120,7 +123,7 @@ static void box(uint32_t x, uint32_t y, uint32_t side)
 static int usage(void)
 {
   fprintf(stderr, "usage: displayctl test [--seconds N] [--size WxH] [--format bgrx|rgba16f] [--helper PATH] [-- helper options]\n"
-                  "       displayctl pool --pid PID --pool-offset N --pool-bytes N --size WxH --stride N --seq-offset N [--fb-offset N]\n"
+                  "       displayctl pool --pid PID --pool-offset N --pool-bytes N --size WxH --stride N --seq-offset N [--fb-offset N] [--vm protected|shared]\n"
                   "                       [--seconds N] [--helper PATH] [-- helper options]\n"
                   "       displayctl touch --evdev /dev/input/eventN --socket PATH [--wait S] [--swipe-at S [--swipe-every S]]\n");
   return 2;
@@ -378,18 +381,18 @@ static char *read_all(const char *path)
 
 // crosvm's own mapping of the pool (xhd_pool_mapping), opened through /proc/PID/map_files: the guest's memfd, checked to
 // be that mapping's file and to reach the pool's end. The fd, or -1 (said).
-static int open_pool(pid_t pid, uint64_t offset, uint64_t bytes)
+static int open_pool(pid_t pid, uint64_t offset, uint64_t bytes, int shared_ram)
 {
   char path[96];
   snprintf(path, sizeof path, "/proc/%d/maps", (int)pid);
   char *maps = read_all(path);
   if (!maps) return -1;
   uint64_t start = 0, end = 0, inode = 0;
-  int found = xhd_pool_mapping(maps, offset, bytes, &start, &end, &inode);
+  int found = xhd_pool_mapping(maps, offset, bytes, shared_ram, &start, &end, &inode);
   free(maps);
   if (found) {
-    fprintf(stderr, "displayctl pool: process %d maps no \"/memfd:crosvm_guest\" shared at offset 0x%llx for 0x%llx bytes: not crosvm with that pool\n",
-            (int)pid, (unsigned long long)offset, (unsigned long long)bytes);
+    fprintf(stderr, "displayctl pool: process %d maps no \"/memfd:crosvm_guest\" shared %s offset 0x%llx for 0x%llx bytes: not crosvm with that pool\n",
+            (int)pid, shared_ram ? "over" : "at", (unsigned long long)offset, (unsigned long long)bytes);
     return -1;
   }
   snprintf(path, sizeof path, "/proc/%d/map_files/%llx-%llx", (int)pid, (unsigned long long)start, (unsigned long long)end);
@@ -401,8 +404,9 @@ static int open_pool(pid_t pid, uint64_t offset, uint64_t bytes)
     close(fd);
     return -1;
   }
-  printf("displayctl pool: crosvm %d maps the pool at 0x%llx-0x%llx (offset 0x%llx of its %llu MiB memfd)\n", (int)pid,
-         (unsigned long long)start, (unsigned long long)end, (unsigned long long)offset, (unsigned long long)(st.st_size >> 20));
+  printf("displayctl pool: crosvm %d maps the %s at 0x%llx-0x%llx (offset 0x%llx of its %llu MiB memfd)\n", (int)pid,
+         shared_ram ? "shared RAM that holds the devices' region" : "pool", (unsigned long long)start, (unsigned long long)end,
+         (unsigned long long)offset, (unsigned long long)(st.st_size >> 20));
   return fd;
 }
 
@@ -455,6 +459,7 @@ static int pool_main(int argc, char **argv)
   double seconds = 0;                   // 0: until the VM ends
   char helper[PATH_MAX] = "";
   const char *test_guest = NULL;
+  int shared_ram = 0;
   int extra = argc;
   for (int i = 2; i < argc; i++) {
     if (!strcmp(argv[i], "--")) { extra = i + 1; break; }
@@ -470,6 +475,7 @@ static int pool_main(int argc, char **argv)
     else if (!strcmp(o, "--seconds")) seconds = atof(v);
     else if (!strcmp(o, "--helper")) snprintf(helper, sizeof helper, "%s", v);
     else if (!strcmp(o, "--test-guest")) test_guest = v;
+    else if (!strcmp(o, "--vm") && (!strcmp(v, "protected") || !strcmp(v, "shared"))) shared_ram = !strcmp(v, "shared");
     else return usage();
   }
   const size_t page = (size_t)sysconf(_SC_PAGESIZE);
@@ -490,7 +496,7 @@ static int pool_main(int argc, char **argv)
   signal(SIGPIPE, SIG_IGN);
 
   // The VM's memory: the pool's frame and count, read-only, and nothing else.
-  int fd = test_guest ? open_test_guest(test_guest, pool_off + pool_bytes) : open_pool((pid_t)pid, pool_off, pool_bytes);
+  int fd = test_guest ? open_test_guest(test_guest, pool_off + pool_bytes) : open_pool((pid_t)pid, pool_off, pool_bytes, shared_ram);
   if (fd < 0) return 1;
   const size_t map_len = (size_t)((seq_off + 16 - fb_off + page - 1) / page * page);
   const uint8_t *map = mmap(NULL, map_len, PROT_READ, MAP_SHARED, fd, (off_t)(pool_off + fb_off));

@@ -598,6 +598,54 @@ drm2kgsl's native context; the VM needs that device on crosvm's PCI (crosvm's ow
 render server of Droid-VM's virglrenderer and drm2kgsl, or crosvm's `--vhost-user type=gpu` with xnuhost's virtio-gpu
 device model in a process of its own), and the kernel's GPU buffers placed in the pool.
 
+### The shared-RAM VM (step 8, 2026-11-23)
+The GPU's buffers in the pool alone would not do: every IOSurface iOS draws into (Apple's IOSurface.kext allocates
+them) and every one of Turnip's buffers would have to come out of it. **Droid-VM runs XNU with its GPU otherwise**
+(external/UniXNU-droidvm, `tools/rig/unixnu-vm.template.json`: `"protected_vm": "pseudo_unprotected"`): its own crosvm
+(https://github.com/Droid-VM/crosvm, BSD-3-Clause with Droid-VM's GPL-2.0-or-later additions) makes a protected VM
+with a small lent region only (its boot shim and the device tree), shares the rest of the VM's RAM with it after it
+started, as a Gunyah memparcel, through `/dev/gunyah_share`, and the shim (`droidvm-shim`) accepts it through the
+resource manager's message queue before the payload runs. Android then reads and writes all of the VM's RAM, as
+xnuhost does in the hosted path, so the GPU can work on iOS's own buffers wherever they are. `/dev/gunyah_share` is
+Droid-VM's **gunyah_host_share** module (https://github.com/Droid-VM/gunyah_host_mod, GPL-2.0-or-later): the owner's
+question of the morning (a module that shares memory with the VM) had an answer after all; this file said none was
+published, which was wrong.
+- **The module, for this phone.** `scripts/hugepage/build-share.sh` builds it from its source (gunyah_host_mod
+  44e8ae5, `gunyah_host_share/GKI6.6`) in the DDK image scripts/hugepage/build.sh fetched, under bubblewrap.
+  `oneios-tool phone hostshare load` checks it against the phone's kernel first and loads nothing on a difference:
+  the BTF read on the PC (pahole, pfunct) for the three fields of the kernel's private `struct gunyah_vm` it reads
+  (on the S25's 6.6.127-android15-8: `vmid` 0, `rm` 504, `vm_status` 536, the module's own offsets), the resource
+  manager's parcel structs it builds (48, 4 and 16 bytes, every member where the module has it) and the six
+  functions it calls through pointers (a different type there is a kCFI panic; all six alike), and `/proc/kallsyms`
+  for the functions. Loaded beside One UI: `gunyah_share: loaded v6/dmabuf+gup`, `/dev/gunyah_share`.
+- **Their crosvm.** Building it needs their AOSP tree (crosvm-minimal-manifest, tens of GB: no room on this PC's
+  disks); the owner chose their prebuilt (DroidVM-Prebuilt-Root 82c59c2, 2026-09-12): `scripts/droidvm/fetch-crosvm.sh`
+  fetches crosvm and the three libraries of its package the phone has not, each checked by SHA-256, and
+  `oneios-tool phone droidvm-crosvm` pushes them (crosvm finds them beside itself, the rest in /system/lib64). It runs
+  on the S25 (`crosvm run --help`: `--protected-vm-pseudo-unprotected`, `--gpu`, `--pre-alloc`; no `--virtio-mmio-*`
+  in this build, so the devices stay on PCI).
+- **Run shared1** (`vm-probe --droidvm DIR --shared-ram --thp --mem 128`, logs/pa3q-vmprobe/shared1): **Samsung's
+  Gunyah takes it.** crosvm shared the window (122 MiB: 31232 pages in 1080 runs, handle 0x20); the shim found the
+  resource manager's queues in the tree, accepted the parcel, pointed `/memory` at `0x80600000+0x7a00000` and jumped
+  to the probe, which ran from the shared RAM (its 120 MiB memory test: 0 bad pages) and powered off by itself.
+  gunyah_host_share took the parcel back when crosvm had gone (`reaper reclaimed parcel`). One UI ran on.
+- **Run shared2** (1 GiB): crosvm prepares the window in large pages itself (its `mthp` pass: 58 of gh_hugepage_reserve's
+  2 MiB pages, which was all the pool had, then 902 runs of 1 MiB), but at the share the window came in **126651 runs**
+  for 260608 pages, and the resource manager refused to map it (`SHIM DIED: the resource manager refused MEM_ACCEPT
+  err=0x9`, MAP_FAILED); crosvm was stopped at 30 s, One UI ran on. gunyah_host_share pins with FOLL_LONGTERM, and the
+  kernel moves a page out of a CMA block before such a pin (the S25 has 624 MiB of CMA), into whatever 4 KiB pages are
+  free. The 6.6 kernel has no shmem folios between 4 KiB and 2 MiB (no `hugepages-*kB/shmem_enabled`), so those 1 MiB
+  were runs of small pages, not folios. Only the pool's pages stay where they are. **So the shared-RAM VM's size is
+  the pool's, as the protected VM's was**: about 1000 pages for 2 GiB, 1800 for 3.5 GiB. After shared2 the pool had 2
+  pages free and 56 `served` with no VM up (the losses of item 2 under Next).
+- **For XNU:** `xnuloader-crosvm --shared-ram` makes the Image start at the window (`0x80600000`: the shim's 4 MiB and
+  the handoff's 2 MiB before it); the kernel's own window stays 32 MiB in, the devices' windows stay where the pool
+  was (now plain RAM; crosvm gets no `--swiotlb`), and the label says `shared-ram=1`. `phone vm-boot` then runs Droid-VM's
+  crosvm (`--droidvm DIR`, pushed and checked), checks `/dev/gunyah_share`, checks the tree's `shim_handoff@` node
+  where it checked the pool's, and starts the bridge with `displayctl pool --vm shared` (it takes the devices' region
+  inside crosvm's mapping of the guest's RAM, which only a shared-RAM VM may do: a protected VM's other mappings are
+  lent memory). Not booted yet: it waits for a pool of about 1000 pages.
+
 ## Next
 1. The Gunyah VM fits iOS with gh_hugepage_reserve ("Verdict, revised"). Its road to an iOS guest, each step a
    test on the phone: the native kernel booted by crosvm with its console on the 8250 at `0x3f8` (done: "The native
@@ -612,13 +660,12 @@ device model in a process of its own), and the kernel's GPU buffers placed in th
    its buffers in the pool (drm2kgsl, as the hosted path's: what is left of the heat is the guest's drawing on its
    CPU). Still to try for the guest's copy: the differential
    copy (`sheng-fb-diff=1`) and the changed rows told to the bridge. The GPU, the
-   owner's question (2026-11-23: a host module that shares memory with the VM, "gunyah_host_share", none such is
-   published): the Adreno stays Android's (One UI needs it, and its power, clocks and GMU firmware are kgsl's), so the
-   VM's GPU work goes to Android's kgsl and its buffers must lie in memory both sides keep. Gunyah lends, shares or
-   donates memory to a VM; crosvm shares the pool (the SMMU's stage 2 keeps every device off lent memory, so a buffer
-   in the VM's RAM is out of the GPU's reach too). First a larger pool (crosvm's `--swiotlb`, hundreds of MiB, in 2 MiB
-   pages) in `vm-probe`; a module of ours calling Gunyah's resource manager only if crosvm's share is not enough (a
-   module's mistake panics the phone's kernel: crash 1). The pool is
+   owner's question (2026-11-23: a host module that shares memory with the VM, "gunyah_host_share"): it is Droid-VM's
+   (step 8), and with their crosvm the VM's whole RAM is shared with Android (shared1 ran on the S25). The Adreno stays
+   Android's (One UI needs it, and its power, clocks and GMU firmware are kgsl's), so the VM's GPU work goes to
+   Android's kgsl, on iOS's own buffers. Next: XNU in the shared-RAM VM (a pool of about 1000 pages first), then
+   virtio-gpu on crosvm's PCI (`--gpu` with Droid-VM's virglrenderer and drm2kgsl, which their package carries) and
+   the kernel's virtio-gpu client over PCI, as the input's. The pool is
    grown once per boot after the temporary root (`hugepool load`, `hugepool grow`); `hugepool unload` gives the 3 GiB
    back.
    The other paths stay: the hosted one that runs today, and XNU alone (the hand-off under Samsung's protections,

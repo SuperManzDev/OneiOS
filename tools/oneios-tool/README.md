@@ -1269,11 +1269,15 @@ oneios-tool phone backlight status            # the panel's level, max_brightnes
 oneios-tool phone backlight set N             # 1..max_brightness (12750); the return writes One UI's own value back
 oneios-tool phone cpu [--trace S] [--out F]   # cores, domains, top and capped clocks, cpusets, xnuhost's threads and uclamps (read only)
 oneios-tool phone hw [--out DIR]              # the hardware map: fdt.dtb, iomem, partitions, kernel.config, Gunyah/AVF (read only)
-oneios-tool phone vm-probe [--payload F] [--mem MIB] [--timeout S] [--thp] [--out DIR]
-                                              # runtime/vmprobe's payload once as a protected VM under Gunyah (AVF's crosvm)
-oneios-tool phone vm-boot [--image F] [--seconds S] [--thp] [--out DIR] [--bridge F] [--swipe-test]   # the native kernel
-                                              #   (xnuloader-crosvm's Image) in such a VM, its console live, its screen
-                                              #   on a layer when the Image has one; vm-boot --stop ends it sooner
+oneios-tool phone vm-probe [--payload F] [--mem MIB] [--timeout S] [--thp [--thp-shmem advise|within_size]] [--out DIR]
+                           [--droidvm DIR [--shared-ram]]
+                                              # runtime/vmprobe's payload once as a protected VM under Gunyah (AVF's crosvm),
+                                              #   or under Droid-VM's crosvm, as its shared-RAM VM
+oneios-tool phone vm-boot [--image F] [--seconds S] [--thp] [--out DIR] [--bridge F] [--swipe-test] [--pin] [--droidvm DIR]
+                                              #   the native kernel (xnuloader-crosvm's Image) in such a VM, its console
+                                              #   live, its screen on a layer when the Image has one; vm-boot --stop ends it
+oneios-tool phone hostshare status|load|unload  # gunyah_host_share (/dev/gunyah_share), after a preflight of the kernel
+oneios-tool phone droidvm-crosvm [--dir DIR] [--grep RE]   # Droid-VM's crosvm package to the phone, then its options
 oneios-tool phone dmesg [--grep RE] [--tail N]  # the kernel's log, filtered on the PC (read only)
 oneios-tool phone hugeblocks [--free]        # free memory in 2 MiB blocks; --free: drop the file cache and compact first
 oneios-tool phone hugepool status|load|grow|unload  # gh_hugepage_reserve: load [--want N]; grow --want N stops One UI and starts it again
@@ -1714,6 +1718,35 @@ allocations, so that Gunyah lends a VM's RAM in 2 MiB pieces (`docs/native.md` "
 the feeder's end after system_server, one start, the only writes; the cycle parses under `bash --posix -n` and
 `sh -n`, and was checked with `dash -n`). Run on the S25 on 2026-11-23: load, acquire, grow to 3 GiB with One UI down
 about 37 s and no restart of the phone (`docs/native.md` "gh_hugepage_reserve with One UI stopped").
+
+**`phone hostshare status | load | unload`** (2026-11-23; `crates/oneios-phone/src/hostshare.rs`). Droid-VM's
+gunyah_host_share (GPL-2.0-or-later, https://github.com/Droid-VM/gunyah_host_mod; its source and build outside this
+repository: `scripts/hugepage/build-share.sh`, in the DDK image of `scripts/hugepage/build.sh`). It adds
+`/dev/gunyah_share`, through which Droid-VM's crosvm SHAREs a running VM's RAM with it (`docs/native.md` "The shared-RAM
+VM").
+- `status` (read only): its parameters (`vmid_off`, `rm_off`, `vm_status_off`, `outstanding`: the live parcels),
+  `/dev/gunyah_share`, its kernel lines.
+- `load [--ko F] [--out DIR]`: refused during a session or when loaded. The preflight, which loads nothing on any
+  difference: on the phone, the six functions it calls in `/proc/kallsyms` (`gunyah_rm_mem_share`, `_reclaim`,
+  `_get_vmid`, `gunyah_rm_get`, `_put`; `__fput_sync` when there); the phone's BTF to DIR and, on the PC, pahole for
+  `struct gunyah_vm`'s `vmid`, `rm` and `vm_status` (passed to insmod as `vmid_off=`, `rm_off=`, `vm_status_off=`) and
+  the parcel structs it builds itself (sizes and every member's offset), pfunct for the six prototypes, compared by
+  their types (a call through a pointer of another type is a kCFI panic). Then the .ko to
+  `/data/local/tmp/oneios-hostshare/`, its SHA-256 checked, `sync`, `insmod`, `/dev/gunyah_share` checked.
+- `unload`: `rmmod`, refused while it holds a parcel.
+3 unit tests (pahole's layout as it prints it, nested structs and bit fields; a moved member loads nothing; prototypes
+by type). Loaded on the S25 on 2026-11-23.
+
+**`phone droidvm-crosvm [--dir DIR] [--grep REGEX]`** (2026-11-23; `crates/oneios-phone/src/droidvm.rs`). Droid-VM's own
+crosvm (their prebuilt, the owner's choice: `scripts/droidvm/fetch-crosvm.sh` fetches it and the three libraries of its
+package the phone has not, each checked by SHA-256, into `/mnt/tkg-build/oneios/dl/droidvm-prebuilt/82c59c2`) to
+`/data/local/tmp/oneios-droidvm/` (only the files whose SHA-256 there differs; each checked after; root's), then the
+lines of its `crosvm run --help` that match REGEX. `vm-probe --droidvm DIR` and `vm-boot` (for a `shared-ram=1` Image)
+push it the same way. `vm-probe --shared-ram` runs its pseudo-unprotected VM (`--protected-vm-pseudo-unprotected`, no
+swiotlb; refused without `/dev/gunyah_share`); `--thp-shmem within_size` makes `--thp` write that instead of advise.
+`vm-boot` with an Image of `xnuloader-crosvm --shared-ram`: Droid-VM's crosvm, the tree's `shim_handoff@` node checked
+where the pool's was, `displayctl pool --vm shared`. 1 unit test (what is pushed); vm-probe's and vm-boot's tests have
+the shared-RAM script. `vm-boot --pin`: vCPU N on the phone's core N (crosvm `--cpu-affinity 0=0:1=1:...`).
 
 **`phone cpu [--trace SECONDS] [--out FILE]`** (fix-host-overhead, 2026-11-15; `crates/oneios-phone/src/cpu.rs`). Read
 only, with or without a session: for each of cpu0-7 by name, the core (`regs/identification/midr_el1`), `cpu_capacity`,

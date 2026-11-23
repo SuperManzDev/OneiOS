@@ -94,7 +94,7 @@ int main(int argc, char **argv)
   snprintf(path, sizeof path, "/proc/%lld/maps", pid);
   char *maps = read_all(path);
   uint64_t start = 0, end = 0, inode = 0;
-  if (!maps || xhd_pool_mapping(maps, pool_off, pool_bytes, &start, &end, &inode)) {
+  if (!maps || xhd_pool_mapping(maps, pool_off, pool_bytes, 0, &start, &end, &inode)) {
     fprintf(stderr, "gpuprobe: process %lld maps no crosvm pool at offset 0x%llx for 0x%llx bytes\n", pid, pool_off, pool_bytes);
     return 1;
   }

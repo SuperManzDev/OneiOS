@@ -9,6 +9,8 @@ pub mod adb;
 pub mod app;
 pub mod cpu;
 pub mod cycle;
+pub mod droidvm;
+pub mod hostshare;
 pub mod hugepool;
 pub mod hw;
 pub mod local;
@@ -121,6 +123,23 @@ pub enum Command {
         #[command(subcommand)]
         command: HugepoolCommand,
     },
+    /// Droid-VM's gunyah_host_share (scripts/hugepage/build-share.sh): /dev/gunyah_share, through which Droid-VM's
+    /// crosvm SHAREs a VM's RAM with it (the shared-RAM VM, vm-probe --shared-ram): status, load after a preflight of
+    /// the phone's kernel, unload
+    Hostshare {
+        #[command(subcommand)]
+        command: HostshareCommand,
+    },
+    /// Droid-VM's own crosvm (scripts/droidvm/fetch-crosvm.sh) pushed to the phone with its libraries, each checked by
+    /// SHA-256 there, then the lines of its `crosvm run --help` that match REGEX
+    DroidvmCrosvm {
+        /// The package's folder on the PC
+        #[arg(long, value_name = "DIR", default_value = "/mnt/tkg-build/oneios/dl/droidvm-prebuilt/82c59c2")]
+        dir: String,
+        /// What to show of its options
+        #[arg(long, value_name = "REGEX", default_value = "pseudo-unprotected|--gpu |--pre-alloc|virtio-mmio")]
+        grep: String,
+    },
     /// The native kernel (an Image of runtime/loader's xnuloader-crosvm) booted in a protected VM of AVF's crosvm under
     /// Gunyah, its console followed live; the VM's RAM and vCPUs from the Image's label. --stop ends a running one.
     /// Refused during a session
@@ -146,6 +165,12 @@ pub enum Command {
         /// A test of the touch without a finger: the forwarder sends a swipe up 200 s after crosvm started, then every 60 s
         #[arg(long)]
         swipe_test: bool,
+        /// vCPU N on the phone's core N (crosvm --cpu-affinity)
+        #[arg(long)]
+        pin: bool,
+        /// Droid-VM's crosvm package (scripts/droidvm/fetch-crosvm.sh), for an Image of xnuloader-crosvm --shared-ram
+        #[arg(long, value_name = "DIR", default_value = "/mnt/tkg-build/oneios/dl/droidvm-prebuilt/82c59c2")]
+        droidvm: String,
     },
     /// One run of runtime/vmprobe's payload as a protected VM under Gunyah with AVF's crosvm: 1 vCPU, no device but
     /// the serial port; it powers off by itself, else crosvm stop after SECONDS. Refused during a session
@@ -166,6 +191,18 @@ pub enum Command {
         /// advise, defrag madvise); the old values are written back after it
         #[arg(long)]
         thp: bool,
+        /// Run Droid-VM's crosvm instead of AVF's: its package's folder on the PC (scripts/droidvm/fetch-crosvm.sh),
+        /// pushed and checked first
+        #[arg(long, value_name = "DIR")]
+        droidvm: Option<String>,
+        /// Droid-VM's shared-RAM VM (--protected-vm-pseudo-unprotected, no swiotlb); needs --droidvm and
+        /// `phone hostshare load`
+        #[arg(long)]
+        shared_ram: bool,
+        /// With --thp: shmem_enabled for the run, advise or within_size (the shared-RAM VM's window is pinned
+        /// through a mapping crosvm does not madvise)
+        #[arg(long, value_name = "MODE", default_value = "advise", value_parser = clap::builder::PossibleValuesParser::new(vmprobe::THP_SHMEM))]
+        thp_shmem: String,
     },
     /// Only during a session: the panel's level (/sys/class/backlight/panel0-backlight/brightness)
     Backlight {
@@ -298,6 +335,25 @@ pub enum HugepoolCommand {
 }
 
 #[derive(clap::Subcommand)]
+pub enum HostshareCommand {
+    /// Its parameters, /dev/gunyah_share and its kernel lines (read only)
+    Status,
+    /// The preflight (the phone's BTF on the PC with pahole and pfunct: struct gunyah_vm's offsets, the parcel structs,
+    /// the six functions' prototypes; /proc/kallsyms on the phone), the .ko pushed and checked, a sync, then insmod
+    /// with the offsets read. Refused during a session or when it is loaded already
+    Load {
+        /// The module (scripts/hugepage/build-share.sh)
+        #[arg(long, value_name = "FILE", default_value = "/mnt/tkg-build/oneios/hugepage/out/gunyah_host_share-android15-6.6.ko")]
+        ko: String,
+        /// Where the preflight's files go (btf.vmlinux, pahole.txt, functions.txt, load.txt)
+        #[arg(long, value_name = "DIR", default_value = "phone-hostshare")]
+        out: String,
+    },
+    /// rmmod, when it holds no parcel
+    Unload,
+}
+
+#[derive(clap::Subcommand)]
 pub enum BacklightCommand {
     /// The level, max_brightness, and One UI's own value that the return writes back (read only)
     Status,
@@ -406,12 +462,26 @@ pub fn main(cli: Cli) -> i32 {
             HugepoolCommand::Acquire { want, mode, seconds } => hugepool::acquire(&adb, want, mode, seconds),
             HugepoolCommand::Unload => hugepool::unload(&adb),
         }),
-        Command::VmBoot { image, seconds, thp, out, stop, bridge, swipe_test } => Adb::connect(serial).and_then(|adb| {
-            if stop { vmboot::stop(&adb) } else { vmboot::vm_boot(&adb, &image, &out, &vmboot::Options { seconds, thp, bridge, swipe_test }) }
+        Command::Hostshare { command } => Adb::connect(serial).and_then(|adb| match command {
+            HostshareCommand::Status => hostshare::status(&adb),
+            HostshareCommand::Load { ko, out } => hostshare::load(&adb, &ko, &out),
+            HostshareCommand::Unload => hostshare::unload(&adb),
         }),
-        Command::VmProbe { payload, mem, timeout, out, thp } => {
-            Adb::connect(serial).and_then(|adb| vmprobe::vm_probe(&adb, &payload, &out, &vmprobe::Options { mem, timeout, thp }))
-        }
+        Command::DroidvmCrosvm { dir, grep } => Adb::connect(serial).and_then(|adb| droidvm::crosvm(&adb, &dir, &grep)),
+        Command::VmBoot { image, seconds, thp, out, stop, bridge, swipe_test, pin, droidvm } => Adb::connect(serial).and_then(|adb| {
+            if stop { vmboot::stop(&adb) } else { vmboot::vm_boot(&adb, &image, &out, &vmboot::Options { seconds, thp, bridge, swipe_test, pin, droidvm }) }
+        }),
+        Command::VmProbe { payload, mem, timeout, out, thp, droidvm, shared_ram, thp_shmem } => Adb::connect(serial).and_then(|adb| {
+            let crosvm = match droidvm.as_deref() {
+                Some(dir) => {
+                    adb.need_root()?;
+                    Some(droidvm::push(&adb, dir)?)
+                }
+                None => None,
+            };
+            let thp_shmem = vmprobe::THP_SHMEM.into_iter().find(|m| *m == thp_shmem).unwrap_or("advise");
+            vmprobe::vm_probe(&adb, &payload, &out, &vmprobe::Options { mem, timeout, thp, crosvm, shared_ram, thp_shmem })
+        }),
         Command::Backlight { command: BacklightCommand::Status } => Adb::connect(serial).and_then(|adb| session::backlight_status(&adb)),
         Command::Backlight { command: BacklightCommand::Set { level } } => Adb::connect(serial).and_then(|adb| session::backlight_set(&adb, level)),
         Command::Stage { kind, dir } => Adb::connect(serial).and_then(|adb| phone::stage(&adb, &kind, &dir)),

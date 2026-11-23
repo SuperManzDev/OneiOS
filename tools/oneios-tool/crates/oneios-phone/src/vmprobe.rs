@@ -29,6 +29,28 @@ pub struct Options {
     /// for madvised regions (`defrag` madvise), so that crosvm's memfd (`--hugepages`) can come in 2 MiB folios,
     /// which Gunyah's demand paging lends whole; the old values are written back after the run.
     pub thp: bool,
+    /// The crosvm to run, its path on the phone: AVF's (CROSVM) when None, else Droid-VM's (`--droidvm`, droidvm.rs)
+    pub crosvm: Option<String>,
+    /// Droid-VM's pseudo-unprotected VM (`--protected-vm-pseudo-unprotected`): its RAM SHAREd with it after start
+    /// through gunyah_host_share, which a shim in the VM accepts before the payload runs; no swiotlb
+    pub shared_ram: bool,
+    /// With `thp`: what `shmem_enabled` is for the run, `advise` (crosvm's madvised mappings only) or `within_size`
+    /// (every mapping of a shmem file within its size). Droid-VM's crosvm pins a shared-RAM VM's window through a
+    /// second mapping of its memfd that is not madvised, and with `advise` the window came in 4 KiB pages (run
+    /// shared1: 1080 runs for 122 MiB), which Gunyah's own memory cannot map for long
+    pub thp_shmem: &'static str,
+}
+
+/// The values `--thp-shmem` takes.
+pub const THP_SHMEM: [&str; 2] = ["advise", "within_size"];
+
+/// crosvm's protection arguments: the shared-RAM VM, or the protected VM with a small bounce pool.
+pub fn protection(o: &Options) -> &'static str {
+    if o.shared_ram {
+        "--protected-vm-pseudo-unprotected"
+    } else {
+        "--protected-vm-without-firmware --swiotlb 8"
+    }
 }
 
 /// The transparent huge page settings `--thp` changes for the run and writes back after it.
@@ -76,7 +98,7 @@ pub fn run_script(o: &Options, sha: &str) -> String {
     let t = o.timeout.max(1);
     format!(
         r#"D={DIR}
-C={CROSVM}
+C={crosvm}
 echo '=== run'
 cd $D || exit 1
 got=$(sha256sum probe.bin | cut -d' ' -f1)
@@ -102,7 +124,7 @@ if [ {thp} = 1 ]; then
   case "$old_defrag" in always|defer|defer+madvise|madvise|never) ;; *) echo "thp: defrag '$old_defrag'?"; exit 1 ;; esac
   thp_done=0
   trap thp_restore EXIT HUP INT TERM
-  if ! {{ echo advise > $T/shmem_enabled && echo madvise > $T/defrag; }}; then
+  if ! {{ echo {thp_shmem} > $T/shmem_enabled && echo madvise > $T/defrag; }}; then
     echo "thp: the write was refused"; thp_restore; exit 1
   fi
   echo "thp set: shmem_enabled $(cat $T/shmem_enabled) | defrag $(cat $T/defrag)"
@@ -115,7 +137,7 @@ grep -E '^(MemAvailable|SwapFree):' /proc/meminfo | tr -s ' ' | sed 's/^/before 
 sed 's/^/before /' /proc/buddyinfo
 echo "start $(date +%s) up $(cut -d' ' -f1 /proc/uptime)"
 $C --log-level debug run --disable-sandbox --no-balloon --no-rng --no-usb --hypervisor gunyah \
-  --protected-vm-without-firmware --swiotlb 8 --hugepages --mem size={mem} --cpus num-cores=1 \
+  {protection} --hugepages --mem size={mem} --cpus num-cores=1 \
   --socket $D/crosvm.sock --serial type=file,hardware=serial,num=1,path=$D/serial.txt,console \
   --dump-device-tree-blob $D/fdt.dtb $D/probe.bin </dev/null >$D/crosvm.log 2>&1 &
 pid=$!
@@ -138,8 +160,11 @@ tail -c 65536 crosvm.log 2>/dev/null
 echo '=== dmesg'
 dmesg 2>/dev/null | grep -i -E 'gunyah|folio|gh_|crosvm|scm|memextent' | tail -n 80
 "#,
+        crosvm = o.crosvm.as_deref().unwrap_or(CROSVM),
+        protection = protection(o),
         mem = o.mem,
-        thp = if o.thp { 1 } else { 0 }
+        thp = if o.thp { 1 } else { 0 },
+        thp_shmem = o.thp_shmem
     )
 }
 
@@ -252,9 +277,25 @@ pub fn vm_probe(adb: &Adb, payload: &str, out: &str, o: &Options) -> Result<()> 
         println!("vm-probe: gh_hugepage_reserve holds {pool_mib} MiB for VMs, beside Android's {available} MiB available");
     }
     check_mem(o.mem, available + pool_mib.min(o.mem as u64))?;
+    if o.shared_ram {
+        if o.crosvm.is_none() {
+            bail!("--shared-ram is Droid-VM's crosvm's mode: give --droidvm too");
+        }
+        let dev = adb.root_ok(&format!("[ -c {} ] && echo there || echo absent\n", crate::hostshare::DEV), "gunyah_share")?;
+        if !dev.contains("there") {
+            bail!("no {} on the phone: `phone hostshare load` first", crate::hostshare::DEV);
+        }
+    }
     adb.root_ok(&format!("mkdir -p {DIR} && chmod 777 {DIR}\n"), "the probe's folder")?;
     adb.push(payload, &format!("{DIR}/probe.bin"))?;
-    println!("vm-probe: {} bytes, sha256 {sha}; crosvm runs it (1 vCPU, {} MiB, at most {} s, then crosvm stop)", data.len(), o.mem, o.timeout);
+    println!(
+        "vm-probe: {} bytes, sha256 {sha}; {} runs it (1 vCPU, {} MiB, {}, at most {} s, then crosvm stop)",
+        data.len(),
+        o.crosvm.as_deref().unwrap_or(CROSVM),
+        o.mem,
+        protection(o),
+        o.timeout
+    );
     let r = adb.root(&run_script(o, &sha))?;
     fs::create_dir_all(out).with_context(|| format!("cannot make {out}"))?;
     let parts = split(&r.out);
@@ -305,7 +346,16 @@ mod tests {
 
     #[test]
     fn the_run_stops_before_it_kills_and_reads_nothing_from_the_script() {
-        let s = run_script(&Options { mem: 128, timeout: 20, thp: false }, "ab12");
+        let s = run_script(&Options { mem: 128, timeout: 20, thp: false, crosvm: None, shared_ram: false, thp_shmem: "advise" }, "ab12");
+        assert!(s.contains("C=/apex/com.android.virt/bin/crosvm\n"));
+        assert!(s.contains("--protected-vm-without-firmware --swiotlb 8 --hugepages --mem size=128 "));
+        // Droid-VM's crosvm and its shared-RAM VM: no bounce pool
+        let d = Options { mem: 128, timeout: 20, thp: false, crosvm: Some("/data/local/tmp/oneios-droidvm/crosvm".into()), shared_ram: true, thp_shmem: "within_size" };
+        let shared = run_script(&d, "ab12");
+        assert!(shared.contains("C=/data/local/tmp/oneios-droidvm/crosvm\n"));
+        assert!(shared.contains("--hypervisor gunyah \\\n  --protected-vm-pseudo-unprotected --hugepages --mem size=128 "));
+        assert!(!shared.contains("--swiotlb") && !shared.contains("without-firmware"));
+        assert!(!shared.contains("if [ 1 = 1 ]") && shared.contains("echo within_size > $T/shmem_enabled"));
         let stop = s.find("$C stop $D/crosvm.sock").expect("crosvm stop");
         let kill = s.find("kill -9 $pid").expect("the last resort");
         assert!(stop < kill, "stop comes first");
@@ -344,7 +394,7 @@ mod tests {
 
     #[test]
     fn thp_is_set_for_the_run_only_and_always_written_back() {
-        let s = run_script(&Options { mem: 1024, timeout: 60, thp: true }, "ab12");
+        let s = run_script(&Options { mem: 1024, timeout: 60, thp: true, crosvm: None, shared_ram: false, thp_shmem: "advise" }, "ab12");
         assert!(s.contains("if [ 1 = 1 ]; then"));
         assert!(s.contains("T=/sys/kernel/mm/transparent_hugepage"));
         // the old values are read before anything is written, and the trap is set before the write

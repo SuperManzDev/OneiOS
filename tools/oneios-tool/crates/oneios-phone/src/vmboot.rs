@@ -36,6 +36,16 @@
 //! the device's serial name, which sec_touchscreen has none of (boot 4's first start). The kernel reads crosvm's device as
 //! a virtio-input PCI function, its queues in the pool. The side keys stay with Android; volume down held 3 s stops the
 //! VM (getevent reads the key and does not take it): the way back without the PC. Their logs are `touch.txt` and run.txt.
+//!
+//! The shared-RAM VM: an Image of xnuloader-crosvm --shared-ram (label `shared-ram=1`) runs under Droid-VM's own crosvm
+//! (`--droidvm`, pushed and checked as `phone droidvm-crosvm` does) as its pseudo-unprotected VM
+//! (`--protected-vm-pseudo-unprotected`, no swiotlb): its RAM is shared with it after start through gunyah_host_share
+//! (`phone hostshare load` first; the script checks /dev/gunyah_share) and its shim accepts it, so the host reads all
+//! of it (docs/native.md "The shared-RAM VM"). The pool check is then the tree's `shim_handoff@` node (crosvm made the
+//! shared-RAM VM) instead of the restricted DMA pool, and the bridge maps the boot video out of crosvm's mapping of the
+//! guest's RAM (`displayctl pool --vm shared`). The window comes from gh_hugepage_reserve's 2 MiB pages as before: only
+//! they stay where they are when gunyah_host_share pins them (vm-probe shared2: 1 GiB of other pages moved, 126651 runs,
+//! and the resource manager refused to map it).
 use crate::adb::Adb;
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
@@ -56,6 +66,8 @@ pub struct Label {
     pub ram: u32,
     pub cpus: u32,
     pub swiotlb: u32,
+    /// xnuloader-crosvm --shared-ram: Droid-VM's pseudo-unprotected VM
+    pub shared: bool,
 }
 
 pub fn label(image: &[u8]) -> Option<Label> {
@@ -65,7 +77,7 @@ pub fn label(image: &[u8]) -> Option<Label> {
     let end = image[0x100..0x200].iter().position(|b| *b == 0)?;
     let text = std::str::from_utf8(&image[0x100..0x100 + end]).ok()?;
     let rest = text.strip_prefix("oneios-crosvm ")?;
-    let (mut ram, mut cpus, mut swiotlb) = (None, None, Some(8));
+    let (mut ram, mut cpus, mut swiotlb, mut shared) = (None, None, Some(8), false);
     for word in rest.split_whitespace() {
         if let Some(v) = word.strip_prefix("ram-mib=") {
             ram = v.parse().ok();
@@ -73,9 +85,11 @@ pub fn label(image: &[u8]) -> Option<Label> {
             cpus = v.parse().ok();
         } else if let Some(v) = word.strip_prefix("swiotlb-mib=") {
             swiotlb = v.parse().ok();
+        } else if word == "shared-ram=1" {
+            shared = true;
         }
     }
-    Some(Label { ram: ram?, cpus: cpus?, swiotlb: swiotlb? })
+    Some(Label { ram: ram?, cpus: cpus?, swiotlb: swiotlb?, shared })
 }
 
 /// FILE.disks: the pool crosvm's tree must name, the Data store and crosvm's `--block` values.
@@ -177,13 +191,32 @@ pub fn parse_disks(text: &str) -> Result<Disks> {
 
 /// The run on the phone (detached; its own log is `run.txt`).
 pub fn boot_script(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Option<&Disks>) -> String {
-    boot_script_with(l, seconds, thp, sha, disks, false)
+    boot_script_with(l, seconds, thp, sha, disks, false, false)
 }
 
 /// The same, with `swipe`: the touch forwarder's test swipes (`--swipe-test`: 200 s after crosvm connected, then every
 /// 60 s), a test of the VM's touch without a finger.
-pub fn boot_script_with(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Option<&Disks>, swipe: bool) -> String {
+/// `pin` (`--pin`): vCPU N on the phone's core N (crosvm `--cpu-affinity`), each where the scheduler would otherwise
+/// move it about: on the S25 cores 0 to 5 run at up to 3.53 GHz and 6 and 7 at 4.47 GHz.
+pub fn boot_script_with(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Option<&Disks>, swipe: bool, pin: bool) -> String {
     let (mem, cpus, swiotlb) = (l.ram, l.cpus, l.swiotlb);
+    // Droid-VM's crosvm and its shared-RAM VM, or AVF's and its protected one with the restricted DMA pool
+    let (crosvm, protection) = if l.shared {
+        (format!("{}/crosvm", crate::droidvm::DIR), "--protected-vm-pseudo-unprotected".to_string())
+    } else {
+        ("/apex/com.android.virt/bin/crosvm".to_string(), format!("--protected-vm-without-firmware --swiotlb {swiotlb}"))
+    };
+    let share_check = if l.shared {
+        "[ -c /dev/gunyah_share ] || { echo \"no /dev/gunyah_share: oneios-tool phone hostshare load\"; end \"refused no gunyah_share\"; exit 1; }\n\
+         [ -x $C ] || { echo \"no $C: --droidvm\"; end \"refused no crosvm\"; exit 1; }\n"
+    } else {
+        ""
+    };
+    let affinity = if pin {
+        format!(" --cpu-affinity {}", (0..cpus).map(|i| format!("{i}={i}")).collect::<Vec<_>>().join(":"))
+    } else {
+        String::new()
+    };
     let mut checks = String::new();
     let mut blocks = String::new();
     let mut pool_check = String::new();
@@ -256,9 +289,10 @@ pub fn boot_script_with(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Op
             "bridge=\nif [ \"$pool\" != bad ] && kill -0 $pid 2>/dev/null; then\n  \
              if [ -x $D/displayctl ] && [ -x $H ]; then\n    \
              TMPDIR=$D $D/displayctl pool --pid $pid --pool-offset {po} --pool-bytes {pb} --fb-offset {fo} --size {w}x{h} --stride {s} \
-             --seq-offset {sq} --helper $H </dev/null >>$D/display.txt 2>&1 &\n    \
+             --seq-offset {sq}{vm} --helper $H </dev/null >>$D/display.txt 2>&1 &\n    \
              bridge=$!\n    echo \"display: the bridge ($bridge) shows the VM's screen on a layer over One UI: display.txt\"\n  \
              else\n    echo \"display: no $D/displayctl or no $H: the VM runs without its screen\"\n  fi\nfi\n",
+            vm = if l.shared { " --vm shared" } else { "" },
             po = d.pool - RAM_BASE,
             pb = (d.swiotlb as u64) << 20,
             fo = f.offset,
@@ -296,23 +330,34 @@ pub fn boot_script_with(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Op
             gib = d.store_gib,
             n = d.blocks.len()
         );
-        // The pool's node, as crosvm names it (aarch64/src/fdt.rs: the address in lowercase hex, no 0x)
-        pool_check = format!(
+        // The pool's node, as crosvm names it (aarch64/src/fdt.rs: the address in lowercase hex, no 0x); a shared-RAM
+        // VM has none, and its tree's shim_handoff node says crosvm made that kind
+        pool_check = if l.shared {
+            "t=0\nwhile [ $t -lt 100 ] && [ ! -s $D/fdt.dtb ] && kill -0 $pid 2>/dev/null; do sleep 0.1 2>/dev/null || sleep 1; t=$((t + 1)); done\n\
+             sleep 0.1 2>/dev/null\n\
+             if kill -0 $pid 2>/dev/null; then\n  \
+             if grep -q -F shim_handoff@ $D/fdt.dtb; then echo \"pool: crosvm's shared-RAM VM (its tree has the shim's handoff page): the disks' windows are plain RAM\"; \
+             else echo \"pool: crosvm's tree has no shim_handoff node: not the shared-RAM VM, stopped before the kernel's disks start\"; pool=bad; touch $D/stop.request; fi\n\
+             fi\n"
+                .to_string()
+        } else {
+            format!(
             "t=0\nwhile [ $t -lt 100 ] && [ ! -s $D/fdt.dtb ] && kill -0 $pid 2>/dev/null; do sleep 0.1 2>/dev/null || sleep 1; t=$((t + 1)); done\n\
              sleep 0.1 2>/dev/null\n\
              if kill -0 $pid 2>/dev/null; then\n  \
              if grep -q -F restricted_dma_reserved@{pool:x} $D/fdt.dtb; then echo \"pool: crosvm's restricted DMA pool is at 0x{pool:x}, as the disks' windows\"; \
              else echo \"pool: crosvm's tree has no restricted_dma_reserved@{pool:x}: the VM is stopped before the kernel's disks start\"; pool=bad; touch $D/stop.request; fi\n\
              fi\n",
-            pool = d.pool
-        );
+                pool = d.pool
+            )
+        };
         if swipe {
             touch_find = touch_find.replace("--socket $D/touch.sock </dev/null", "--socket $D/touch.sock --swipe-at 200 --swipe-every 60 </dev/null");
         }
     }
     format!(
         r#"D={DIR}
-C=/apex/com.android.virt/bin/crosvm
+C={crosvm}
 H=$D/oneios-display
 exec >>$D/run.txt 2>&1 </dev/null
 cd $D || exit 1
@@ -320,6 +365,7 @@ end() {{ echo "$*" > $D/result; }}
 got=$(sha256sum kernel.img | cut -d' ' -f1)
 [ "$got" = "{sha}" ] || {{ echo "sha256 $got, not {sha}"; end "refused sha256"; exit 1; }}
 [ -c /dev/gunyah ] || {{ echo "no /dev/gunyah"; end "refused no /dev/gunyah"; exit 1; }}
+{share_check}
 tdev=
 tsock=
 {checks}rm -f serial.txt crosvm.log crosvm.sock fdt.dtb dmesg.txt display.txt touch.txt touch.sock stop.request
@@ -351,7 +397,7 @@ echo "start $(date +%s) up $(cut -d' ' -f1 /proc/uptime)"
 pool=
 set -f
 $C --log-level debug run --disable-sandbox --no-balloon --no-rng --no-usb --hypervisor gunyah \
-  --protected-vm-without-firmware --swiotlb {swiotlb} --hugepages --mem size={mem} --cpus num-cores={cpus} \
+  {protection} --hugepages --mem size={mem} --cpus num-cores={cpus}{affinity} \
   --socket $D/crosvm.sock${{tsock:+ --input multi-touch[path=$tsock,width=4095,height=4095,name=oneios-touch]}} --serial type=file,hardware=serial,num=1,path=$D/serial.txt,console \
   --dump-device-tree-blob $D/fdt.dtb{blocks} $D/kernel.img </dev/null >$D/crosvm.log 2>&1 &
 pid=$!
@@ -402,6 +448,10 @@ pub struct Options {
     pub bridge: String,
     /// The touch forwarder's test swipes (boot_script_with)
     pub swipe_test: bool,
+    /// vCPU N on core N (boot_script_with)
+    pub pin: bool,
+    /// Droid-VM's crosvm package on the PC (scripts/droidvm/fetch-crosvm.sh), pushed for a shared-RAM Image
+    pub droidvm: String,
 }
 
 /// `phone vm-boot --stop`: ask the running VM's script to stop it now (crosvm stop through its socket).
@@ -454,6 +504,14 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
     let pool_mib = crate::hugepool::stat(&meminfo, "pool_avail").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) * 2;
     crate::vmprobe::check_mem(l.ram, available + pool_mib.min(l.ram as u64))?;
     check_pool(l.ram as u64, pool_mib)?;
+    if l.shared {
+        let dev = adb.root_ok(&format!("[ -c {} ] && echo there || echo absent\n", crate::hostshare::DEV), "gunyah_share")?;
+        if !dev.contains("there") {
+            bail!("a shared-RAM Image and no {} on the phone: `phone hostshare load` first", crate::hostshare::DEV);
+        }
+        let c = crate::droidvm::push(adb, &o.droidvm)?;
+        println!("vm-boot: a shared-RAM Image: Droid-VM's crosvm ({c}), --protected-vm-pseudo-unprotected");
+    }
     adb.root_ok(&format!("mkdir -p {DIR} && chmod 777 {DIR} && rm -f {DIR}/result {DIR}/run.txt {DIR}/serial.txt\n"), "the VM's folder")?;
     println!("vm-boot: {} MiB Image, sha256 {sha}: pushing", data.len() >> 20);
     adb.push(image, &format!("{DIR}/kernel.img"))?;
@@ -490,7 +548,7 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
     if o.swipe_test && !disks.as_ref().is_some_and(|d| d.input) {
         bail!("--swipe-test needs an Image with the touch (xnuloader-crosvm --display)");
     }
-    fs::write(&script, boot_script_with(&l, o.seconds, o.thp, &sha, disks.as_ref(), o.swipe_test))?;
+    fs::write(&script, boot_script_with(&l, o.seconds, o.thp, &sha, disks.as_ref(), o.swipe_test, o.pin))?;
     adb.push(script.to_str().context("path")?, &format!("{DIR}/boot.sh"))?;
     let r = adb.root(&crate::adb::detached_start(&format!("{DIR}/boot.sh")))?;
     if !r.out.contains("started") {
@@ -584,8 +642,8 @@ mod tests {
 
     #[test]
     fn the_label_gives_the_vm() {
-        assert_eq!(label(&image(b"oneios-crosvm ram-mib=2048 cpus=1")), Some(Label { ram: 2048, cpus: 1, swiotlb: 8 }));
-        assert_eq!(label(&image(b"oneios-crosvm ram-mib=3072 cpus=2 swiotlb-mib=16")), Some(Label { ram: 3072, cpus: 2, swiotlb: 16 }));
+        assert_eq!(label(&image(b"oneios-crosvm ram-mib=2048 cpus=1")), Some(Label { ram: 2048, cpus: 1, swiotlb: 8, shared: false }));
+        assert_eq!(label(&image(b"oneios-crosvm ram-mib=3072 cpus=2 swiotlb-mib=16")), Some(Label { ram: 3072, cpus: 2, swiotlb: 16, shared: false }));
         let mut bad = image(b"oneios-crosvm ram-mib=2048 cpus=1");
         bad[0x100] = b'x';
         assert_eq!(label(&bad), None);
@@ -610,7 +668,7 @@ mod tests {
 
     #[test]
     fn the_boot_stops_before_it_kills_and_writes_back_thp() {
-        let l = Label { ram: 2048, cpus: 1, swiotlb: 8 };
+        let l = Label { ram: 2048, cpus: 1, swiotlb: 8, shared: false };
         let s = boot_script(&l, 120, true, "ab12", None);
         assert!(s.find("$C stop $D/crosvm.sock").unwrap() < s.find("kill -9 $pid").unwrap());
         assert!(s.contains("--swiotlb 8 --hugepages --mem size=2048 --cpus num-cores=1"));
@@ -626,7 +684,7 @@ mod tests {
     #[test]
     fn the_disks_are_checked_before_crosvm_and_the_pool_right_after() {
         let d = parse_disks(DISKS).unwrap();
-        let l = Label { ram: 3072, cpus: 1, swiotlb: 8 };
+        let l = Label { ram: 3072, cpus: 1, swiotlb: 8, shared: false };
         let s = boot_script(&l, 600, true, "ab12", Some(&d));
         let crosvm = s.find("$C --log-level debug run").unwrap();
         // the sizes, the store and the free space before crosvm; the store made only when missing
@@ -667,9 +725,32 @@ mod tests {
     }
 
     #[test]
+    fn a_shared_ram_image_runs_under_droid_vms_crosvm() {
+        assert_eq!(
+            label(&image(b"oneios-crosvm ram-mib=2048 cpus=8 swiotlb-mib=32 shared-ram=1")),
+            Some(Label { ram: 2048, cpus: 8, swiotlb: 32, shared: true })
+        );
+        let d = parse_disks(SCREEN).unwrap();
+        let l = Label { ram: 2880, cpus: 1, swiotlb: 32, shared: true };
+        let s = boot_script(&l, 900, true, "ab12", Some(&d));
+        assert!(s.contains("C=/data/local/tmp/oneios-droidvm/crosvm\n"));
+        assert!(s.contains("[ -c /dev/gunyah_share ] ||") && s.contains("[ -x $C ] ||"));
+        assert!(s.contains("--hypervisor gunyah \\\n  --protected-vm-pseudo-unprotected --hugepages --mem size=2880 "));
+        assert!(!s.contains("--swiotlb") && !s.contains("restricted_dma_reserved"));
+        assert!(s.contains("grep -q -F shim_handoff@ $D/fdt.dtb"));
+        assert!(s.contains(" --vm shared --helper $H"));
+        // the shim's check comes before the bridge, as the pool's does
+        assert!(s.find("shim_handoff@").unwrap() < s.find("TMPDIR=$D $D/displayctl pool").unwrap());
+        // AVF's protected VM stays as it was
+        let p = boot_script(&Label { shared: false, ..l }, 900, true, "ab12", Some(&d));
+        assert!(p.contains("C=/apex/com.android.virt/bin/crosvm\n") && p.contains("--swiotlb 32 --hugepages"));
+        assert!(!p.contains("--vm shared") && !p.contains("gunyah_share") && !p.contains("shim_handoff"));
+    }
+
+    #[test]
     fn the_bridge_starts_after_the_pool_check_and_ends_after_the_vm() {
         let d = parse_disks(SCREEN).unwrap();
-        let l = Label { ram: 2880, cpus: 1, swiotlb: 32 };
+        let l = Label { ram: 2880, cpus: 1, swiotlb: 32, shared: false };
         let s = boot_script(&l, 900, true, "ab12", Some(&d));
         let pool = s.find("grep -q -F restricted_dma_reserved@132000000 $D/fdt.dtb").unwrap();
         let bridge = s.find("TMPDIR=$D $D/displayctl pool --pid $pid").unwrap();
@@ -708,7 +789,7 @@ mod tests {
     /// The script's touchscreen lookup run by the PC's sh and awk on DEVICES (or a variant): what it leaves in tdev.
     fn touch_lookup(devices: &str) -> String {
         let d = parse_disks(&format!("{SCREEN}input touch\n")).unwrap();
-        let s = boot_script(&Label { ram: 2880, cpus: 1, swiotlb: 32 }, 900, true, "ab12", Some(&d));
+        let s = boot_script(&Label { ram: 2880, cpus: 1, swiotlb: 32, shared: false }, 900, true, "ab12", Some(&d));
         let (from, to) = (s.find("dev_of() {\n").unwrap(), s.find("if [ -n \"$tdev\" ] && [ -c /dev/input/$tdev ]; then").unwrap());
         let dir = std::env::temp_dir().join(format!("oneios-vmboot-touch-{}-{}", std::process::id(), devices.len()));
         fs::create_dir_all(&dir).unwrap();
@@ -734,7 +815,7 @@ mod tests {
         assert_eq!(touch_lookup(&shared), "touch: event4 is a side key's device: not given to the VM\ntdev=");
         // the script: the lookup, then the forwarder listening, before crosvm; crosvm's multi-touch device on its socket
         // (no glob expansion of the brackets); the way back after the bridge; both ended after the VM
-        let s = boot_script(&Label { ram: 2880, cpus: 1, swiotlb: 32 }, 900, true, "ab12", Some(&d));
+        let s = boot_script(&Label { ram: 2880, cpus: 1, swiotlb: 32, shared: false }, 900, true, "ab12", Some(&d));
         let lookup = s.find("tdev=$(dev_of sec_touchscreen 2)").unwrap();
         let forward = s.find("$D/displayctl touch --evdev /dev/input/$tdev --socket $D/touch.sock </dev/null >>$D/touch.txt 2>&1 &").unwrap();
         let crosvm = s.find("$C --log-level debug run").unwrap();
@@ -751,11 +832,15 @@ mod tests {
         assert!(s.find("thp_restore\n").unwrap() < s.find("if [ -n \"$escape\" ]; then kill $escape").unwrap());
         assert!(!s.contains("EVIOCGRAB") && !s.contains("--evdev /dev/input/event"));
         // without the input bus: no lookup, and the empty tdev puts nothing on crosvm's line
-        let plain = boot_script(&Label { ram: 2880, cpus: 1, swiotlb: 32 }, 900, true, "ab12", Some(&parse_disks(SCREEN).unwrap()));
+        let plain = boot_script(&Label { ram: 2880, cpus: 1, swiotlb: 32, shared: false }, 900, true, "ab12", Some(&parse_disks(SCREEN).unwrap()));
         assert!(!plain.contains("dev_of") && !plain.contains("getevent") && plain.contains("tdev=\ntsock=\n"));
         assert!(!plain.contains("displayctl touch"));
         // the test swipes only when asked, on the forwarder's line
-        let swiped = boot_script_with(&Label { ram: 2880, cpus: 1, swiotlb: 32 }, 900, true, "ab12", Some(&d), true);
+        let swiped = boot_script_with(&Label { ram: 2880, cpus: 1, swiotlb: 32, shared: false }, 900, true, "ab12", Some(&d), true, false);
+        // the vCPUs on their cores only when asked
+        let pinned = boot_script_with(&Label { ram: 2048, cpus: 8, swiotlb: 512, shared: false }, 900, true, "ab12", Some(&d), false, true);
+        assert!(pinned.contains("--cpus num-cores=8 --cpu-affinity 0=0:1=1:2=2:3=3:4=4:5=5:6=6:7=7 \\\n"));
+        assert!(!s.contains("--cpu-affinity"));
         assert!(swiped.contains("--socket $D/touch.sock --swipe-at 200 --swipe-every 60 </dev/null") && !s.contains("--swipe-at"));
     }
 
@@ -763,8 +848,8 @@ mod tests {
     fn the_boot_parses_as_posix_sh() {
         let d = parse_disks(DISKS).unwrap();
         let screen = parse_disks(SCREEN).unwrap();
-        let l = Label { ram: 3072, cpus: 1, swiotlb: 8 };
-        let l32 = Label { ram: 2880, cpus: 1, swiotlb: 32 };
+        let l = Label { ram: 3072, cpus: 1, swiotlb: 8, shared: false };
+        let l32 = Label { ram: 2880, cpus: 1, swiotlb: 32, shared: false };
         let touch = parse_disks(&format!("{SCREEN}input touch\n")).unwrap();
         for (n, script) in [boot_script(&l, 600, true, "ab12", Some(&d)), boot_script(&l, 60, false, "ab12", None), boot_script(&l32, 900, true, "ab12", Some(&screen)),
                             boot_script(&l32, 900, true, "ab12", Some(&touch))]

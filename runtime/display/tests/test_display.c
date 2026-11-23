@@ -358,11 +358,23 @@ static void test_pool_parts(void)
     "7100000000-7100800000 rw-s 7f800000 00:01 2460463                        /memfd:crosvm_guest2\n"
     "7200000000-7200800000 rw-s 7f800000 00:00 0 \n";
   uint64_t start = 0, end = 0, inode = 0;
-  CHECK(xhd_pool_mapping(maps, 0x7f800000, 8 << 20, &start, &end, &inode) == 0 && start == 0x6e50600000ull &&
+  CHECK(xhd_pool_mapping(maps, 0x7f800000, 8 << 20, 0, &start, &end, &inode) == 0 && start == 0x6e50600000ull &&
         end == 0x6e50e00000ull && inode == 2460461);
-  CHECK(xhd_pool_mapping(maps, 0x7f800000, 16 << 20, &start, &end, &inode) == -ENOENT);   // not the pool's size
-  CHECK(xhd_pool_mapping(maps, 0, 8 << 20, &start, &end, &inode) == -ENOENT);            // the lent RAM's is longer
-  CHECK(xhd_pool_mapping(others, 0x7f800000, 8 << 20, &start, &end, &inode) == -ENOENT);
+  CHECK(xhd_pool_mapping(maps, 0x7f800000, 16 << 20, 0, &start, &end, &inode) == -ENOENT);   // not the pool's size
+  CHECK(xhd_pool_mapping(maps, 0, 8 << 20, 0, &start, &end, &inode) == -ENOENT);            // the lent RAM's is longer
+  CHECK(xhd_pool_mapping(others, 0x7f800000, 8 << 20, 0, &start, &end, &inode) == -ENOENT);
+  // Droid-VM's shared-RAM VM: its devices' region inside crosvm's mapping of the window (the memfd from 6 MiB), which
+  // counts only when the caller says the VM is one: a protected VM's RAM must never
+  static const char shared[] =
+    "76a8000000-76a8400000 rw-s 00000000 00:01 3000001                        /memfd:crosvm_guest (deleted)\n"
+    "76a8600000-7728000000 rw-s 00600000 00:01 3000001                        /memfd:crosvm_guest (deleted)\n";
+  CHECK(xhd_pool_mapping(shared, 0x7e000000, 32 << 20, 1, &start, &end, &inode) == 0 && start == 0x76a8600000ull &&
+        end == 0x7728000000ull && inode == 3000001);
+  CHECK(xhd_pool_mapping(shared, 0x7e000000, 32 << 20, 0, &start, &end, &inode) == -ENOENT);
+  CHECK(xhd_pool_mapping(shared, 0x7fe00000, 32 << 20, 1, &start, &end, &inode) == -ENOENT);  // past the window's end
+  CHECK(xhd_pool_mapping(shared, 0x200000, 1 << 20, 1, &start, &end, &inode) == 0 && start == 0x76a8000000ull);
+  CHECK(xhd_pool_mapping(shared, 0x300000, 2 << 20, 1, &start, &end, &inode) == -ENOENT);     // across two mappings
+  CHECK(xhd_pool_mapping(others, 0x7f800000, 8 << 20, 1, &start, &end, &inode) == -ENOENT);
 
   // The copy: 16x8 pixels, 64 bytes a row, four rows a 256-byte page; page 1 (rows 4-7) not resident.
   uint8_t src[512], dst[512];

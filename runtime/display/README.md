@@ -222,11 +222,13 @@ phone vm-boot` starts the bridge beside crosvm:
 
 ```sh
 displayctl pool --pid CROSVM --pool-offset N --pool-bytes N --size 1440x3120 --stride 5760 --seq-offset N [--fb-offset 0]
-                [--seconds N] [--helper PATH] [-- helper options]
+                [--vm protected|shared] [--seconds N] [--helper PATH] [-- helper options]
 ```
 
 It finds crosvm's own mapping of the pool in `/proc/PID/maps` (a shared mapping of `/memfd:crosvm_guest` at the
-pool's offset, exactly the pool's size: anything else is refused), opens the memfd through `/proc/PID/map_files`
+pool's offset, exactly the pool's size: anything else is refused; with `--vm shared`, for Droid-VM's shared-RAM VM
+of `xnuloader-crosvm --shared-ram` whose whole RAM the host may read, any shared mapping of it that holds the devices'
+region, which is then part of crosvm's mapping of the guest's RAM), opens the memfd through `/proc/PID/map_files`
 (checked: the same inode, long enough), and maps **only** the frame and the count's page, read-only. It serves a frame
 of its own (a memfd) to the helper as `test` does (the same session folder, the same refusal of `--takeover` and the
 other disruptive options). While the guest has not counted a frame yet (the kernel's console during boot) it compares

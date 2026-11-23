@@ -107,8 +107,11 @@ int xhd_memfd(const char *name, size_t bytes);                           // fd o
 // The bridge of a VM of Android's crosvm (displayctl pool): the native kernel's boot video in crosvm's restricted DMA pool.
 // crosvm maps the pool as a mapping of its own of the guest's memfd: in the text of its /proc/PID/maps, the line of a
 // shared, readable mapping of "/memfd:crosvm_guest" at file offset `offset`, `bytes` long. 0 and its start, end and
-// inode, or -ENOENT.
-int xhd_pool_mapping(const char *maps, uint64_t offset, uint64_t bytes, uint64_t *start, uint64_t *end, uint64_t *inode);
+// inode, or -ENOENT. `shared_ram`: Droid-VM's shared-RAM VM (xnuloader-crosvm --shared-ram), whose RAM is the host's to
+// read as well: the devices' region is then part of a longer mapping of the memfd, and any shared, readable mapping
+// that holds [offset, offset + bytes) counts. Never for a protected VM, whose other mappings are its lent RAM.
+int xhd_pool_mapping(const char *maps, uint64_t offset, uint64_t bytes, int shared_ram, uint64_t *start, uint64_t *end,
+                     uint64_t *inode);
 // The guest's frame (src: rows of width * 4 bytes, `stride` apart) into the helper's (dst, the same layout): a row is
 // read only when every page_size page it touches is resident (resident[i] & 1 for page i of src, as mincore says; no
 // read makes the host allocate guest memory), and written only when it differs. `invalidate`: clean and invalidate the

@@ -6,7 +6,7 @@
 // stub (interrupts masked, x0 = boot_args, a branch to the entry); the kernel's window (xl_boot_place: its segments, the
 // device tree, boot_args) at its physical base, 32 MiB aligned with the kernel's own base as on the bench.
 //   xnuloader-crosvm KERNEL OUT [--cpus N] [--ram-mib N] [--timebase HZ] [--args TEXT] [--args-add TEXT] [--swiotlb MIB]
-//                    [--image DIR [--phone-image DIR] [--phone-data FILE]]
+//                    [--image DIR [--phone-image DIR] [--phone-data FILE]] [--shared-ram]
 // --ram-mib is the VM's (crosvm --mem): the window ends below crosvm's FDT and its restricted DMA pool (--swiotlb, 8 MiB
 // by default, 32 with --display, up to 1024; the RAM's last MIB). Writes OUT (the Image), OUT.adt (the device tree the kernel is given:
 // xnuloader-inspect adt FILE) and, with --image, OUT.disks; prints the layout.
@@ -37,6 +37,14 @@
 // virtio-input functions there, wherever crosvm put them), and a 64 KiB window of the pool after the disks' for their
 // queues and events (three 4 KiB pages a device); OUT.disks then has "input touch": vm-boot hands crosvm the phone's
 // touchscreen (--evdev).
+// --shared-ram: for Droid-VM's crosvm's pseudo-unprotected VM (--protected-vm-pseudo-unprotected, gunyah_host_share;
+// docs/native.md "The shared-RAM VM") instead of AVF's protected one. Its first 6 MiB are its own: a lent region with
+// its boot shim and its device tree (4 MiB), then the page the host and the shim talk through (2 MiB); the guest's RAM
+// is the window after them, which the host shares with the VM after it started and the shim accepts. crosvm puts the
+// payload at the window's start (0x80600000, vm-probe's run shared1 saw it there), so the Image begins there; the
+// kernel's own window stays where it was (32 MiB in, which is above the shim's region). There is no restricted DMA
+// pool: the host reads all of the VM's RAM, and the region where the pool would be is plain RAM that keeps the devices'
+// windows as before (--swiotlb sets its size; crosvm is not given it). The label says shared-ram=1, for vm-boot.
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -49,6 +57,7 @@
 #include "xnuloader/macho.h"
 
 #define RAM_BASE      0x80000000ull     // crosvm's DRAM on aarch64
+#define SHIM_REGION   (6ull << 20)      // --shared-ram: the shim's lent region (4 MiB) and the handoff page (2 MiB)
 #define KERNEL_ALIGN  (32ull << 20)     // the kernel's VA and PA agree modulo 32 MiB (xnuloader-qemu)
 #define FDT_RESERVE   (8ull << 20)      // below the pool: crosvm's FDT (2 MiB, 2 MiB aligned, right below it) and room
 #define ARMIO_BASE    0x1000ull         // crosvm's MMIO (RTC 0x2000, PCI 0x10000, GIC) up to 1 GiB; not 0
@@ -89,7 +98,7 @@ static uint8_t *slurp(const char *path, size_t *size)
 static void usage(void)
 {
   fprintf(stderr, "usage: xnuloader-crosvm KERNEL OUT [--cpus N] [--ram-mib N] [--timebase HZ] [--args TEXT] [--args-add TEXT] [--swiotlb MIB]\n"
-                  "                        [--image DIR [--phone-image DIR] [--phone-data FILE] [--display WxH [--scale 2|3] [--hz N]]]\n");
+                  "                        [--image DIR [--phone-image DIR] [--phone-data FILE] [--display WxH [--scale 2|3] [--hz N]]] [--shared-ram]\n");
   exit(2);
 }
 
@@ -113,7 +122,9 @@ int main(int argc, char **argv)
   unsigned cpus = 1, ram_mib = 2048, swiotlb_mib = 0;
   unsigned display_w = 0, display_h = 0, display_scale = 3, display_hz = 60;
   uint32_t timebase = 19200000;         // the S25's (vm-probe: CNTFRQ_EL0 in the VM)
+  bool shared_ram = false;
   for (int i = 3; i < argc; i++) {
+    if (!strcmp(argv[i], "--shared-ram")) { shared_ram = true; continue; }
     if (i + 1 >= argc) usage();
     if (!strcmp(argv[i], "--cpus")) cpus = (unsigned)strtoul(argv[++i], NULL, 0);
     else if (!strcmp(argv[i], "--ram-mib")) ram_mib = (unsigned)strtoul(argv[++i], NULL, 0);
@@ -284,8 +295,9 @@ int main(int argc, char **argv)
   if (xl_boot_place(&req, &lay, &err)) { fprintf(stderr, "place: %s\n", err); return 1; }
   const uint64_t used = (lay.used + 0x3fff) & ~0x3fffull;
 
-  // The Image: [the header and the stub][zeros][the window at phys - RAM_BASE]
-  const uint64_t at = phys - RAM_BASE, total = at + used;
+  // The Image: [the header and the stub][zeros][the window at phys - the Image's base]
+  const uint64_t image_base = shared_ram ? RAM_BASE + SHIM_REGION : RAM_BASE;
+  const uint64_t at = phys - image_base, total = at + used;
   uint8_t head[0x60];
   memset(head, 0, sizeof head);
   put32(head + 0x00, 0x14000010u);              // code0: b 0x40
@@ -305,7 +317,8 @@ int main(int argc, char **argv)
   // At 0x100 a label of the VM this Image is made for, which `oneios-tool phone vm-boot` reads and starts crosvm with:
   // the window was cut for that much RAM, that many vCPUs and that pool
   char label[128];
-  int label_len = snprintf(label, sizeof label, "oneios-crosvm ram-mib=%u cpus=%u swiotlb-mib=%u", ram_mib, cpus, swiotlb_mib);
+  int label_len = snprintf(label, sizeof label, "oneios-crosvm ram-mib=%u cpus=%u swiotlb-mib=%u%s", ram_mib, cpus, swiotlb_mib,
+                           shared_ram ? " shared-ram=1" : "");
   if (label_len < 0 || (size_t)label_len >= sizeof label) return 1;
 
   FILE *f = fopen(out, "wb");
@@ -352,14 +365,18 @@ int main(int argc, char **argv)
   printf("xnuloader-crosvm: %s %s, base 0x%llx, entry 0x%llx\n", k.fileset ? "MH_FILESET" : "MH_EXECUTE", k.cpusubtype == 2 ? "arm64e" : "arm64",
          (unsigned long long)k.base, (unsigned long long)k.entry);
   printf("  Image %s: %llu MiB, loaded at PA 0x%llx; stub at 0x%llx: boot_args PA 0x%llx, entry PA 0x%llx\n", out,
-         (unsigned long long)(total >> 20), (unsigned long long)RAM_BASE, (unsigned long long)(RAM_BASE + 0x40),
+         (unsigned long long)(total >> 20), (unsigned long long)image_base, (unsigned long long)(image_base + 0x40),
          (unsigned long long)lay.args_pa, (unsigned long long)lay.entry_pa);
   printf("  window at PA 0x%llx (%llu MiB of the VM's %u), %llu MiB used; device tree PA 0x%llx (%llu bytes)\n",
          (unsigned long long)phys, (unsigned long long)(window >> 20), ram_mib, (unsigned long long)(lay.used >> 20),
          (unsigned long long)lay.tree_pa, (unsigned long long)lay.tree_size);
   printf("  %u vCPU%s, timebase %u Hz, GICD 0x%llx, GICR 0x%llx, console ns16550a at 0x%llx; boot args: %s\n", cpus,
          cpus == 1 ? "" : "s", timebase, (unsigned long long)GICD, (unsigned long long)m.gic_redist, (unsigned long long)UART, args);
-  printf("  restricted DMA pool (crosvm --swiotlb %u) at PA 0x%llx\n", swiotlb_mib, (unsigned long long)pool);
+  if (shared_ram)
+    printf("  shared RAM (Droid-VM's crosvm, --protected-vm-pseudo-unprotected): the devices' region, %u MiB of plain RAM, at PA 0x%llx\n",
+           swiotlb_mib, (unsigned long long)pool);
+  else
+    printf("  restricted DMA pool (crosvm --swiotlb %u) at PA 0x%llx\n", swiotlb_mib, (unsigned long long)pool);
   if (display_w)
     printf("  display: %ux%u @%ux, %u Hz; the boot video at PA 0x%llx (the pool's start, %llu bytes, %llu a row); the disks' windows from 0x%llx\n",
            display_w, display_h, display_scale, display_hz, (unsigned long long)fb_pa, (unsigned long long)fb_bytes,

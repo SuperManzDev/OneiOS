@@ -297,7 +297,8 @@ int xhd_memfd(const char *name, size_t bytes)
   return fd;
 }
 
-int xhd_pool_mapping(const char *maps, uint64_t offset, uint64_t bytes, uint64_t *start, uint64_t *end, uint64_t *inode)
+int xhd_pool_mapping(const char *maps, uint64_t offset, uint64_t bytes, int shared_ram, uint64_t *start, uint64_t *end,
+                     uint64_t *inode)
 {
   static const char name[] = "/memfd:crosvm_guest";
   for (const char *line = maps; line && *line;) {
@@ -312,7 +313,8 @@ int xhd_pool_mapping(const char *maps, uint64_t offset, uint64_t bytes, uint64_t
       char perms[8];
       int at = 0;
       if (sscanf(text, "%llx-%llx %7s %llx %x:%x %llu %n", &s, &e, perms, &off, &major, &minor, &ino, &at) == 7 && at > 0 &&
-          strlen(perms) == 4 && perms[0] == 'r' && perms[3] == 's' && off == offset && e > s && e - s == bytes &&
+          strlen(perms) == 4 && perms[0] == 'r' && perms[3] == 's' && e > s &&
+          (shared_ram ? off <= offset && bytes <= e - s && offset - off <= e - s - bytes : off == offset && e - s == bytes) &&
           !strncmp(text + at, name, sizeof name - 1) && (text[at + sizeof name - 1] == 0 || text[at + sizeof name - 1] == ' ')) {
         *start = s;
         *end = e;
