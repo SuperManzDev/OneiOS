@@ -270,14 +270,24 @@ module loaded at boot; lyc8503 hit the same wall at 1 GB without it).
 blocks 0 to 124 (248 MiB). Second try: MemFree 1,461 to 2,851 MiB, 2 MiB blocks 0 to 26 (52 MiB); by order (4 KiB <<
 order) `64331 53559 29200 13048 7123 2764 948 289 93 22 2`: the freed memory is in pieces of 4 KiB to 1 MiB, and
 compaction does not join them (most Movable pageblocks hold pages it cannot move). So at run time this phone cannot
-give a VM gigabytes of 2 MiB blocks, and in 4 KiB pages Gunyah's 18 MiB stops it near 500 MiB: with AVF's crosvm and a
-temporary root, a VM of iOS's size does not fit [F for the runs above, I for "does not fit": a VM's limit might grow
-with its declared size, which no run has tried].
+give a VM gigabytes of 2 MiB blocks, and in 4 KiB pages Gunyah's 18 MiB stops it near 500 MiB.
+
+**Run 8, 2026-11-23: a bigger VM does not get further** (`logs/pa3q-vmprobe/run8-2g/`, 2 GiB, as run 5): "Failed to
+map guest address 0x9632b000: 10", at about 350 MiB, before run 5's 470 MiB of a 1 GiB VM. The limit is the
+hypervisor's, not the VM's.
+
+**Verdict for this phone: a VM under Gunyah is not a way to run iOS** [F]. Its vCPUs run at the core's own speed, but
+its RAM ends near 0.5 GB: Gunyah lends it in 4 KiB pages from a hypervisor heap of 18 MiB for all its VMs, the 2 MiB
+blocks that would take 512 times less of it are not there at run time (52 to 248 MiB of them, even with the file
+cache dropped and the memory compacted), and with a temporary root nothing can reserve them at boot (Droid-VM's way:
+an unlocked bootloader or a lasting root). iOS needs 3 to 4 GB. The probe, `vm-probe`, `hugeblocks` and `dmesg` stay
+for another phone or another firmware.
 
 ## Next
-1. The owner's choice, with the facts above: the Gunyah VM (its first test needs the owner's go, the worst case being
-   a phone reset), or XNU alone, whose unknowns are the hand-off under Samsung's protections, the command-mode panel
-   with no display driver, and UFS behind file-based encryption (a RAM disk cannot hold the 16 GB image set).
+1. The owner's choice, with the facts above. The Gunyah VM was tried (2026-11-20 to 23) and does not fit iOS on this
+   phone ("A VM under Gunyah", verdict). Left: the hosted path that runs today, or XNU alone, whose unknowns are the
+   hand-off under Samsung's protections, the command-mode panel with no display driver, and UFS behind file-based
+   encryption (a RAM disk cannot hold the 16 GB image set).
 2. On the bench: the unlock and the Home screen (more time, or less work: the display's size, the jobs that a bench has
    no use for), a network (QEMU's virtio-net: mDNSResponder, rapportd and the others have nothing to talk to), the RTC
    (virt's PL031) for the clock, and the CPU report's idle time (`hosted_processors_idle_mach` from XNU's own processor
