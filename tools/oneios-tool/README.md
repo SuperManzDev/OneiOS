@@ -1271,7 +1271,7 @@ oneios-tool phone cpu [--trace S] [--out F]   # cores, domains, top and capped c
 oneios-tool phone hw [--out DIR]              # the hardware map: fdt.dtb, iomem, partitions, kernel.config, Gunyah/AVF (read only)
 oneios-tool phone vm-probe [--payload F] [--mem MIB] [--timeout S] [--thp] [--out DIR]
                                               # runtime/vmprobe's payload once as a protected VM under Gunyah (AVF's crosvm)
-oneios-tool phone vm-boot [--image F] [--seconds S] [--thp] [--out DIR] [--bridge F]   # the native kernel
+oneios-tool phone vm-boot [--image F] [--seconds S] [--thp] [--out DIR] [--bridge F] [--swipe-test]   # the native kernel
                                               #   (xnuloader-crosvm's Image) in such a VM, its console live, its screen
                                               #   on a layer when the Image has one; vm-boot --stop ends it sooner
 oneios-tool phone dmesg [--grep RE] [--tail N]  # the kernel's log, filtered on the PC (read only)
@@ -1636,11 +1636,31 @@ DIR (`phone-vmboot`), prints the run's disk, store and pool lines and crosvm's l
   bridge (it ends when crosvm's process is gone), asks it to end after 3 s and ends it after 8 s; the VM check also
   refuses while a `displayctl pool` runs. The live console: the poll's status no longer comes from its last command
   (`cat result`, missing while the VM runs: boot 3 printed the console only at the end).
+- The touch: such an Image also lists `input touch` (the kernel's input bus, `/arm-io/input-pci`; refused without the
+  `fb` line). The script then looks the phone's touchscreen up in `/proc/bus/input/devices` by its exact name
+  (`sec_touchscreen`, with `B: PROP=2`, INPUT_PROP_DIRECT) and refuses it should its `eventN` be one of the side keys'
+  devices (`gpio-keys`, `pmic_pwrkey`, `pmic_resin`, looked up the same way). Before crosvm starts, the bridge's
+  `displayctl touch --evdev /dev/input/eventN --socket touch.sock` listens (its log `touch.txt`, copied into DIR), and
+  crosvm gets `--input multi-touch[path=touch.sock,width=4095,height=4095,name=oneios-touch]` (the script's glob expansion
+  off around crosvm's line): when crosvm connects, the forwarder takes the touchscreen for the VM's life (One UI under the
+  layer gets no touches) and passes its frames on; when crosvm's socket closes it gives it back, and after the VM it is
+  waited for 3 s and ended. crosvm's own `--evdev` cannot take sec_touchscreen (it wants the device's serial name,
+  EVIOCGUNIQ, and there is none: boot 4's first start). The side keys stay with Android. The way back without the PC: `getevent -l` reads `pmic_resin` (volume down; read, not
+  taken) and a press held 3 s or longer writes `stop.request`; the reader is ended after the VM. The run's `touch:`
+  lines are printed with the others. `--swipe-test` (an Image with the touch only): the forwarder also sends a swipe up
+  from the bottom edge's middle to the panel's middle 200 s after crosvm connected and every 60 s after (`displayctl
+  touch --swipe-at 200 --swipe-every 60`): a test of the VM's touch without a finger (boot 4b: the Home screen).
+- The pool: a VM above 480 MiB is refused when more than 384 MiB of its RAM would lie outside gh_hugepage_reserve's free
+  pages (`check_pool`: Gunyah's heap maps no more than about 470 MiB of 4 KiB pages; boot 4b's first start ended 48 s in
+  with the pool at 198 pages). `phone hugepool acquire` refills the pool beside One UI.
 
-7 unit tests (`vmboot::tests`: the label with and without the pool; the disks list's refusals; stop before kill, the
+9 unit tests (`vmboot::tests`: the pool's share of the RAM (`check_pool`); the label with and without the pool; the disks list's refusals; stop before kill, the
 stop request, THP written back; the disks' checks before crosvm and the pool check right after it; the `fb` line in the
 pool and its refusals; the bridge after the pool check and before the main wait, ended after the VM, absent without a
-screen; the scripts parse under `bash --posix -n`, `sh -n` and `dash -n`). Boot 1 on the S25 (2026-11-23, 2 GiB, 1 vCPU, 90 s, no disk): the
+screen; the touchscreen's lookup run by the PC's `sh` and `awk` on the S25's device list (`event8`) and its refusals
+(not direct, missing, on a side key's device), the forwarder listening before crosvm and crosvm's multi-touch device on
+its socket with glob expansion off, both ended after the VM, the test swipes only with `--swipe-test`, the volume-down reader after the bridge
+and ended after the VM; the scripts parse under `bash --posix -n`, `sh -n` and `dash -n`). Boot 1 on the S25 (2026-11-23, 2 GiB, 1 vCPU, 90 s, no disk): the
 kernel's whole start up to the root device's wait, `crosvm stop` at 90 s, One UI on (`docs/native.md` "The native
 kernel in crosvm").
 

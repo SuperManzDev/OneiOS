@@ -437,5 +437,7 @@ guest is still iPhone18,2 iOS 27.0.1.
   GiB, 1 vCPU) to the root device's wait, and `crosvm stop` ends it with One UI on. Step 2, the disks (virtio over
   PCI, every buffer in the restricted DMA pool; boot 2): launchd, the 60 boot tasks, SpringBoard in about 30 s on one
   vCPU. Step 3, the screen (the boot video and a frame count in the pool, read by `displayctl pool` out of crosvm's
-  own mapping of it; boot 3): **iOS's lock screen on the S25's panel**, SpringBoard up for the whole run. Next:
-  touch, the clock, less work per frame, more vCPUs.
+  own mapping of it; boot 3): **iOS's lock screen on the S25's panel**, SpringBoard up for the whole run. Step 4, the
+  touch (crosvm's multi-touch device fed by `displayctl touch`, which takes the touchscreen; the kernel's virtio-input on
+  PCI with its queues in the pool; boot 4b): a test swipe opened **iOS's Home screen**. Next: a finger's touches, the
+  clock, less work per frame, more vCPUs.

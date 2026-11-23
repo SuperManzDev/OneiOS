@@ -334,14 +334,19 @@ xl_adt_node *xl_machine_tree(const xl_machine *m, const char **error)
     const xl_device *d = &m->dev[i];
     char name[32];
     const char *compat;
-    if (d->pci && d->kind != XL_DEV_BLOCK && d->kind != XL_DEV_DATA_STORE) FAIL("only a disk can be a PCI function");
+    if (d->pci && d->kind != XL_DEV_BLOCK && d->kind != XL_DEV_DATA_STORE && d->kind != XL_DEV_INPUT)
+      FAIL("only a disk or the input bus can be on PCI");
     switch (d->kind) {
     case XL_DEV_BLOCK:
       snprintf(name, sizeof name, d->pci ? "virtio-pci-%u" : "virtio-mmio-%u", blocks++);
       compat = d->pci ? "oneios,virtio-pci" : "virtio,mmio";
       break;
     case XL_DEV_DATA_STORE: snprintf(name, sizeof name, "data-store"); compat = d->pci ? "oneios,virtio-pci" : "droidvm,data-store"; break;
-    case XL_DEV_INPUT:      snprintf(name, sizeof name, "input-%u", inputs++); compat = "droidvm,virtio-input"; break;
+    case XL_DEV_INPUT:
+      // on PCI: the bus the kernel looks for virtio-input functions on (crosvm places them; DroidVMVirtioInput.c, staged)
+      if (d->pci) { snprintf(name, sizeof name, "input-pci"); compat = "oneios,virtio-input-pci"; }
+      else { snprintf(name, sizeof name, "input-%u", inputs++); compat = "droidvm,virtio-input"; }
+      break;
     case XL_DEV_NET:        snprintf(name, sizeof name, "net"); compat = "droidvm,net"; break;
     case XL_DEV_GPU:        snprintf(name, sizeof name, "virtio-gpu"); compat = "droidvm,virtio-gpu"; break;
     case XL_DEV_SND:        snprintf(name, sizeof name, "virtio-snd"); compat = "droidvm,virtio-snd"; break;

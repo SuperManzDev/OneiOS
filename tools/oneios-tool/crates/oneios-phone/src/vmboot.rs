@@ -27,6 +27,15 @@
 //! check passed: `displayctl pool` maps only that part of crosvm's pool and serves it to the staged display helper
 //! (runtime/bin/oneios-display), a layer over One UI that goes away when the VM ends. Touches still go to One UI under
 //! it. Its log is `display.txt`.
+//!
+//! The touch: such an Image also has the input bus (`input touch` in FILE.disks). The script finds the phone's touchscreen
+//! by its name in /proc/bus/input/devices (`sec_touchscreen`, with INPUT_PROP_DIRECT; refused should it be a side key's
+//! device) and gives it to the VM through runtime/display's `displayctl touch` (pushed as the bridge is): it listens on
+//! `touch.sock`, and when crosvm connects there (`--input multi-touch[path=...]`) it takes the touchscreen for the VM's
+//! life (One UI under the layer gets no touches) and passes its frames on. crosvm's own `--evdev` cannot take it: it wants
+//! the device's serial name, which sec_touchscreen has none of (boot 4's first start). The kernel reads crosvm's device as
+//! a virtio-input PCI function, its queues in the pool. The side keys stay with Android; volume down held 3 s stops the
+//! VM (getevent reads the key and does not take it): the way back without the PC. Their logs are `touch.txt` and run.txt.
 use crate::adb::Adb;
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
@@ -80,6 +89,8 @@ pub struct Disks {
     pub blocks: Vec<(Option<u64>, String)>,
     /// The boot video and the frame count in the pool (xnuloader-crosvm --display).
     pub fb: Option<Fb>,
+    /// The kernel has the input bus (`input touch`): the phone's touchscreen goes to crosvm.
+    pub input: bool,
 }
 
 /// `fb OFFSET BYTES WIDTH HEIGHT STRIDE SEQ`: offsets in the pool, the frame first, the count's page after it.
@@ -99,7 +110,7 @@ fn plain(text: &str) -> bool {
 }
 
 pub fn parse_disks(text: &str) -> Result<Disks> {
-    let (mut swiotlb, mut pool, mut store, mut fb) = (None, None, None, None);
+    let (mut swiotlb, mut pool, mut store, mut fb, mut input) = (None, None, None, None, false);
     let mut blocks = Vec::new();
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         let words: Vec<&str> = line.split_whitespace().collect();
@@ -121,11 +132,15 @@ pub fn parse_disks(text: &str) -> Result<Disks> {
                     seq: seq.parse().context("fb SEQ")?,
                 })
             }
-            _ => bail!("a line of the disks list that is not one of swiotlb-mib, pool, store, block, fb: {line:?}"),
+            ["input", "touch"] => input = true,
+            _ => bail!("a line of the disks list that is not one of swiotlb-mib, pool, store, block, fb, input: {line:?}"),
         }
     }
     let (store, store_gib) = store.context("no store line")?;
-    let d = Disks { swiotlb: swiotlb.context("no swiotlb-mib line")?, pool: pool.context("no pool line")?, store, store_gib, blocks, fb };
+    let d = Disks { swiotlb: swiotlb.context("no swiotlb-mib line")?, pool: pool.context("no pool line")?, store, store_gib, blocks, fb, input };
+    if d.input && d.fb.is_none() {
+        bail!("the input bus without a screen: xnuloader-crosvm gives both with --display");
+    }
     if let Some(f) = &d.fb {
         // as displayctl pool takes them: the frame page aligned at the pool's start or after, the count after it
         let pool_bytes = (d.swiotlb as u64) << 20;
@@ -162,11 +177,78 @@ pub fn parse_disks(text: &str) -> Result<Disks> {
 
 /// The run on the phone (detached; its own log is `run.txt`).
 pub fn boot_script(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Option<&Disks>) -> String {
+    boot_script_with(l, seconds, thp, sha, disks, false)
+}
+
+/// The same, with `swipe`: the touch forwarder's test swipes (`--swipe-test`: 200 s after crosvm connected, then every
+/// 60 s), a test of the VM's touch without a finger.
+pub fn boot_script_with(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Option<&Disks>, swipe: bool) -> String {
     let (mem, cpus, swiotlb) = (l.ram, l.cpus, l.swiotlb);
     let mut checks = String::new();
     let mut blocks = String::new();
     let mut pool_check = String::new();
     let (mut bridge_start, mut bridge_end) = (String::new(), String::new());
+    let (mut touch_find, mut escape_start, mut escape_end) = (String::new(), String::new(), String::new());
+    if disks.is_some_and(|d| d.input) {
+        // The touchscreen by its name (and INPUT_PROP_DIRECT), never a side key's device (rule: the way back to One UI)
+        touch_find = concat!(
+            "dev_of() {\n",
+            "  awk -v want=\"N: Name=\\\"$1\\\"\" 'BEGIN { RS = \"\" } index($0, want \"\\n\") && (p == \"\" || index($0, \"B: PROP=\" p \"\\n\")) {\n",
+            "    if (match($0, /Handlers=[^\\n]*/)) { h = substr($0, RSTART, RLENGTH); if (match(h, /event[0-9]+/)) print substr(h, RSTART, RLENGTH) } }' p=\"$2\" /proc/bus/input/devices\n",
+            "}\n",
+            "tdev=$(dev_of sec_touchscreen 2)\n",
+            "keys=\" $(dev_of gpio-keys | tr '\\n' ' ')$(dev_of pmic_pwrkey | tr '\\n' ' ')$(dev_of pmic_resin | tr '\\n' ' ')\"\n",
+            "case \"$tdev\" in event[0-9]|event[0-9][0-9]) ;; *) tdev= ;; esac\n",
+            "case \"$keys\" in *\" $tdev \"*) [ -n \"$tdev\" ] && echo \"touch: $tdev is a side key's device: not given to the VM\"; tdev= ;; esac\n",
+            "if [ -n \"$tdev\" ] && [ -c /dev/input/$tdev ]; then\n",
+            "  echo \"touch: /dev/input/$tdev (sec_touchscreen) goes to the VM while it runs; the side keys stay with Android\"\n",
+            "else\n",
+            "  tdev=; echo \"touch: no sec_touchscreen with INPUT_PROP_DIRECT: the VM runs without touch\"\n",
+            "fi\n",
+            // The forwarder listens before crosvm starts: crosvm connects to its socket while it makes its devices
+            "tsock=\nforward=\n",
+            "if [ -n \"$tdev\" ] && [ -x $D/displayctl ]; then\n",
+            "  rm -f $D/touch.sock\n",
+            "  $D/displayctl touch --evdev /dev/input/$tdev --socket $D/touch.sock </dev/null >>$D/touch.txt 2>&1 &\n",
+            "  forward=$!\n",
+            "  t=0; while [ $t -lt 50 ] && [ ! -S $D/touch.sock ] && kill -0 $forward 2>/dev/null; do sleep 0.1 2>/dev/null || sleep 1; t=$((t + 1)); done\n",
+            "  if [ -S $D/touch.sock ]; then\n",
+            "    tsock=$D/touch.sock; echo \"touch: the forwarder ($forward) takes it when crosvm connects to $tsock: touch.txt\"\n",
+            "  else\n",
+            "    echo \"touch: the forwarder did not start (touch.txt): the VM runs without touch\"; kill $forward 2>/dev/null; forward=\n",
+            "  fi\n",
+            "fi\n"
+        )
+        .to_string();
+        // Volume down held 3 s: stop.request (getevent reads pmic_resin's events; Android still gets the key)
+        escape_start = concat!(
+            "escape=\n",
+            "vd=$(dev_of pmic_resin)\n",
+            "if [ -n \"$tsock\" ] && [ -n \"$vd\" ] && [ -c /dev/input/$vd ]; then\n",
+            "  ( getevent -l /dev/input/$vd 2>/dev/null | while read -r a b c e; do\n",
+            "      case \"$a $b $c $e\" in\n",
+            "        *KEY_VOLUMEDOWN*DOWN*) down=$(cut -d. -f1 /proc/uptime) ;;\n",
+            "        *KEY_VOLUMEDOWN*UP*) now=$(cut -d. -f1 /proc/uptime)\n",
+            "          if [ -n \"$down\" ] && [ $((now - down)) -ge 3 ]; then echo \"touch: volume down held $((now - down)) s: the VM stops\"; touch $D/stop.request; fi\n",
+            "          down= ;;\n",
+            "      esac\n",
+            "    done ) &\n",
+            "  escape=$!\n",
+            "  echo \"touch: volume down held 3 s stops the VM (the way back without the PC)\"\n",
+            "fi\n"
+        )
+        .to_string();
+        // After the VM: the forwarder sees crosvm gone and gives the touchscreen back; one still there 3 s on is ended
+        escape_end = concat!(
+            "if [ -n \"$escape\" ]; then kill $escape 2>/dev/null; pkill -f \"getevent -l /dev/input/$vd\" 2>/dev/null; wait $escape 2>/dev/null; fi\n",
+            "if [ -n \"$forward\" ]; then\n",
+            "  t=0; while [ $t -lt 3 ] && kill -0 $forward 2>/dev/null; do sleep 1; t=$((t + 1)); done\n",
+            "  kill $forward 2>/dev/null; wait $forward 2>/dev/null\n",
+            "  echo \"touch: $(grep '^displayctl touch:' $D/touch.txt | tail -n 1)\"\n",
+            "fi\n"
+        )
+        .to_string();
+    }
     if let Some((d, f)) = disks.and_then(|d| d.fb.as_ref().map(|f| (d, f))) {
         // The screen, once crosvm's tree shows the pool where the Image put it: the bridge maps only the frame and its
         // count of the pool (displayctl pool), the helper is the staged runtime's
@@ -224,6 +306,9 @@ pub fn boot_script(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Option<
              fi\n",
             pool = d.pool
         );
+        if swipe {
+            touch_find = touch_find.replace("--socket $D/touch.sock </dev/null", "--socket $D/touch.sock --swipe-at 200 --swipe-every 60 </dev/null");
+        }
     }
     format!(
         r#"D={DIR}
@@ -235,7 +320,10 @@ end() {{ echo "$*" > $D/result; }}
 got=$(sha256sum kernel.img | cut -d' ' -f1)
 [ "$got" = "{sha}" ] || {{ echo "sha256 $got, not {sha}"; end "refused sha256"; exit 1; }}
 [ -c /dev/gunyah ] || {{ echo "no /dev/gunyah"; end "refused no /dev/gunyah"; exit 1; }}
-{checks}rm -f serial.txt crosvm.log crosvm.sock fdt.dtb dmesg.txt display.txt stop.request
+tdev=
+tsock=
+{checks}rm -f serial.txt crosvm.log crosvm.sock fdt.dtb dmesg.txt display.txt touch.txt touch.sock stop.request
+{touch_find}
 ulimit -l unlimited 2>/dev/null || echo "ulimit -l unlimited: refused"
 T=/sys/kernel/mm/transparent_hugepage
 thp_done=1
@@ -261,12 +349,14 @@ fi
 grep -E '^(MemAvailable|SwapFree):' /proc/meminfo | tr -s ' ' | sed 's/^/before /'
 echo "start $(date +%s) up $(cut -d' ' -f1 /proc/uptime)"
 pool=
+set -f
 $C --log-level debug run --disable-sandbox --no-balloon --no-rng --no-usb --hypervisor gunyah \
   --protected-vm-without-firmware --swiotlb {swiotlb} --hugepages --mem size={mem} --cpus num-cores={cpus} \
-  --socket $D/crosvm.sock --serial type=file,hardware=serial,num=1,path=$D/serial.txt,console \
+  --socket $D/crosvm.sock${{tsock:+ --input multi-touch[path=$tsock,width=4095,height=4095,name=oneios-touch]}} --serial type=file,hardware=serial,num=1,path=$D/serial.txt,console \
   --dump-device-tree-blob $D/fdt.dtb{blocks} $D/kernel.img </dev/null >$D/crosvm.log 2>&1 &
 pid=$!
-{pool_check}{bridge_start}t=0
+set +f
+{pool_check}{bridge_start}{escape_start}t=0
 while [ $t -lt {seconds} ] && [ ! -e $D/stop.request ] && kill -0 $pid 2>/dev/null; do sleep 1; t=$((t + 1)); done
 how=itself
 if kill -0 $pid 2>/dev/null; then
@@ -276,7 +366,7 @@ fi
 if kill -0 $pid 2>/dev/null; then how=kill; kill -9 $pid; fi
 wait $pid; rc=$?
 thp_restore
-{bridge_end}echo "end $(date +%s) up $(cut -d' ' -f1 /proc/uptime) how $how exit $rc"
+{bridge_end}{escape_end}echo "end $(date +%s) up $(cut -d' ' -f1 /proc/uptime) how $how exit $rc"
 dmesg 2>/dev/null | grep -i -E 'gunyah|folio|gh_|crosvm|scm|memextent' | tail -n 80 > $D/dmesg.txt
 if [ "$pool" = bad ]; then end "refused pool: end how $how exit $rc"; else end "end how $how exit $rc"; fi
 "#,
@@ -285,11 +375,30 @@ if [ "$pool" = bad ]; then end "refused pool: end how $how exit $rc"; else end "
     )
 }
 
+/// What of a VM's RAM may be outside gh_hugepage_reserve's pool, in 4 KiB pages: Gunyah's own heap maps no more than
+/// about 470 MiB of those for all VMs (vm-probe runs 3 to 8). A VM whose RAM it cannot map ends at the first fault there:
+/// boot 4b, the pool at 198 pages after boot 4, "gunyah_vm_mgr: Failed to map guest address ...: 10" and crosvm's vCPU
+/// "unknown gh exit reason: 3", 48 s into the run.
+pub const SMALL_PAGES_MIB: u64 = 384;
+
+/// A VM above 480 MiB with no more than SMALL_PAGES_MIB of its RAM outside the pool's free pages (`pool_mib`).
+pub fn check_pool(ram_mib: u64, pool_mib: u64) -> Result<()> {
+    if ram_mib > 480 && ram_mib.saturating_sub(pool_mib) > SMALL_PAGES_MIB {
+        bail!(
+            "gh_hugepage_reserve's pool has {pool_mib} MiB free, and a VM of {ram_mib} MiB may take no more than {SMALL_PAGES_MIB} MiB \
+             in 4 KiB pages (Gunyah's heap): refill the pool first (`phone hugepool acquire`, beside One UI, or `phone hugepool grow`)"
+        );
+    }
+    Ok(())
+}
+
 pub struct Options {
     pub seconds: u32,
     pub thp: bool,
     /// displayctl for the phone, pushed when the Image has a screen
     pub bridge: String,
+    /// The touch forwarder's test swipes (boot_script_with)
+    pub swipe_test: bool,
 }
 
 /// `phone vm-boot --stop`: ask the running VM's script to stop it now (crosvm stop through its socket).
@@ -341,17 +450,28 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
     let available = crate::vmprobe::mem_available_mib(&meminfo).with_context(|| format!("no MemAvailable in \"{}\"", meminfo.trim()))?;
     let pool_mib = crate::hugepool::stat(&meminfo, "pool_avail").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) * 2;
     crate::vmprobe::check_mem(l.ram, available + pool_mib.min(l.ram as u64))?;
+    check_pool(l.ram as u64, pool_mib)?;
     adb.root_ok(&format!("mkdir -p {DIR} && chmod 777 {DIR} && rm -f {DIR}/result {DIR}/run.txt {DIR}/serial.txt\n"), "the VM's folder")?;
     println!("vm-boot: {} MiB Image, sha256 {sha}: pushing", data.len() >> 20);
     adb.push(image, &format!("{DIR}/kernel.img"))?;
     if let Some(f) = disks.as_ref().and_then(|d| d.fb.as_ref()) {
         adb.push(&o.bridge, &format!("{DIR}/displayctl"))?;
         adb.root_ok(&format!("chmod 755 {DIR}/displayctl\n"), "the bridge's mode")?;
-        println!("vm-boot: the screen ({}x{}) on a layer over One UI while the VM runs (touches still go to One UI under it)", f.width, f.height);
+        if disks.as_ref().is_some_and(|d| d.input) {
+            println!(
+                "vm-boot: the screen ({}x{}) on a layer over One UI, the touchscreen to the VM while it runs; volume down held 3 s stops it",
+                f.width, f.height
+            );
+        } else {
+            println!("vm-boot: the screen ({}x{}) on a layer over One UI while the VM runs (touches still go to One UI under it)", f.width, f.height);
+        }
     }
     fs::create_dir_all(out).with_context(|| format!("cannot make {out}"))?;
     let script = Path::new(out).join("boot.sh");
-    fs::write(&script, boot_script(&l, o.seconds, o.thp, &sha, disks.as_ref()))?;
+    if o.swipe_test && !disks.as_ref().is_some_and(|d| d.input) {
+        bail!("--swipe-test needs an Image with the touch (xnuloader-crosvm --display)");
+    }
+    fs::write(&script, boot_script_with(&l, o.seconds, o.thp, &sha, disks.as_ref(), o.swipe_test))?;
     adb.push(script.to_str().context("path")?, &format!("{DIR}/boot.sh"))?;
     let r = adb.root(&crate::adb::detached_start(&format!("{DIR}/boot.sh")))?;
     if !r.out.contains("started") {
@@ -394,7 +514,7 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
         }
     };
     println!();
-    for name in ["serial.txt", "crosvm.log", "dmesg.txt", "run.txt", "fdt.dtb", "display.txt"] {
+    for name in ["serial.txt", "crosvm.log", "dmesg.txt", "run.txt", "fdt.dtb", "display.txt", "touch.txt"] {
         let path = Path::new(out).join(name);
         let mut child = adb.exec_out(&format!("su -c 'cat {DIR}/{name}'"))?;
         let mut file = fs::File::create(&path)?;
@@ -404,6 +524,7 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
     let run = fs::read_to_string(Path::new(out).join("run.txt")).unwrap_or_default();
     for line in run.lines().filter(|l| {
         l.starts_with("disk") || l.starts_with("store:") || l.starts_with("pool:") || l.starts_with("/data:") || l.starts_with("display:")
+            || l.starts_with("touch:")
     }) {
         println!("vm-boot: {line}");
     }
@@ -431,6 +552,15 @@ mod tests {
         image[0x38..0x3c].copy_from_slice(b"ARM\x64");
         image[0x100..0x100 + text.len()].copy_from_slice(text);
         image
+    }
+
+    #[test]
+    fn the_pool_must_hold_what_gunyah_cannot_map_in_small_pages() {
+        assert!(check_pool(2880, 2688).is_ok());      // boot 3: 192 MiB in 4 KiB pages
+        assert!(check_pool(2400, 2406).is_ok());      // boot 4
+        assert!(check_pool(2400, 396).is_err());      // boot 4b's first try: the VM ended at a fault 48 s in
+        assert!(check_pool(2400, 2016).is_ok() && check_pool(2400, 2014).is_err());
+        assert!(check_pool(256, 0).is_ok());          // a small VM needs no pool
     }
 
     #[test]
@@ -538,13 +668,87 @@ mod tests {
         assert!(!boot_script(&l, 60, true, "x", Some(&parse_disks(DISKS).unwrap())).contains("displayctl"));
     }
 
+    /// The S25's input devices that matter (2026-11-23: `cat /proc/bus/input/devices`), in their order.
+    const DEVICES: &str = "I: Bus=0019 Vendor=0001 Product=0001 Version=0100\nN: Name=\"gpio-keys\"\nP: Phys=gpio-keys/input0\n\
+        S: Sysfs=/devices/platform/soc/soc:gpio_keys/input/input0\nU: Uniq=\nH: Handlers=event0 sec_key_notifier cpufreq sec_tsp_dumpkey \n\
+        B: PROP=0\nB: EV=3\nB: KEY=8000000000000 0\n\n\
+        I: Bus=0000 Vendor=0000 Product=0000 Version=0000\nN: Name=\"pmic_pwrkey\"\nP: Phys=pmic_pwrkey/input0\n\
+        S: Sysfs=/devices/platform/soc/c42d000.qcom,spmi/spmi-0/0-00/pwrkey/input/input3\nU: Uniq=\n\
+        H: Handlers=event3 sec_key_notifier cpufreq sec_tsp_dumpkey \nB: PROP=0\nB: EV=3\nB: KEY=10000000000000 0\n\n\
+        I: Bus=0000 Vendor=0000 Product=0000 Version=0000\nN: Name=\"pmic_resin\"\nP: Phys=pmic_resin/input0\n\
+        S: Sysfs=/devices/platform/soc/c42d000.qcom,spmi/spmi-0/0-00/resin/input/input4\nU: Uniq=\n\
+        H: Handlers=event4 sec_key_notifier cpufreq sec_tsp_dumpkey \nB: PROP=0\nB: EV=3\nB: KEY=4000000000000 0\n\n\
+        I: Bus=0018 Vendor=0000 Product=0000 Version=0000\nN: Name=\"sec_touchscreen\"\nP: Phys=sec_touchscreen\n\
+        S: Sysfs=/devices/platform/soc/ac0000.qcom,qupv3_1_geni_se/a90000.spi/spi_master/spi1/spi1.0/input/input8\nU: Uniq=\n\
+        H: Handlers=event8 sec_key_notifier cpufreq sec_tsp_dumpkey kgsl sde \nB: PROP=2\nB: EV=2b\n\
+        B: KEY=4000000000000000 0 4000000000 0 0 420 3000000 0 8000 0 0\nB: ABS=263800000000003\nB: SW=0\n\n\
+        I: Bus=0018 Vendor=0000 Product=0000 Version=0000\nN: Name=\"sec_touchpad\"\nP: Phys=sec_touchpad\n\
+        S: Sysfs=/devices/platform/soc/ac0000.qcom,qupv3_1_geni_se/a90000.spi/spi_master/spi1/spi1.0/input/input9\nU: Uniq=\n\
+        H: Handlers=event9 sec_key_notifier cpufreq sec_tsp_dumpkey kgsl sde \nB: PROP=1\nB: EV=2b\nB: SW=0\n\n";
+
+    /// The script's touchscreen lookup run by the PC's sh and awk on DEVICES (or a variant): what it leaves in tdev.
+    fn touch_lookup(devices: &str) -> String {
+        let d = parse_disks(&format!("{SCREEN}input touch\n")).unwrap();
+        let s = boot_script(&Label { ram: 2880, cpus: 1, swiotlb: 32 }, 900, true, "ab12", Some(&d));
+        let (from, to) = (s.find("dev_of() {\n").unwrap(), s.find("if [ -n \"$tdev\" ] && [ -c /dev/input/$tdev ]; then").unwrap());
+        let dir = std::env::temp_dir().join(format!("oneios-vmboot-touch-{}-{}", std::process::id(), devices.len()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("devices");
+        fs::write(&file, devices).unwrap();
+        let script = s[from..to].replace("/proc/bus/input/devices", file.to_str().unwrap()) + "echo \"tdev=$tdev\"\n";
+        let out = std::process::Command::new("sh").arg("-c").arg(&script).output().unwrap();
+        fs::remove_dir_all(&dir).ok();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn the_touchscreen_is_found_by_name_and_never_a_side_key() {
+        let d = parse_disks(&format!("{SCREEN}input touch\n")).unwrap();
+        assert!(d.input && !parse_disks(SCREEN).unwrap().input);
+        assert!(parse_disks(&format!("{SCREEN}input mouse\n")).is_err());
+        assert!(parse_disks(&format!("{DISKS}input touch\n")).is_err());           // the input bus comes with the screen
+        assert_eq!(touch_lookup(DEVICES), "tdev=event8");
+        // a touchscreen that is not direct, none at all, one on a side key's device: no touch
+        assert_eq!(touch_lookup(&DEVICES.replace("B: PROP=2\n", "B: PROP=1\n")), "tdev=");
+        assert_eq!(touch_lookup(&DEVICES.replace("sec_touchscreen", "other_ts")), "tdev=");
+        let shared = DEVICES.replace("Handlers=event8 sec_key", "Handlers=event4 sec_key");
+        assert_eq!(touch_lookup(&shared), "touch: event4 is a side key's device: not given to the VM\ntdev=");
+        // the script: the lookup, then the forwarder listening, before crosvm; crosvm's multi-touch device on its socket
+        // (no glob expansion of the brackets); the way back after the bridge; both ended after the VM
+        let s = boot_script(&Label { ram: 2880, cpus: 1, swiotlb: 32 }, 900, true, "ab12", Some(&d));
+        let lookup = s.find("tdev=$(dev_of sec_touchscreen 2)").unwrap();
+        let forward = s.find("$D/displayctl touch --evdev /dev/input/$tdev --socket $D/touch.sock </dev/null >>$D/touch.txt 2>&1 &").unwrap();
+        let crosvm = s.find("$C --log-level debug run").unwrap();
+        assert!(lookup < forward && forward < crosvm);
+        assert!(s.contains("--socket $D/crosvm.sock${tsock:+ --input multi-touch[path=$tsock,width=4095,height=4095,name=oneios-touch]} --serial"));
+        assert!(s[..crosvm].ends_with("set -f\n") && s[crosvm..].contains("pid=$!\nset +f\n"));
+        assert_eq!(s.matches("--evdev").count(), 1);                                // the forwarder's, not crosvm's
+        assert!(s.contains("if [ -S $D/touch.sock ]; then\n    tsock=$D/touch.sock;"));
+        let ended = s.find("if [ -n \"$forward\" ]; then\n").unwrap();
+        assert!(s.find("wait $pid; rc=$?").unwrap() < ended && s[ended..].contains("kill $forward 2>/dev/null; wait $forward"));
+        let escape = s.find("( getevent -l /dev/input/$vd 2>/dev/null").unwrap();
+        assert!(s.find("TMPDIR=$D $D/displayctl pool").unwrap() < escape && escape < s.find("while [ $t -lt 900 ]").unwrap());
+        assert!(s.contains("[ $((now - down)) -ge 3 ]; then echo \"touch: volume down held $((now - down)) s: the VM stops\"; touch $D/stop.request"));
+        assert!(s.find("thp_restore\n").unwrap() < s.find("if [ -n \"$escape\" ]; then kill $escape").unwrap());
+        assert!(!s.contains("EVIOCGRAB") && !s.contains("--evdev /dev/input/event"));
+        // without the input bus: no lookup, and the empty tdev puts nothing on crosvm's line
+        let plain = boot_script(&Label { ram: 2880, cpus: 1, swiotlb: 32 }, 900, true, "ab12", Some(&parse_disks(SCREEN).unwrap()));
+        assert!(!plain.contains("dev_of") && !plain.contains("getevent") && plain.contains("tdev=\ntsock=\n"));
+        assert!(!plain.contains("displayctl touch"));
+        // the test swipes only when asked, on the forwarder's line
+        let swiped = boot_script_with(&Label { ram: 2880, cpus: 1, swiotlb: 32 }, 900, true, "ab12", Some(&d), true);
+        assert!(swiped.contains("--socket $D/touch.sock --swipe-at 200 --swipe-every 60 </dev/null") && !s.contains("--swipe-at"));
+    }
+
     #[test]
     fn the_boot_parses_as_posix_sh() {
         let d = parse_disks(DISKS).unwrap();
         let screen = parse_disks(SCREEN).unwrap();
         let l = Label { ram: 3072, cpus: 1, swiotlb: 8 };
         let l32 = Label { ram: 2880, cpus: 1, swiotlb: 32 };
-        for (n, script) in [boot_script(&l, 600, true, "ab12", Some(&d)), boot_script(&l, 60, false, "ab12", None), boot_script(&l32, 900, true, "ab12", Some(&screen))]
+        let touch = parse_disks(&format!("{SCREEN}input touch\n")).unwrap();
+        for (n, script) in [boot_script(&l, 600, true, "ab12", Some(&d)), boot_script(&l, 60, false, "ab12", None), boot_script(&l32, 900, true, "ab12", Some(&screen)),
+                            boot_script(&l32, 900, true, "ab12", Some(&touch))]
             .iter()
             .enumerate()
         {

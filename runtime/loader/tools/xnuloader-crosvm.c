@@ -32,6 +32,10 @@
 // and the phone's bridge (runtime/display displayctl pool) reads it out of the pool and hands it to oneios-display.
 // OUT.disks then has "fb OFFSET BYTES WIDTH HEIGHT STRIDE" (OFFSET in the pool). /chosen display-scale and the boot
 // arguments as xnuloader-qemu gives them (offline-legacy-unit-scale, sheng-vsync).
+// The touch, with --display: the input bus, node /arm-io/input-pci (bus 0 of crosvm's CAM: the kernel finds crosvm's
+// virtio-input functions there, wherever crosvm put them), and a 64 KiB window of the pool after the disks' for their
+// queues and events (three 4 KiB pages a device); OUT.disks then has "input touch": vm-boot hands crosvm the phone's
+// touchscreen (--evdev).
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -56,6 +60,8 @@
 #define PCI_CAM       0x10000ull        // crosvm's CAM (pci-host-cam-generic): bus << 16 | device << 11 | function << 8
 #define PCI_FIRST_DEV 2u                // disk K is 00:(2 + K).0 (pinned; crosvm's pvpanic device takes a free one)
 #define DMA_SLICE     0x110000ull       // a disk's DMA window: its queue page, then 1 MiB of transfer buffer at 64 KiB
+#define INPUT_WINDOW  0x10000ull        // the input devices' window: three 4 KiB pages a device
+#define PCI_BUS0      0x10000ull        // bus 0 of the CAM: 32 devices, 0x800 apart
 
 // xnuloader-qemu's arguments: xnuhost's default (runtime/xnuhost/src/config.c), less the hosted kernel's devices.
 static const char default_args[] =
@@ -175,11 +181,14 @@ int main(int argc, char **argv)
   // crosvm's restricted DMA pool: the RAM's last MIB (aarch64/src/lib.rs get_swiotlb_addr; Gunyah wants it static).
   const uint64_t pool = ram_end - ((uint64_t)swiotlb_mib << 20), top_reserve = ((uint64_t)swiotlb_mib << 20) + FDT_RESERVE;
   if (phys + (256ull << 20) + top_reserve > ram_end) { fprintf(stderr, "xnuloader-crosvm: %u MiB leave the kernel less than 256 MiB\n", ram_mib); return 2; }
-  if (fb_slot + ndisk * DMA_SLICE > ((uint64_t)swiotlb_mib << 20)) {
-    fprintf(stderr, "xnuloader-crosvm: the boot video and %u disks need %llu KiB of the pool\n", ndisk, (unsigned long long)((fb_slot + ndisk * DMA_SLICE) >> 10));
+  // the input window after the disks', 16 KiB aligned (the guest's page)
+  const uint64_t input_off = display_w ? (fb_slot + ndisk * DMA_SLICE + 0x3fff) & ~0x3fffull : 0;
+  const uint64_t pool_need = display_w ? input_off + INPUT_WINDOW : fb_slot + ndisk * DMA_SLICE;
+  if (pool_need > ((uint64_t)swiotlb_mib << 20)) {
+    fprintf(stderr, "xnuloader-crosvm: the boot video, %u disks and the input need %llu KiB of the pool\n", ndisk, (unsigned long long)(pool_need >> 10));
     return 2;
   }
-  const uint64_t fb_pa = pool, disks_pa = pool + fb_slot;
+  const uint64_t fb_pa = pool, disks_pa = pool + fb_slot, input_pa = pool + input_off;
   if (display_w) {
     // the page the guest counts its frames in (a new argument: the user's --args cannot have named the pool)
     size_t at = strlen(with_display);
@@ -224,6 +233,7 @@ int main(int argc, char **argv)
   // The disks: PCI function 00:(2 + K).0 for disk K, its configuration space the node's reg.
   for (unsigned i = 0; i < ndisk; i++)
     m.dev[m.ndev++] = (xl_device){ disks[i].writable ? XL_DEV_DATA_STORE : XL_DEV_BLOCK, PCI_CAM + ((uint64_t)(PCI_FIRST_DEV + i) << 11), 0x100, true };
+  if (display_w) m.dev[m.ndev++] = (xl_device){ XL_DEV_INPUT, PCI_CAM, PCI_BUS0, true };   // the input bus
   const xh_imageset_file *os = image_dir ? xh_imageset_role(&set, "os") : NULL;
   if (os && *os->volume_uuid) m.root_volume_uuid = os->volume_uuid;
   m.trust_cache = trust.data != NULL;
@@ -242,6 +252,11 @@ int main(int argc, char **argv)
       fprintf(stderr, "board: /%s: no room for its hash list or DMA window\n", name);
       return 1;
     }
+  }
+  if (display_w) {
+    xl_adt_node *bus = xl_adt_find(tree, "arm-io/input-pci");
+    const uint64_t window[2] = { input_pa, INPUT_WINDOW };
+    if (!bus || xl_adt_set(bus, "oneios,dma-window", window, sizeof window)) { fprintf(stderr, "board: no /arm-io/input-pci for the touch\n"); return 1; }
   }
   // The console: the node /defaults serial-device names by its AAPL,phandle (pe_serial.c get_serial_device_phandle).
   xl_adt_node *uart = xl_adt_find(tree, "arm-io/uart0"), *defaults = xl_adt_find(tree, "defaults");
@@ -311,6 +326,7 @@ int main(int argc, char **argv)
     if (display_w)
       fprintf(d, "fb %llu %llu %u %u %llu %llu\n", (unsigned long long)(fb_pa - pool), (unsigned long long)fb_bytes, display_w, display_h,
               (unsigned long long)fb_stride, (unsigned long long)(fb_pa - pool + seq_off));
+    if (display_w) fprintf(d, "input touch\n");
     for (unsigned i = 0; i < ndisk; i++) {
       char file[1200];
       if (disks[i].writable) snprintf(file, sizeof file, "%s", phone_data);
@@ -338,6 +354,9 @@ int main(int argc, char **argv)
     printf("  display: %ux%u @%ux, %u Hz; the boot video at PA 0x%llx (the pool's start, %llu bytes, %llu a row); the disks' windows from 0x%llx\n",
            display_w, display_h, display_scale, display_hz, (unsigned long long)fb_pa, (unsigned long long)fb_bytes,
            (unsigned long long)fb_stride, (unsigned long long)disks_pa);
+  if (display_w)
+    printf("  touch: crosvm's virtio-input functions on PCI bus 0 (the kernel finds them), their pages in the pool at 0x%llx (%llu KiB)\n",
+           (unsigned long long)input_pa, (unsigned long long)(INPUT_WINDOW >> 10));
   if (trust.data) printf("  trust caches: %u modules, %zu bytes; root: the OS volume %s\n", (unsigned)trust.data[0], trust.size, m.root_volume_uuid);
   for (unsigned i = 0; i < ndisk; i++)
     printf("  disk %u (PCI 00:%02x.0, config 0x%llx, DMA window 0x%llx+0x%llx): %s, %s%s%s, %s%s\n", i, PCI_FIRST_DEV + i,

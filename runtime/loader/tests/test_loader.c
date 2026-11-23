@@ -343,7 +343,22 @@ static void test_machine(void)
     CHECK(store && !xl_adt_get(store, "droidvm,intid") && xl_adt_get(store, "dma-coherent"));
     xl_adt_free(pt);
   }
-  machine_default(&m); m.dev[3].pci = true;     // an input device on PCI: not a disk
+  // an input device on PCI: the bus crosvm's virtio-input functions are found on (one node, the CAM's bus 0 as reg)
+  machine_default(&m);
+  m.dev[3] = (xl_device){ XL_DEV_INPUT, 0x10000, 0x10000, true };
+  pt = xl_machine_tree(&m, &err);
+  CHECK(pt != NULL);
+  if (pt) {
+    const xl_adt_node *bus = xl_adt_find(pt, "arm-io/input-pci");
+    p = bus ? xl_adt_get(bus, "compatible") : NULL;
+    CHECK(p && p->length == 24 && !memcmp(p->value, "oneios,virtio-input-pci", 24));
+    p = bus ? xl_adt_get(bus, "reg") : NULL;
+    if (p && p->length == 16) memcpy(r, p->value, 16);
+    CHECK(p && p->length == 16 && r[0] == 0x10000 - 0x1000 && r[1] == 0x10000);
+    CHECK(bus && !xl_adt_get(bus, "droidvm,intid") && !xl_adt_find(pt, "arm-io/input-0"));
+    xl_adt_free(pt);
+  }
+  machine_default(&m); m.dev[4].pci = true;     // a GPU on PCI: neither a disk nor the input bus
   CHECK(xl_machine_tree(&m, &err) == NULL);
 }
 

@@ -27,7 +27,7 @@ or the SDK the NDK is in). No `android.jar`: the Java source reaches the framewo
 | `src/jni.c` | `liboneios-display.so`: the socket, the mapped frame, the copy into the layer's buffers, the stop signals |
 | `java/OneiOSDisplay.java` | `oneios-display.dex`: the layers (`SurfaceControl`, `BLASTBufferQueue`), the panel's mode, the placement |
 | `src/launcher.c` | `oneios-display`: finds the dex and the library next to itself and execs `app_process` (same pid) |
-| `src/displayctl.c` | `displayctl`: the phone test (`test`: stands in for xnuhost with a moving pattern) and the screen of a VM of crosvm (`pool`) |
+| `src/displayctl.c` | `displayctl`: the phone test (`test`: stands in for xnuhost with a moving pattern), and the screen and the touch of a VM of crosvm (`pool`, `touch`) |
 | `tests/test_display.c` | the host tests |
 
 ## How the layer is made, and why
@@ -239,6 +239,27 @@ goes with the socket. `--test-guest FILE` is for the host tests only: a plain fi
 under `/proc` or `/dev`). The host tests (`make test`) check the maps lookup on crosvm's lines from the S25, the
 row copy with a page that is not resident, the count, a whole run against the stand-in helper with a moving count,
 and the refusals.
+
+## The touch of a VM of crosvm: `displayctl touch`
+
+```sh
+displayctl touch --evdev /dev/input/eventN --socket PATH [--wait S] [--swipe-at S [--swipe-every S]]
+```
+
+crosvm's multi-touch device (`--input multi-touch[path=PATH,width=W,height=H,name=N]`) connects to PATH and reads
+`virtio_input_event`'s from it (type, code, value: 8 bytes, little-endian). This listens on PATH, checks the event device
+(a direct multi-touch screen: INPUT_PROP_DIRECT, the MT slot and positions; none of the side keys: KEY_POWER,
+KEY_VOLUMEUP, KEY_VOLUMEDOWN refuse it, those stay Android's), and once crosvm has connected (within `--wait`, 60 s) takes
+the device (EVIOCGRAB: One UI gets no touches) and passes each frame on: SYN_REPORT, BTN_TOUCH, ABS_X/Y, the MT slot,
+tracking id, positions and contact size, as they are (`xhd_touch_event`); a frame the kernel's buffer dropped
+(SYN_DROPPED) is skipped up to its SYN_REPORT. It ends when crosvm's socket closes, on SIGTERM or SIGINT, and the device
+is Android's again (closing the device lets it go even when the forwarder is killed). AVF's crosvm cannot take the S25's
+touchscreen itself (`--evdev` asks for the serial name, EVIOCGUNIQ, which `sec_touchscreen` has none of). `oneios-tool
+phone vm-boot` starts it before crosvm with the touchscreen it found by name; the host tests check the event filter and
+the refusals of a path that is not an event device's. `--swipe-at S` (`vm-boot --swipe-test`): S seconds after crosvm
+connected, and every `--swipe-every` seconds after, the forwarder sends a swipe of its own, from the middle of the bottom
+edge up to the middle of the panel in 20 steps of 16 ms, then the lift: a test without a finger (boot 4b, 2026-11-23:
+the lock screen followed it up, and the next one opened the Home screen).
 
 ## Not done
 

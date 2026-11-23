@@ -120,4 +120,11 @@ uint32_t xhd_pool_copy(uint8_t *dst, const uint8_t *src, uint32_t width, uint32_
 // "OFSQ" version 1, else 0.
 #define XHD_FRAME_SEQ_MAGIC 0x000000015153464full
 int xhd_frame_seq(const uint8_t *page, uint64_t *count);
+
+// The touch of a VM of crosvm (displayctl touch): the phone's touchscreen to crosvm's multi-touch device, which reads
+// virtio_input_event's from its socket (type, code, value: 8 bytes, little-endian). 1 and *out for the events a
+// multi-touch frame is made of (EV_SYN SYN_REPORT, BTN_TOUCH, ABS_X, ABS_Y, the MT slot, tracking id, positions and
+// contact size), passed as they are; 0 for the rest (the touchscreen's other keys and switches, EV_MSC, SYN_DROPPED).
+struct xhd_vinput { uint16_t type, code; uint32_t value; };
+int xhd_touch_event(uint16_t type, uint16_t code, int32_t value, struct xhd_vinput *out);
 #endif

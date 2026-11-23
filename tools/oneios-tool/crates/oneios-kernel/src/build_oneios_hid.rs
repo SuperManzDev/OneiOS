@@ -40,7 +40,7 @@
 use crate::class_record::pylist;
 use crate::gen::{self, fail, Compile, Ctx, Stubs};
 use crate::macho_object::{Entry, Object};
-use crate::staged::{hid::HID, hid_pen::{HID_PEN, HID_PEN_ALLOCATE}, hid_transport::HID_TRANSPORT};
+use crate::staged::{hid::HID, hid_pen::{HID_PEN, HID_PEN_ALLOCATE}, hid_transport::{HID_TRANSPORT, HID_TRANSPORT_PCI}};
 use anyhow::{anyhow, Result};
 use indexmap::IndexMap;
 use oneios_common::pyjson::Value;
@@ -199,6 +199,12 @@ pub fn staged_transport(text: String, side_keys: &str, touch_time: &str) -> Resu
     Ok(gen::replace_once(text, HID_TRANSPORT, gone("DroidVMVirtioInput.c"))? + "\n" + side_keys + "\n" + touch_time)
 }
 
+/// staged_transport's output with the virtio-pci transport of the native kernel in a VM of crosvm (staged/hid_transport.rs
+/// HID_TRANSPORT_PCI: compiled with XNU_ONEIOS_NATIVE only, so the hosted kernel's transport is the same as before).
+pub fn staged_transport_pci(text: String) -> Result<String> {
+    gen::replace_once(text, HID_TRANSPORT_PCI, gone("DroidVMVirtioInput.c (the PCI transport's edits)"))
+}
+
 /// The assembly of the original functions' stubs and of their targets, for the IOHIDDevice names the objects import;
 /// and the functions bound, by name.
 pub fn bindings(layout: &Value, layout_name: &str, slot_of: &IndexMap<String, usize>, table: &[Entry], imports: &BTreeSet<String>)
@@ -325,8 +331,9 @@ pub fn main() -> Result<()> {
     let als = compile_source("iokit", &als_source, out.join("OneiOSALSDevice.o"), &[])?;
     // Its queue and event pages come from the kernel map (DROIDVM_INPUT_DYNAMIC), as on the iPadOS 27 board.
     let staged = out.join("DroidVMVirtioInput.c");
-    gen::write_text(&staged, &staged_transport(gen::read_text(&transport_source)?, &gen::read_text(&here.join("OneiOSSideKeys.inc"))?,
-                                               &gen::read_text(&here.join("OneiOSTouchTime.inc"))?)?)?;
+    gen::write_text(&staged, &staged_transport_pci(staged_transport(gen::read_text(&transport_source)?,
+                                                                    &gen::read_text(&here.join("OneiOSSideKeys.inc"))?,
+                                                                    &gen::read_text(&here.join("OneiOSTouchTime.inc"))?)?)?)?;
     let transport = compile_source("mach", &staged, out.join("DroidVMVirtioInput.o"), &["-DDROIDVM_INPUT_DYNAMIC=1", "-mgeneral-regs-only"])?;
     let objcopy = gen::which("llvm-objcopy", "objcopy");
     let mut objects = vec![start, transport];

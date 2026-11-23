@@ -16,6 +16,16 @@
 //     boot) the frame is compared four times a second. Pages that are not resident are not read: no read here makes
 //     the host allocate the VM's memory. It ends with the VM (crosvm's process gone), at --seconds, on SIGTERM or
 //     SIGINT, or when the helper leaves. --test-guest FILE (the host tests): a plain file stands for crosvm's memfd.
+//   displayctl touch --evdev /dev/input/eventN --socket PATH [--wait S] [--swipe-at S [--swipe-every S]]
+//     the touch of that VM: the phone's touchscreen to crosvm's multi-touch device (crosvm --input
+//     multi-touch[path=PATH,...] connects to PATH and reads virtio_input_event's from it). AVF's crosvm cannot take the
+//     S25's touchscreen itself: --evdev wants the device's serial name (EVIOCGUNIQ), which sec_touchscreen has none of
+//     (boot 4's first start: "failed to get serial name of event device"). This listens on PATH; once crosvm is there
+//     (within --wait seconds, 60) it takes the touchscreen (EVIOCGRAB: One UI gets no touches) and passes each frame on
+//     as it is (xhd_touch_event). A device that is not a direct multi-touch screen, or has a side key, is refused: the
+//     side keys stay Android's. It ends when crosvm goes, on SIGTERM or SIGINT; the touchscreen is then Android's again.
+//     --swipe-at S: a test without a finger, S seconds after crosvm connected (and every --swipe-every S after): a swipe
+//     up from the middle of the bottom edge to the middle of the panel, in the touchscreen's own ranges, as its frames.
 // The layer goes away when the socket closes; the helper is ended if it does not leave by itself.
 #define _GNU_SOURCE
 #include "xhd.h"
@@ -23,6 +33,7 @@
 #include <fcntl.h>
 #include <libgen.h>
 #include <limits.h>
+#include <linux/input.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -30,7 +41,9 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -108,7 +121,8 @@ static int usage(void)
 {
   fprintf(stderr, "usage: displayctl test [--seconds N] [--size WxH] [--format bgrx|rgba16f] [--helper PATH] [-- helper options]\n"
                   "       displayctl pool --pid PID --pool-offset N --pool-bytes N --size WxH --stride N --seq-offset N [--fb-offset N]\n"
-                  "                       [--seconds N] [--helper PATH] [-- helper options]\n");
+                  "                       [--seconds N] [--helper PATH] [-- helper options]\n"
+                  "       displayctl touch --evdev /dev/input/eventN --socket PATH [--wait S] [--swipe-at S [--swipe-every S]]\n");
   return 2;
 }
 
@@ -563,9 +577,185 @@ out:
   return status ? 1 : 0;
 }
 
+// ---- touch: the phone's touchscreen to crosvm's multi-touch device
+
+#define BITS_OF(n) (((n) + 8 * sizeof(long) - 1) / (8 * sizeof(long)))
+static int has_bit(const unsigned long *bits, unsigned n) { return (bits[n / (8 * sizeof(long))] >> (n % (8 * sizeof(long)))) & 1; }
+
+static int send_all(int fd, const void *data, size_t size)
+{
+  for (const uint8_t *p = data; size;) {
+    ssize_t n = send(fd, p, size, MSG_NOSIGNAL);
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) return -1;
+    p += n;
+    size -= (size_t)n;
+  }
+  return 0;
+}
+
+// The test swipe (--swipe-at): one finger from the middle of the bottom edge up to the middle of the panel in 20 steps of
+// 16 ms (about a third of a second, as a finger opens the lock screen), then lifted. 0, or -1 when crosvm went.
+static int send_swipe(int client, int xmax, int ymax)
+{
+  const uint32_t x = (uint32_t)(xmax / 2);
+  for (int step = 0; step <= 20; step++) {
+    const uint32_t y = (uint32_t)(ymax - ymax / 2 * step / 20);
+    struct xhd_vinput f[8];
+    unsigned n = 0;
+    if (!step) {
+      f[n++] = (struct xhd_vinput){ EV_ABS, ABS_MT_SLOT, 0 };
+      f[n++] = (struct xhd_vinput){ EV_ABS, ABS_MT_TRACKING_ID, 4242 };
+      f[n++] = (struct xhd_vinput){ EV_ABS, ABS_MT_POSITION_X, x };
+      f[n++] = (struct xhd_vinput){ EV_KEY, BTN_TOUCH, 1 };
+      f[n++] = (struct xhd_vinput){ EV_ABS, ABS_X, x };
+    }
+    f[n++] = (struct xhd_vinput){ EV_ABS, ABS_MT_POSITION_Y, y };
+    f[n++] = (struct xhd_vinput){ EV_ABS, ABS_Y, y };
+    f[n++] = (struct xhd_vinput){ EV_SYN, SYN_REPORT, 0 };
+    if (send_all(client, f, n * sizeof *f)) return -1;
+    nap_ms(16);
+  }
+  const struct xhd_vinput lift[3] = { { EV_ABS, ABS_MT_TRACKING_ID, 0xffffffffu }, { EV_KEY, BTN_TOUCH, 0 }, { EV_SYN, SYN_REPORT, 0 } };
+  return send_all(client, lift, sizeof lift);
+}
+
+static int touch_main(int argc, char **argv)
+{
+  const char *evdev = NULL, *path = NULL;
+  double wait_s = 60, swipe_at = 0, swipe_every = 0;
+  for (int i = 2; i < argc; i++) {
+    if (i + 1 >= argc) return usage();
+    if (!strcmp(argv[i], "--evdev")) evdev = argv[++i];
+    else if (!strcmp(argv[i], "--socket")) path = argv[++i];
+    else if (!strcmp(argv[i], "--wait")) wait_s = atof(argv[++i]);
+    else if (!strcmp(argv[i], "--swipe-at")) swipe_at = atof(argv[++i]);
+    else if (!strcmp(argv[i], "--swipe-every")) swipe_every = atof(argv[++i]);
+    else return usage();
+  }
+  if (!evdev || !path || strncmp(evdev, "/dev/input/event", 16) || strchr(evdev + 16, '/') || wait_s <= 0 || wait_s > 600 ||
+      swipe_at < 0 || swipe_at > 3600 || swipe_every < 0 || (swipe_every && swipe_every < 5) || swipe_every > 3600) return usage();
+  signal(SIGPIPE, SIG_IGN);
+  int fd = open(evdev, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+  if (fd < 0) { fprintf(stderr, "displayctl touch: %s: %s\n", evdev, strerror(errno)); return 1; }
+  char name[80] = "";
+  unsigned long props[BITS_OF(INPUT_PROP_CNT)] = { 0 }, abs[BITS_OF(ABS_CNT)] = { 0 }, keys[BITS_OF(KEY_CNT)] = { 0 };
+  if (ioctl(fd, EVIOCGNAME(sizeof name - 1), name) < 0 || ioctl(fd, EVIOCGPROP(sizeof props), props) < 0 ||
+      ioctl(fd, EVIOCGBIT(EV_ABS, sizeof abs), abs) < 0 || ioctl(fd, EVIOCGBIT(EV_KEY, sizeof keys), keys) < 0) {
+    fprintf(stderr, "displayctl touch: %s: not an event device (%s)\n", evdev, strerror(errno));
+    close(fd);
+    return 1;
+  }
+  // A direct multi-touch screen, and none of the side keys' devices: those stay Android's (the way back to One UI).
+  if (!has_bit(props, INPUT_PROP_DIRECT) || !has_bit(abs, ABS_MT_SLOT) || !has_bit(abs, ABS_MT_POSITION_X) || !has_bit(abs, ABS_MT_POSITION_Y)) {
+    fprintf(stderr, "displayctl touch: %s (\"%s\") is not a direct multi-touch screen: refused\n", evdev, name);
+    close(fd);
+    return 2;
+  }
+  if (has_bit(keys, KEY_POWER) || has_bit(keys, KEY_VOLUMEUP) || has_bit(keys, KEY_VOLUMEDOWN)) {
+    fprintf(stderr, "displayctl touch: %s (\"%s\") has a side key: refused, the side keys stay Android's\n", evdev, name);
+    close(fd);
+    return 2;
+  }
+  struct input_absinfo x = { 0 }, y = { 0 };
+  ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &x);
+  ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &y);
+  struct sockaddr_un addr = { .sun_family = AF_UNIX };
+  if (strlen(path) >= sizeof addr.sun_path) { close(fd); return usage(); }
+  strcpy(addr.sun_path, path);
+  unlink(path);
+  int server = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (server < 0 || bind(server, (struct sockaddr *)&addr, sizeof addr) || listen(server, 1)) {
+    fprintf(stderr, "displayctl touch: %s: %s\n", path, strerror(errno));
+    close(fd);
+    return 1;
+  }
+  printf("displayctl touch: %s (\"%s\", x %d..%d, y %d..%d): waiting for crosvm on %s\n", evdev, name, x.minimum, x.maximum,
+         y.minimum, y.maximum, path);
+  fflush(stdout);
+  signal(SIGINT, on_signal);
+  signal(SIGTERM, on_signal);
+  int client = -1;
+  struct pollfd listening = { server, POLLIN, 0 };
+  for (double deadline = now() + wait_s; client < 0 && !interrupted && now() < deadline;)
+    if (poll(&listening, 1, 200) > 0) client = accept4(server, NULL, NULL, SOCK_CLOEXEC);
+  close(server);
+  unlink(path);
+  if (client < 0) {
+    fprintf(stderr, "displayctl touch: crosvm did not connect within %.0f s: the touchscreen was not taken\n", wait_s);
+    close(fd);
+    return 1;
+  }
+  // From here the touchscreen is the VM's: One UI under the layer gets no touches until this ends (the fd's close
+  // gives it back even if this is killed).
+  if (ioctl(fd, EVIOCGRAB, 1)) {
+    fprintf(stderr, "displayctl touch: %s: EVIOCGRAB: %s\n", evdev, strerror(errno));
+    close(client);
+    close(fd);
+    return 1;
+  }
+  struct input_event ev[64];
+  while (read(fd, ev, sizeof ev) > 0) {}         // what One UI was shown already: not the VM's
+  printf("displayctl touch: crosvm connected: the touchscreen is the VM's\n");
+  fflush(stdout);
+  struct xhd_vinput frame[256];
+  unsigned n = 0;
+  int dropping = 0, gone = 0, lost = 0;
+  unsigned long frames = 0, events = 0, overflows = 0, swipes = 0;
+  double next_swipe = swipe_at > 0 ? now() + swipe_at : 0;
+  struct pollfd w[2] = { { fd, POLLIN, 0 }, { client, POLLIN, 0 } };
+  while (!interrupted && !gone && !lost) {
+    if (next_swipe && now() >= next_swipe && !n) {
+      if (send_swipe(client, x.maximum, y.maximum)) { gone = 1; break; }
+      swipes++;
+      printf("displayctl touch: test swipe %lu sent (from x %d y %d up to y %d)\n", swipes, x.maximum / 2, y.maximum, y.maximum / 2);
+      fflush(stdout);
+      next_swipe = swipe_every > 0 ? next_swipe + swipe_every : 0;
+    }
+    if (poll(w, 2, 500) < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+    if (w[1].revents & (POLLIN | POLLHUP | POLLERR)) {
+      char sink[256];                            // crosvm's status updates: none a touchscreen needs
+      ssize_t r = recv(client, sink, sizeof sink, MSG_DONTWAIT);
+      if (r == 0 || (r < 0 && errno != EAGAIN && errno != EINTR)) { gone = 1; break; }
+    }
+    if (w[0].revents & (POLLERR | POLLHUP | POLLNVAL)) { lost = 1; break; }
+    if (!(w[0].revents & POLLIN)) continue;
+    ssize_t r = read(fd, ev, sizeof ev);
+    if (r < 0) {
+      if (errno == EAGAIN || errno == EINTR) continue;
+      lost = 1;
+      break;
+    }
+    for (size_t k = 0; k < (size_t)r / sizeof *ev; k++) {
+      events++;
+      // the kernel's buffer overflowed: the frame is lost, up to the next SYN_REPORT
+      if (ev[k].type == EV_SYN && ev[k].code == SYN_DROPPED) { dropping = 1; n = 0; overflows++; continue; }
+      if (dropping) { if (ev[k].type == EV_SYN && ev[k].code == SYN_REPORT) dropping = 0; continue; }
+      struct xhd_vinput v;
+      if (!xhd_touch_event(ev[k].type, ev[k].code, ev[k].value, &v)) continue;
+      if (n < sizeof frame / sizeof *frame) frame[n++] = v;
+      if (v.type == EV_SYN) {
+        if (send_all(client, frame, n * sizeof *frame)) { gone = 1; break; }
+        frames++;
+        n = 0;
+      }
+    }
+  }
+  ioctl(fd, EVIOCGRAB, 0);
+  close(fd);
+  close(client);
+  printf("displayctl touch: %s after %lu frames (%lu events read, %lu overflows, %lu test swipes): the touchscreen is Android's again\n",
+         gone ? "crosvm went" : lost ? "the touchscreen went away" : interrupted ? "stopped" : "ended", frames, events, overflows, swipes);
+  return 0;
+}
+
 int main(int argc, char **argv)
 {
   if (argc >= 2 && !strcmp(argv[1], "test")) return test_main(argc, argv);
   if (argc >= 2 && !strcmp(argv[1], "pool")) return pool_main(argc, argv);
+  if (argc >= 2 && !strcmp(argv[1], "touch")) return touch_main(argc, argv);
   return usage();
 }

@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "xhd.h"
 #include <errno.h>
+#include <linux/input.h>
 #include <stdio.h>
 #include <string.h>
 #include <poll.h>
@@ -364,4 +365,16 @@ int xhd_frame_seq(const uint8_t *page, uint64_t *count)
   if (__atomic_load_n((const uint64_t *)page, __ATOMIC_ACQUIRE) != XHD_FRAME_SEQ_MAGIC) return 0;
   *count = __atomic_load_n((const uint64_t *)(page + 8), __ATOMIC_ACQUIRE);
   return 1;
+}
+
+int xhd_touch_event(uint16_t type, uint16_t code, int32_t value, struct xhd_vinput *out)
+{
+  int keep = 0;
+  if (type == EV_SYN) keep = code == SYN_REPORT;
+  else if (type == EV_KEY) keep = code == BTN_TOUCH;
+  else if (type == EV_ABS)
+    keep = code == ABS_X || code == ABS_Y || code == ABS_MT_SLOT || code == ABS_MT_TRACKING_ID || code == ABS_MT_POSITION_X ||
+           code == ABS_MT_POSITION_Y || code == ABS_MT_TOUCH_MAJOR || code == ABS_MT_TOUCH_MINOR;
+  if (keep) *out = (struct xhd_vinput){ type, code, (uint32_t)value };
+  return keep;
 }

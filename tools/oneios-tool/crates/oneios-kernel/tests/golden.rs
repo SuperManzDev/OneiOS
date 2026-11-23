@@ -237,3 +237,42 @@ fn the_build_record_is_build_record_pys() {
     assert_eq!(std::fs::read(target.join("xnu.macho")).unwrap(), build_record::fake_kernel());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn the_input_pci_edits_fit_the_pinned_source() {
+    // native, 2026-11-23: the touch transport on crosvm's PCI with its pages in the pool (staged/hid_transport.rs
+    // HID_TRANSPORT_PCI), after the hosted edits, against the real DroidVMVirtioInput.c where external/ has it.
+    let source = repo().join("external/UniXNU-droidvm/package/DroidVMVirtioInput.c");
+    if !source.exists() {
+        eprintln!("external/UniXNU-droidvm is not here: the input transport's PCI edits were not checked");
+        return;
+    }
+    let text = std::fs::read_to_string(&source).unwrap();
+    let hosted = build_oneios_hid::staged_transport(text.clone(), "// made-up side keys\n", "// made-up touch time\n").unwrap();
+    let staged = build_oneios_hid::staged_transport_pci(hosted.clone()).unwrap();
+    // the MMIO accessors renamed, the dispatchers in their place, each PCI path inside the native switch
+    for name in ["mmio_read32", "mmio_read8", "mmio_write32", "mmio_write8"] {
+        assert_eq!(staged.matches(&format!(" {name}(const struct droidvm_input *d, unsigned offset")).count(), 1, "{name}");
+    }
+    assert_eq!(staged.matches("static uint32_t input_read32(const struct droidvm_input *d, unsigned offset) {\n").count(), 1);
+    let start = staged.find("static void oneios_input_pci_start(const uint64_t ranges[3]) {").unwrap();
+    let call = staged.find("    oneios_input_pci_start(ranges);").unwrap();
+    let started = staged.find("    droidvm_input_started = droidvm_input_count;").unwrap();
+    assert!(start < call && call < started);
+    for block in staged.split("#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE\n").skip(1) {
+        let inside = &block[..block.find("#endif\n").unwrap()];
+        assert!(!inside.contains("#if "), "a native block holds another #if");
+    }
+    // outside the native blocks the hosted transport is what it was
+    let mut outside = String::new();
+    for (n, part) in staged.split("#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE\n").enumerate() {
+        outside += if n == 0 { part } else { &part[part.find("#endif\n").unwrap() + 7..] };
+    }
+    assert!(outside.contains("static uint64_t input_physical(const void *address) {\n    return kvtophys((vm_offset_t)address);\n}\n"));
+    assert!(staged.contains("value |= pci_rd32(d->common + 0x04) & 2;"));                     // VIRTIO_F_ACCESS_PLATFORM
+    assert!(staged.contains("pci_rd32(config) != (0x1af4u | 0x1052u << 16)"));
+    // the pages are the window's before the device starts (crosvm may touch nothing else)
+    let pages = staged.find("        droidvm_input_pages[d->index] = NULL;").unwrap();
+    assert!(pages < staged[pages..].find("const char *why = input_start(d);").unwrap() + pages);
+    assert!(build_oneios_hid::staged_transport_pci(hosted.repeat(2)).is_err());
+}

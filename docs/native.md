@@ -468,16 +468,73 @@ the guest, 431 scans, 33283 flushes (33283 acked), 2157250 rows copied" (36 fram
 flush), the helper "layer removed" and exited 0, One UI's launcher in front again, 45 °C a minute later. One UI ran
 on under the layer all along.
 
+### Touch in the crosvm VM (step 4, 2026-11-23)
+Boot 3's kernel had the touch screen's HID device and its event driver up ("oneios-hid: touch screen: event driver
+IOHIDEventDriver attached") and its virtio-input transport found nothing to read ("virtio-input: 0 device(s) in the
+device tree"): the transport (`DroidVMVirtioInput.c`, UniXNU-droidvm) knows virtio-mmio windows only, and keeps its
+queues in the kernel's memory, which a protected VM's host cannot reach.
+- crosvm (AVF's, `crosvm run --help`) has `--evdev PATH` ("The device will be grabbed (unusable from the host) and made
+  available to the guest with the same configuration it shows on the host"), but cannot take the S25's touchscreen: it
+  asks the device for its serial name (EVIOCGUNIQ) and `sec_touchscreen` has none (`U: Uniq=`): "failed to set up input
+  device ... failed to get serial name of event device: No such file or directory" (boot 4's first start; crosvm ended at
+  once, the phone was not touched). Its multi-touch device reads frames from a socket it connects to instead (`--input
+  multi-touch[path=SOCKET,width=W,height=H,name=N]`, Droid-VM's app feeds it that way): runtime/display's `displayctl
+  touch` listens there, takes the touchscreen (EVIOCGRAB) when crosvm connects, refuses a device that is not a direct
+  multi-touch screen or has a side key, and passes each frame on as it is (width and height 4095: the touchscreen's own
+  ranges). The S25's touchscreen is `sec_touchscreen` (`/proc/bus/input/devices`: `event8` this boot; 0..4095 on both
+  axes, 10 slots, INPUT_PROP_DIRECT, no `MSC_TIMESTAMP`); the side keys are `gpio-keys` (`event0`), `pmic_pwrkey`
+  (`event3`) and `pmic_resin` (`event4`), never taken.
+- The kernel (native only, `staged/hid_transport.rs` HID_TRANSPORT_PCI; `kernel/patches/oneios-hosted/hid/README.md`):
+  the transport finds crosvm's virtio-input functions on bus 0 of crosvm's configuration space (`/arm-io/input-pci`),
+  maps their regions from the virtio capabilities, sends its MMIO register offsets there, keeps each device's three
+  pages in a 64 KiB window of the pool (`oneios,dma-window`; crosvm is given no other address) and polls every 4 ms.
+- The loader: `xnuloader-crosvm --display` adds the bus and its window (after the disks' windows) and `input touch` to
+  `OUT.disks`.
+- `phone vm-boot`: the script looks the touchscreen up by name, refuses it should it be a side key's device, starts the
+  forwarder before crosvm and gives crosvm its socket; One UI under the layer gets no touches until crosvm ends (the
+  forwarder lets the touchscreen go when crosvm's socket closes, or when it is ended). The way back without the PC:
+  volume down held 3 s stops the VM (`getevent` reads the key; Android still gets it).
+
+**Boot 4 on the S25, 2026-11-23** (`logs/pa3q-vmboot/boot4/`; the Image `--ram-mib 2400`: the pool had 1,203 free pages
+of the 1,440 a 2880 MiB VM takes): the first start ended at crosvm's `--evdev` (above), the next ran 914 s. The forwarder
+found `event8` (0..4095), crosvm connected and the touchscreen was the VM's; the kernel: "droidvm input PCI 00:01.0:
+oneios-touch, touch, its queues in the pool at 0x115750000", "oneios-hid: virtio-input: 1 device(s) in the device tree,
+1 started", backboardd the touch service's client. The lock screen came up, SpringBoard stayed up (35,720 frames), and
+the forwarder gave the touchscreen back at the end ("the touchscreen is Android's again"); no finger touched the screen
+in the run (0 events after the grab), so the forwarder got a test: `--swipe-test`, a swipe up from the bottom edge's
+middle to the panel's middle 200 s after crosvm connected and every 60 s after.
+
+**Boot 4b, 2026-11-23: iOS's Home screen** (`phone vm-boot --image out/crosvm/kernel-touch.img --seconds 600 --thp
+--swipe-test`, `logs/pa3q-vmboot/boot4b/`). Its first start ended 48 s in: the pool had **198** free pages after boot 4
+(and 492 "served" with no VM up; 1,203 free before it), Gunyah's heap ran out of 4 KiB mappings ("gunyah_vm_mgr: Failed
+to map guest address 0x00000000f0580000: 10", "Failed to provide folio ...: -12") and crosvm's vCPU stopped at the fault
+("unknown gh exit reason: 3"). `phone hugepool acquire` (beside One UI, nothing stopped) brought the pool back to 1,160;
+`phone vm-boot` now refuses a VM of which more than 384 MiB would lie outside the pool's free pages (`check_pool`). The
+next start: at the first test swipe the lock screen followed the finger up (`swipe1.png`), and at the second **the
+Home screen** (`after4.png`: the Weather and Calendar widgets, FaceTime ... Settings, the dock). The kernel's log: "touch
+screen: 142 virtio-input events, 44 frames, 88 finger sets, 86 HID reports (last result 0x0), 2 contacts begun (2 at
+an edge); the last began at x 49.9% y 100.0%, the last lift was at x 49.9% y 50.0%", "86 HID events queued for the
+service's client(s), 0 dropped". Every piece of the touch between crosvm and SpringBoard works; the touchscreen's own
+frames through the forwarder are the one piece a finger still has to show.
+
 ## Next
 1. The Gunyah VM fits iOS with gh_hugepage_reserve ("Verdict, revised"). Its road to an iOS guest, each step a
    test on the phone: the native kernel booted by crosvm with its console on the 8250 at `0x3f8` (done: "The native
    kernel in crosvm", boot 1); virtio over PCI with every buffer in the restricted DMA pool and the image set's disks
    as virtio-blk from /data (done: step 2, boot 2: launchd, the 60 boot tasks, the daemons, SpringBoard); the screen
-   (done: step 3, boot 3: the boot video in the pool, the lock screen on the panel, SpringBoard stays up); next touch
-   (the panel's touches to the VM: a virtio input device, its queues in the pool), the clock (crosvm's RTC in the
+   (done: step 3, boot 3: the boot video in the pool, the lock screen on the panel, SpringBoard stays up); touch
+   (done: step 4, boot 4b: crosvm's multi-touch device fed by `displayctl touch`, the kernel's virtio-input on PCI, the
+   Home screen from the test swipe; a finger on the touchscreen still to be seen); next the clock (crosvm's RTC in the
    VM's tree, or the time as a boot argument), less work per frame (the guest copies all 17 MiB of a frame for 69
    changed rows: the differential copy, `sheng-fb-diff=1`, or the compositor's damage; the helper's copy loop at
-   uclamp.min 1024), more vCPUs (PSCI CPU_ON by HVC); then the GPU (drm2kgsl, as the hosted path's). The pool is
+   uclamp.min 1024), more vCPUs (PSCI CPU_ON by HVC); then the GPU (drm2kgsl, as the hosted path's). The GPU, the
+   owner's question (2026-11-23: a host module that shares memory with the VM, "gunyah_host_share", none such is
+   published): the Adreno stays Android's (One UI needs it, and its power, clocks and GMU firmware are kgsl's), so the
+   VM's GPU work goes to Android's kgsl and its buffers must lie in memory both sides keep. Gunyah lends, shares or
+   donates memory to a VM; crosvm shares the pool (the SMMU's stage 2 keeps every device off lent memory, so a buffer
+   in the VM's RAM is out of the GPU's reach too). First a larger pool (crosvm's `--swiotlb`, hundreds of MiB, in 2 MiB
+   pages) in `vm-probe`; a module of ours calling Gunyah's resource manager only if crosvm's share is not enough (a
+   module's mistake panics the phone's kernel: crash 1). The pool is
    grown once per boot after the temporary root (`hugepool load`, `hugepool grow`); `hugepool unload` gives the 3 GiB
    back.
    The other paths stay: the hosted one that runs today, and XNU alone (the hand-off under Samsung's protections,
@@ -488,7 +545,10 @@ on under the layer all along.
    arm64) and the first acquire panics the kernel in `gh_try_complete_block`, which reads `gh_slot_at()` without a
    NULL check (crash 1 above: the panic text, the registers, the S25's 22 RAM ranges). Suggest: refuse or default
    the order at insmod, and the NULL checks in the sibling loops (`gh_try_complete_block`, `gh_classify`,
-   `gh_rehome`).
+   `gh_rehome`). And the pool's pages after a VM: free pages 1,405 after boot 2, 1,344 after boot 3, 1,203 after
+   another VM, **198** after boot 4 (2400 MiB), with `served` 141 and then 492 while no VM was up (`active_vms=0`) and
+   the rest back in the kernel's free memory; the next VM's RAM then fell to 4 KiB pages and Gunyah's heap (boot 4b's
+   first start). `acquire` refills it beside One UI.
 3. On the bench: the unlock and the Home screen (more time, or less work: the display's size, the jobs that a bench has
    no use for), a network (QEMU's virtio-net: mDNSResponder, rapportd and the others have nothing to talk to), the RTC
    (virt's PL031) for the clock, and the CPU report's idle time (`hosted_processors_idle_mach` from XNU's own processor

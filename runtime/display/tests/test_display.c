@@ -383,6 +383,16 @@ static void test_pool_parts(void)
   CHECK(!xhd_frame_seq((const uint8_t *)page, &count));
   page[0] = XHD_FRAME_SEQ_MAGIC;
   CHECK(xhd_frame_seq((const uint8_t *)page, &count) && count == 5);
+  // The touch frames crosvm's multi-touch device takes: positions, slots, ids, contact size, BTN_TOUCH, SYN_REPORT
+  // as they are (a lift's tracking id -1 included); the touchscreen's other keys, EV_MSC and SYN_DROPPED not.
+  struct xhd_vinput v;
+  CHECK(sizeof v == 8);
+  CHECK(xhd_touch_event(3, 0x35, 2047, &v) && v.type == 3 && v.code == 0x35 && v.value == 2047);
+  CHECK(xhd_touch_event(3, 0x39, -1, &v) && v.value == 0xffffffffu);
+  CHECK(xhd_touch_event(3, 0x2f, 9, &v) && xhd_touch_event(3, 0x30, 12, &v) && xhd_touch_event(1, 0x14a, 1, &v));
+  CHECK(xhd_touch_event(0, 0, 0, &v) && v.type == 0 && v.code == 0);
+  CHECK(!xhd_touch_event(1, 0x8f, 1, &v) && !xhd_touch_event(1, 0x145, 1, &v));     // KEY_WAKEUP, BTN_TOOL_FINGER
+  CHECK(!xhd_touch_event(0, 3, 0, &v) && !xhd_touch_event(4, 5, 77, &v) && !xhd_touch_event(5, 0, 1, &v));
 }
 
 // displayctl with a stand-in for the helper: a shell script that takes the session, and leaves.
@@ -516,6 +526,13 @@ static void test_displayctl_pool(const char *displayctl, const char *dir)
            "--size 64x48 --stride 256 --seq-offset 16384 --helper %s > %s 2>&1", dir, displayctl, pid, self_path, out);
   status = system(command);
   CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 1);                  // never /proc as a stand-in
+  // touch: only an event device's path, and a socket
+  snprintf(command, sizeof command, "%s touch --evdev %s --socket %s/t.sock > %s 2>&1", displayctl, guest, dir, out);
+  status = system(command);
+  CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 2);
+  snprintf(command, sizeof command, "%s touch --evdev /dev/input/event0/../x --socket %s/t.sock > %s 2>&1", displayctl, dir, out);
+  status = system(command);
+  CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 2);
   munmap(mem, 2 << 20);
   close(fd);
   unlink(guest);

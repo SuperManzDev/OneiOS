@@ -138,6 +138,31 @@ argument `hidq_size=BYTES` still wins over the property. Log, once per service: 
 256 KiB for its user clients (QueueSize)`, with `; already open: theirs stays 16 KiB until they open again` if
 backboardd was first. On the phone: the `N dropped` of the state line should stay 0 through a stall.
 
+## The native kernel in a VM of crosvm: the transport on PCI (2026-11-23)
+
+The native path (`docs/native.md`, the touch) runs the kernel in a protected VM of Android's crosvm, which has its
+virtio devices on PCI only and whose host reaches only crosvm's restricted DMA pool. `oneios-tool phone vm-boot` hands
+crosvm the phone's touchscreen (`sec_touchscreen` on the S25, found by name: 0..4095 on both axes, 10 slots,
+INPUT_PROP_DIRECT) through runtime/display's `displayctl touch`, which takes it for the VM's life and passes its frames to
+crosvm's multi-touch device (`--input multi-touch[path=SOCKET,width=4095,height=4095,name=oneios-touch]`: the same ranges,
+so the positions go as they are). The
+transport's edits for it are `staged/hid_transport.rs` `HID_TRANSPORT_PCI`, applied after `HID_TRANSPORT` and compiled
+only with `XNU_ONEIOS_NATIVE` (the hosted kernel's transport is the same as before):
+
+- `/arm-io/input-pci` (xnuloader-crosvm `--display`): `reg` is bus 0 of crosvm's configuration space, `oneios,dma-window`
+  64 KiB of the pool. After the MMIO devices, the transport looks at the bus's 32 functions 0 for modern virtio-input ones
+  (1af4:1052), wherever crosvm put them.
+- Each one's regions come from its virtio capabilities, in the one BAR crosvm placed; the transport's MMIO register
+  offsets go to them (common configuration, notification, ISR, device configuration: `pci_input_read32`,
+  `pci_input_write32`); VIRTIO_F_ACCESS_PLATFORM is taken when offered, as the disks take it.
+- Its three pages (the two queues, the events) are the window's, mapped write-back: crosvm is given no address outside
+  the pool (a page an earlier device left for the index is let go first, and the pages' place is checked).
+- Polled every 4 ms (the transport's own interval without an interrupt): crosvm's INTx lines go through the PCI host's
+  interrupt map, which this board does not give.
+
+The touch frames have no scan time on the S25 (its touchscreen sends no `MSC_TIMESTAMP`): they are counted as frames
+without one ("Latency").
+
 ## Pen (spen, 2026-11-15; off by default)
 
 The S Pen as iOS's pencil digitizer (`docs/hardware.md` 7f has what 24A446 needs and where it was read). Published only
