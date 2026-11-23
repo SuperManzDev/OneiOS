@@ -102,6 +102,9 @@ pub enum Command {
         /// How many lines, from the end
         #[arg(long, value_name = "N", default_value_t = 200)]
         tail: usize,
+        /// The boot before this one: the log the phone kept through its restart (pstore, by name)
+        #[arg(long)]
+        previous: bool,
     },
     /// How much free memory comes in 2 MiB blocks (buddyinfo), which a VM's RAM needs; with --free, first a sync, the
     /// file cache dropped and one compaction (one-shot: nothing is lost, no setting changes). No VM. Refused during a
@@ -250,6 +253,19 @@ pub enum HugepoolCommand {
         #[arg(long, value_name = "DIR", default_value = "phone-hugepool")]
         out: String,
     },
+    /// The module's own acquire beside One UI (nothing stopped): 1 contig-any, 2 sweep and reclaim, 3 sweep and
+    /// per-window evict; the want first when given; cancelled after SECONDS
+    Acquire {
+        /// The pool's new want, in pages of 2 MiB
+        #[arg(long, value_name = "N")]
+        want: Option<u32>,
+        /// The acquire mode
+        #[arg(long, value_name = "MODE", default_value_t = 1)]
+        mode: u32,
+        /// Seconds before it is cancelled
+        #[arg(long, value_name = "SECONDS", default_value_t = 60)]
+        seconds: u32,
+    },
     /// rmmod, when no VM holds pool pages and no acquire runs
     Unload,
 }
@@ -354,12 +370,13 @@ pub fn main(cli: Cli) -> i32 {
         Command::Touch { command: TouchCommand::Wake } => Adb::connect(serial).and_then(|adb| session::touch_wake(&adb)),
         Command::Cpu { trace, out } => Adb::connect(serial).and_then(|adb| cpu::cpu(&adb, trace, out.as_deref())),
         Command::Hw { out } => Adb::connect(serial).and_then(|adb| hw::hw(&adb, &out)),
-        Command::Dmesg { grep, tail } => Adb::connect(serial).and_then(|adb| hw::dmesg(&adb, &grep, tail)),
+        Command::Dmesg { grep, tail, previous } => Adb::connect(serial).and_then(|adb| hw::dmesg(&adb, &grep, tail, previous)),
         Command::Hugeblocks { free } => Adb::connect(serial).and_then(|adb| vmprobe::hugeblocks(&adb, free)),
         Command::Hugepool { command } => Adb::connect(serial).and_then(|adb| match command {
             HugepoolCommand::Status => hugepool::status(&adb),
             HugepoolCommand::Load { ko, kapi_check, want, out } => hugepool::load(&adb, &ko, &kapi_check, want, &out),
             HugepoolCommand::Grow { want, mode, limit, out } => hugepool::grow(&adb, want, mode, limit, &out),
+            HugepoolCommand::Acquire { want, mode, seconds } => hugepool::acquire(&adb, want, mode, seconds),
             HugepoolCommand::Unload => hugepool::unload(&adb),
         }),
         Command::VmProbe { payload, mem, timeout, out, thp } => {

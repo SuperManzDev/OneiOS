@@ -74,12 +74,26 @@ pub fn dmesg_lines(text: &str, greps: &[regex::Regex], tail: usize) -> Vec<Strin
     lines[lines.len().saturating_sub(tail)..].iter().map(|l| l.to_string()).collect()
 }
 
-/// `phone dmesg`: the kernel's log, read only (root's `dmesg`), filtered here.
-pub fn dmesg(adb: &Adb, greps: &[String], tail: usize) -> Result<()> {
+/// The previous boot's kernel log the phone keeps through a restart: pstore's files by name (console, then the
+/// panic's dmesg record), each after a `=== NAME` line.
+pub const PSTORE: &[&str] =
+    &["/sys/fs/pstore/console-ramoops-0", "/sys/fs/pstore/console-ramoops", "/sys/fs/pstore/dmesg-ramoops-0", "/proc/last_kmsg"];
+
+/// `phone dmesg`: the kernel's log, read only (root's `dmesg`), filtered here; with `previous`, the log of the boot
+/// before this one (pstore).
+pub fn dmesg(adb: &Adb, greps: &[String], tail: usize, previous: bool) -> Result<()> {
     let res: Vec<regex::Regex> =
         greps.iter().map(|g| regex::Regex::new(g).with_context(|| format!("--grep {g}"))).collect::<Result<_>>()?;
     adb.need_root()?;
-    let out = adb.root_ok("dmesg </dev/null\n", "dmesg")?;
+    let script = if previous {
+        PSTORE.iter().map(|f| format!("[ -e {f} ] && {{ echo '=== {f}'; cat {f} </dev/null; }}\n")).collect::<String>() + "true\n"
+    } else {
+        "dmesg </dev/null\n".to_string()
+    };
+    let out = adb.root_ok(&script, "dmesg")?;
+    if previous && out.trim().is_empty() {
+        bail!("no previous boot's log on the phone ({})", PSTORE.join(", "));
+    }
     for line in dmesg_lines(&out, &res, tail) {
         println!("{line}");
     }

@@ -283,6 +283,29 @@ cache dropped and the memory compacted), and with a temporary root nothing can r
 an unlocked bootloader or a lasting root). iOS needs 3 to 4 GB. The probe, `vm-probe`, `hugeblocks` and `dmesg` stay
 for another phone or another firmware.
 
+### gh_hugepage_reserve with One UI stopped (2026-11-23)
+The owner's idea: the module of Droid-VM made for this wall (https://github.com/Droid-VM/gh-hugepage-reserve,
+GPL-2.0), and One UI's framework stopped and started again around its acquire, as the iOS switch and return do, so
+that the RAM apps and system_server held is free without a restart of the phone (and of its temporary root). Its
+README measured the same wall ("84% of all 2MB windows hold an unmovable hard straggler" after uptime); its tests
+ran in QEMU, the on-device ones are its open work. Built with `scripts/hugepage/build.sh` (the authors' DDK image
+for android15-6.6 by digest, under bubblewrap); `oneios-tool phone hugepool` loads it and runs the cycle.
+- Its ABI preflight on the phone's BTF (with the phone's kernel version: run with the PC's 7.0.10 it picks the
+  wrong rows) passes every function but `kallsyms_lookup_name`, a false alarm: its argument is plain `char`
+  (unsigned since Linux 6.2's `-funsigned-char`, encoding 0 in BTF, the same as `strlen`'s), which the preflight
+  prints as `uchar`. It stays in `disable_kapi` anyway (it only turns off a CMA lever this use leaves off).
+- Load 1 (One UI up, `pool_want=64`): insmod in 0.11 s, every hook attached, "RAM: 22 ranges, 11450 MB
+  present", `pool_size_max` 2678; the pool stayed at 0 (no free 2 MiB block beside One UI). One UI ran on.
+- **Crash 1**: `acquire 1` beside One UI panicked the kernel in the module's worker ("Unable to handle kernel
+  NULL pointer dereference", `gh_pool_ext_to_avail+0x7c4`, `gh_adjust_fn`; `/proc/last_kmsg`, kept in
+  `logs/pa3q-hugepool/crash1-pstore.txt`); Samsung's upload path restarted the phone in about 20 s, One UI came back,
+  nothing was lost. The cause is ours: our insmod line had no `pageblock_order_val` (the module's own load.sh always
+  passes the one of `/proc/pagetypeinfo`), so the module took -1 as its block order and its block size S as
+  `1u << (-1 - 9)` (4 Mi slots on arm64): `gh_try_complete_block` walked siblings from slot 0 into a GB with no RAM
+  (slot 1024, 4 GiB) and read a NULL slot. `hugepool load` now passes `pageblock_order_val` (refusing a phone
+  whose order is not 9), `migrate_cma_val=-1` and `pool_want_with_cma=0` (the CMA side off). The module's own
+  fragility (no check of that value, no NULL check there) is the authors' to hear about.
+
 ## Next
 1. The owner's choice, with the facts above. The Gunyah VM was tried (2026-11-20 to 23) and does not fit iOS on this
    phone ("A VM under Gunyah", verdict). Left: the hosted path that runs today, or XNU alone, whose unknowns are the

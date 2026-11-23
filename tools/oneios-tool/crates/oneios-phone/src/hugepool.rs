@@ -57,9 +57,17 @@ pub fn kernel_version(uname_r: &str) -> Option<String> {
     (v.split('.').filter(|p| !p.is_empty()).count() == 3).then_some(v)
 }
 
-/// The insmod line: the pool's want, the ABI guard; the CMA reservoir left off (no preflight values passed).
-pub fn insmod_line(want: u32, disable_kapi: &str) -> String {
-    let mut s = format!("insmod {KO} pool_want={want}");
+/// The page block order from `/proc/pagetypeinfo` ("Page block order: 9").
+pub fn pageblock_order(pagetypeinfo: &str) -> Option<u32> {
+    pagetypeinfo.lines().find_map(|l| l.strip_prefix("Page block order:")).and_then(|v| v.trim().parse().ok())
+}
+
+/// The insmod line: the pool's want, the page block order, the ABI guard; the CMA reservoir off
+/// (`migrate_cma_val=-1`, `pool_want_with_cma=0`). The page block order is not optional: without it the module takes
+/// -1 for its block order and computes its block size S as `1u << (-1 - 9)` (crash 1, 2026-11-23: a NULL slot in
+/// `gh_try_complete_block`, 4 Mi siblings scanned into a hole GB). Its own load.sh always passes it.
+pub fn insmod_line(want: u32, pb_order: u32, disable_kapi: &str) -> String {
+    let mut s = format!("insmod {KO} pool_want={want} pageblock_order_val={pb_order} migrate_cma_val=-1 pool_want_with_cma=0");
     if !disable_kapi.is_empty() {
         s += &format!(" disable_kapi={disable_kapi}");
     }
@@ -89,7 +97,10 @@ pub fn load(adb: &Adb, ko: &str, kapi_check: &str, want: u32, out: &str) -> Resu
     }
     adb.need_root()?;
     adb.refuse_in_session()?;
-    let r = adb.root_ok(&format!("[ -d {PARAMS} ] && echo loaded || echo absent; uname -r\n"), "the module check")?;
+    let r = adb.root_ok(
+        &format!("[ -d {PARAMS} ] && echo loaded || echo absent; uname -r; grep '^Page block order:' /proc/pagetypeinfo\n"),
+        "the module check",
+    )?;
     if r.contains("loaded") {
         bail!("gh_hugepage_reserve is loaded already: `phone hugepool status`, or `grow`");
     }
@@ -111,7 +122,12 @@ pub fn load(adb: &Adb, ko: &str, kapi_check: &str, want: u32, out: &str) -> Resu
     println!("kapi_check (kernel {version}): disable_kapi '{disable}', MIGRATE_CMA {} (the CMA side stays off)", cma.unwrap_or("?".into()));
     adb.root_ok(&format!("mkdir -p {DIR} && chmod 777 {DIR}\n"), "the module's folder")?;
     adb.push(ko, KO)?;
-    let line = insmod_line(want, &disable);
+    // the module's block order: 9 (2 MiB) is the only one this tool knows the module to handle
+    let pb = pageblock_order(&r).with_context(|| format!("no page block order in /proc/pagetypeinfo (\"{}\")", r.trim()))?;
+    if pb != 9 {
+        bail!("the phone's page block order is {pb}, not 9: not loading the module");
+    }
+    let line = insmod_line(want, pb, &disable);
     println!("load: {} bytes, sha256 {sha}; {line}", data.len());
     let script = format!(
         "got=$(sha256sum {KO} | cut -d' ' -f1); [ \"$got\" = \"{sha}\" ] || {{ echo \"sha256 $got, not {sha}\"; exit 1; }}\n\
@@ -385,6 +401,41 @@ pub fn grow(adb: &Adb, want: u32, mode: u32, limit: u32, out: &str) -> Result<()
     status(adb)
 }
 
+/// `acquire`'s script: the want (when given), the module's acquire MODE, then refill_stat every second while
+/// acquire_active=1, cancelled (acquire 0) after SECONDS.
+pub fn acquire_script(want: Option<u32>, mode: u32, seconds: u32) -> String {
+    let mut s = String::new();
+    if let Some(w) = want {
+        s += &format!("echo {w} > {PARAMS}/pool_want || echo 'pool_want {w} refused'\n");
+    }
+    s += &format!(
+        "echo {mode} > {PARAMS}/acquire || echo 'acquire {mode} refused'\nsleep 3\nt=0\n\
+         while grep -q '^acquire_active=1$' {PARAMS}/refill_stat && [ $t -lt {seconds} ]; do sleep 1; t=$((t + 1)); done\n\
+         if grep -q '^acquire_active=1$' {PARAMS}/refill_stat; then echo 0 > {PARAMS}/acquire; echo \"cancelled after {seconds} s\"; sleep 2; fi\n\
+         echo \"after $((t + 3)) s\"\n"
+    );
+    s
+}
+
+/// `phone hugepool acquire`: the module's own acquire beside One UI (nothing stopped).
+pub fn acquire(adb: &Adb, want: Option<u32>, mode: u32, seconds: u32) -> Result<()> {
+    if !(1..=3).contains(&mode) || want.is_some_and(|w| w == 0 || w > 3072) || !(5..=600).contains(&seconds) {
+        bail!("--mode 1..3, --want 1..3072, --seconds 5..600");
+    }
+    adb.need_root()?;
+    adb.refuse_in_session()?;
+    let st = adb.root_ok(&format!("cat {PARAMS}/refill_stat 2>/dev/null || echo absent\n"), "the module's state")?;
+    if st.contains("absent") {
+        bail!("gh_hugepage_reserve is not loaded: `phone hugepool load` first");
+    }
+    if stat(&st, "acquire_active") != Some("0") {
+        bail!("an acquire runs already");
+    }
+    let r = adb.root(&acquire_script(want, mode, seconds))?;
+    print!("{}{}", r.out, r.err);
+    status(adb)
+}
+
 /// `phone hugepool unload`.
 pub fn unload(adb: &Adb) -> Result<()> {
     adb.need_root()?;
@@ -412,8 +463,13 @@ mod tests {
         assert_eq!(kapi_args("disable=\n").0, "");
         assert_eq!(kernel_version("6.6.127-android15-8-p87b1ce1-abogkiS938BXXSDDZJ1-4k\n").as_deref(), Some("6.6.127"));
         assert_eq!(kernel_version("garbage"), None);
-        assert_eq!(insmod_line(64, ""), format!("insmod {KO} pool_want=64"));
-        assert!(insmod_line(64, "kallsyms_lookup_name").ends_with(" disable_kapi=kallsyms_lookup_name"));
+        assert_eq!(
+            insmod_line(64, 9, ""),
+            format!("insmod {KO} pool_want=64 pageblock_order_val=9 migrate_cma_val=-1 pool_want_with_cma=0")
+        );
+        assert!(insmod_line(64, 9, "kallsyms_lookup_name").ends_with(" disable_kapi=kallsyms_lookup_name"));
+        assert_eq!(pageblock_order("absent\n6.6.127-x\nPage block order: 9\n"), Some(9));
+        assert_eq!(pageblock_order("absent\n6.6.127-x\n"), None);
         assert_eq!(stat("state=idle\npool_avail=12\nactive_vms=0\n", "pool_avail"), Some("12"));
         assert_eq!(stat("pool_avail_cma_able=3\n", "pool_avail"), None, "a key, not a prefix of one");
     }
