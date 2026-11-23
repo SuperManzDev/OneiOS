@@ -1,0 +1,64 @@
+diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
+--- a/iokit/Kernel/IOPlatformExpert.cpp
++++ b/iokit/Kernel/IOPlatformExpert.cpp
+@@ -394,6 +394,50 @@
+ extern "C" uint64_t hosted_wall_time(void);
+ #endif
+ 
++#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE
++/*
++ * OneiOS native (a VM of Android's crosvm, docs/native.md): crosvm's PL030 real-time clock is the board's. /chosen's
++ * "oneios,rtc" is its physical address and size (xnuloader-crosvm: crosvm's rtc@2000, below the arm-io window, so
++ * absolute); RTCDR, its first register, reads the host's time in seconds since 1970 (crosvm's devices/src/pl030.rs).
++ * Without the property the answer is 0, as before, and the calendar starts at 1970. Looked for at each call until the
++ * device tree has it (the first calls may come before /chosen is in the registry).
++ */
++static long
++oneios_native_rtc(void)
++{
++	static volatile uint32_t *rtc;
++	static unsigned looks;
++	if (!rtc && looks < 64) {
++		looks++;
++		IORegistryEntry *chosen = IORegistryEntry::fromPath("/chosen", gIODTPlane);
++		OSData *where = chosen ? OSDynamicCast(OSData, chosen->getProperty("oneios,rtc")) : NULL;
++		uint64_t range[2] = { 0, 0 };
++		if (where && where->getLength() == sizeof(range)) {
++			memcpy(range, where->getBytesNoCopy(), sizeof(range));
++		}
++		OSSafeReleaseNULL(chosen);
++		if (range[0] && range[1] >= 4 && range[1] <= 0x10000) {
++			IODeviceMemory *memory = IODeviceMemory::withRange(range[0], range[1]);
++			IOMemoryMap *map = memory ? memory->map() : NULL;
++			OSSafeReleaseNULL(memory);
++			if (map && map->getVirtualAddress()) {
++				rtc = (volatile uint32_t *)map->getVirtualAddress();     /* the map stays for the boot */
++				IOLog("oneios-native: the real-time clock at 0x%llx (crosvm's PL030)\n", range[0]);
++			} else {
++				OSSafeReleaseNULL(map);
++			}
++		}
++	}
++	if (!rtc) {
++		return 0;
++	}
++	uint32_t seconds;
++	/* one 32-bit load with a plain base register: the hypervisor emulates the trapped access from its syndrome */
++	__asm__ volatile ("ldr %w0, [%1]" : "=r"(seconds) : "r"(rtc) : "memory");
++	return (long)seconds;
++}
++#endif
++
+ long
+ IOPlatformExpert::getGMTTimeOfDay(void)
+ {
+@@ -401,6 +445,9 @@
+ 	/* OneiOS hosted: the host's clock is the board's real-time clock (the calendar started at 1970 without it). */
+ 	return (long)hosted_wall_time();
+ #endif
++#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE
++	return oneios_native_rtc();
++#endif
+ 	return 0;
+ }
+ 

@@ -166,6 +166,11 @@ struct served {
   pid_t child;
 };
 
+// pool (a VM's frames): the helper's copy loop without its clock floor (ONEIOS_DISPLAY_UCLAMP_MIN=0) and its frames in
+// write-only buffers (ONEIOS_DISPLAY_PRESENT=ahb), each unless the environment already says; test: the helper as a
+// session runs it.
+static int helper_floor_off;
+
 // A session folder of its own, display.sock in it, and the helper started on it. 0, or -1 (said).
 static int serve(struct served *s, const char *helper, int argc, char **argv, int extra)
 {
@@ -181,6 +186,10 @@ static int serve(struct served *s, const char *helper, int argc, char **argv, in
   s->child = fork();
   if (s->child < 0) { perror("displayctl: fork"); return -1; }
   if (s->child == 0) {
+    if (helper_floor_off) {
+      setenv("ONEIOS_DISPLAY_UCLAMP_MIN", "0", 0);
+      setenv("ONEIOS_DISPLAY_PRESENT", "ahb", 0);   // write-only buffers: no CPU cache maintenance per frame (jni.c)
+    }
     char **args = calloc((size_t)(argc - extra) + 6, sizeof *args);
     int k = 0;
     args[k++] = (char *)helper;
@@ -498,6 +507,10 @@ static int pool_main(int argc, char **argv)
 
   struct served s;
   int status = 1;
+  // Measured on the S25 (2026-11-23, displayctl test at 60 frames a second): the helper's lock of the layer's buffer
+  // takes 13 ms a frame whatever the damage (the gralloc's cache maintenance of the whole buffer), the copy 0.1 ms; a
+  // floor of 1024 only moved that onto the prime cores at their top clocks.
+  helper_floor_off = 1;
   if (serve(&s, helper, argc, argv, extra) || accept_helper(&s)) goto out;
   // The first frame: what the pool holds now, whole (rows not resident yet stay black).
   struct xhd_rect changed;

@@ -255,6 +255,12 @@
 # (the ports sit below the arm-io window, which may not start at 0), and SERIAL_NS16550_UART in pexpert's serial ids.
 # All under #if XNU_ONEIOS_NATIVE: the hosted kernel compiles as before.
 0077-native-ns16550-uart.patch
+# native-pl030-rtc (2026-11-23): the native kernel's calendar in a VM of Android's crosvm. Without a real-time clock
+# getGMTTimeOfDay answered 0, and the calendar ran from 1970 plus the phone's counter since it booted ("Thu Jan 1, 2:57" on
+# the lock screen). crosvm has a PL030 at 0x2000 (rtc in its tree), whose RTCDR reads the host's time in seconds
+# since 1970; xnuloader-crosvm names it in /chosen ("oneios,rtc", absolute: below the arm-io window), and
+# IOPlatformExpert::getGMTTimeOfDay reads it. Under #if XNU_ONEIOS_NATIVE: the hosted kernel compiles as before.
+0078-native-pl030-rtc.patch
 # radio2: no numbered patch for the Wi-Fi: net/ is an archive of this build (kernel/build-hosted.sh,
 # oneios-tool kernel gen net), started by oneios_drivers_start's oneios_net_start (weak in drivers/bridge/OneiOSBridge.c).
 # net/README.md: IO80211Controller/IO80211Interface under the collection's original IOEthernetController and

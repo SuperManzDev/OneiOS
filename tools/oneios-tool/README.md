@@ -1629,9 +1629,10 @@ DIR (`phone-vmboot`), prints the run's disk, store and pool lines and crosvm's l
   the pool: the frame 16 KiB aligned and `STRIDE * HEIGHT` bytes, the frame count's 16 KiB page after it, both inside
   the pool; anything else is refused). The tool then pushes `--bridge` (default
   `runtime/display/build/android/displayctl`, refused when it is not there: `make -C runtime/display`) into the VM's
-  folder, and the script starts `displayctl pool` (`runtime/display/README.md`) right after the pool check passed, with
+  folder with the display helper built beside it (`oneios-display`, `liboneios-display.so`, `oneios-display.dex`: the
+  VM's own copy, root's; the hosted session keeps its staged helper), and the script starts `displayctl pool` (`runtime/display/README.md`) right after the pool check passed, with
   crosvm's pid, the pool's offset in crosvm's memfd (the pool's address less the RAM's base) and size, the frame, the
-  count and the staged runtime's helper (`runtime/bin/oneios-display`): the VM's screen on a layer over One UI, its log
+  count and that helper (`$D/oneios-display`, with write-only buffers and no clock floor: `runtime/display/README.md`): the VM's screen on a layer over One UI, its log
   `display.txt` (copied into DIR). Touches still go to One UI under the layer. After the VM the script waits for the
   bridge (it ends when crosvm's process is gone), asks it to end after 3 s and ends it after 8 s; the VM check also
   refuses while a `displayctl pool` runs. The live console: the poll's status no longer comes from its last command

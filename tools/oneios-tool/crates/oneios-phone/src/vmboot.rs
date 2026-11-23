@@ -313,7 +313,7 @@ pub fn boot_script_with(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Op
     format!(
         r#"D={DIR}
 C=/apex/com.android.virt/bin/crosvm
-H={stage}/runtime/bin/oneios-display
+H=$D/oneios-display
 exec >>$D/run.txt 2>&1 </dev/null
 cd $D || exit 1
 end() {{ echo "$*" > $D/result; }}
@@ -370,9 +370,12 @@ thp_restore
 dmesg 2>/dev/null | grep -i -E 'gunyah|folio|gh_|crosvm|scm|memextent' | tail -n 80 > $D/dmesg.txt
 if [ "$pool" = bad ]; then end "refused pool: end how $how exit $rc"; else end "end how $how exit $rc"; fi
 "#,
-        thp = if thp { 1 } else { 0 },
-        stage = crate::adb::STAGE
+        thp = if thp { 1 } else { 0 }
     )
+}
+
+fn gen_path(dir: &Path, name: &str) -> String {
+    dir.join(name).to_string_lossy().into_owned()
 }
 
 /// What of a VM's RAM may be outside gh_hugepage_reserve's pool, in 4 KiB pages: Gunyah's own heap maps no more than
@@ -455,8 +458,24 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
     println!("vm-boot: {} MiB Image, sha256 {sha}: pushing", data.len() >> 20);
     adb.push(image, &format!("{DIR}/kernel.img"))?;
     if let Some(f) = disks.as_ref().and_then(|d| d.fb.as_ref()) {
-        adb.push(&o.bridge, &format!("{DIR}/displayctl"))?;
-        adb.root_ok(&format!("chmod 755 {DIR}/displayctl\n"), "the bridge's mode")?;
+        // The bridge and the display helper the VM runs, as built beside each other (runtime/display: make): the VM's
+        // own copy, root's, so that neither depends on the staged runtime's version nor can be changed by the shell
+        // user while root runs them.
+        let built = Path::new(&o.bridge).parent().unwrap_or(Path::new("."));
+        for (file, to) in [(o.bridge.clone(), "displayctl"), (gen_path(built, "oneios-display"), "oneios-display"),
+                           (gen_path(built, "liboneios-display.so"), "liboneios-display.so"), (gen_path(built, "oneios-display.dex"), "oneios-display.dex")] {
+            if !Path::new(&file).is_file() {
+                bail!("{file} is not there: make -C runtime/display");
+            }
+            adb.push(&file, &format!("{DIR}/{to}"))?;
+        }
+        adb.root_ok(
+            &format!(
+                "cd {DIR} && chown root:root displayctl oneios-display liboneios-display.so oneios-display.dex && \
+                 chmod 755 displayctl oneios-display && chmod 644 liboneios-display.so oneios-display.dex\n"
+            ),
+            "the bridge's and the helper's owner",
+        )?;
         if disks.as_ref().is_some_and(|d| d.input) {
             println!(
                 "vm-boot: the screen ({}x{}) on a layer over One UI, the touchscreen to the VM while it runs; volume down held 3 s stops it",
@@ -658,7 +677,7 @@ mod tests {
         assert!(pool < bridge && bridge < wait);
         // the pool's offset in the memfd and its size, the frame and the count; the staged helper
         assert!(s.contains("--pool-offset 2986344448 --pool-bytes 33554432 --fb-offset 0 --size 1440x3120 --stride 5760 --seq-offset 17973248 --helper $H"));
-        assert!(s.contains("H=/data/local/tmp/oneios/runtime/bin/oneios-display\n"));
+        assert!(s.contains("H=$D/oneios-display\n"));
         assert!(s.contains("if [ \"$pool\" != bad ] && kill -0 $pid 2>/dev/null; then"));
         // after the VM, the bridge is waited for, asked to end, then ended
         let end = s.find("if [ -n \"$bridge\" ]; then").unwrap();

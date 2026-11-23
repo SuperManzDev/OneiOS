@@ -441,4 +441,5 @@ guest is still iPhone18,2 iOS 27.0.1.
   touch (crosvm's multi-touch device fed by `displayctl touch`, which takes the touchscreen; the kernel's virtio-input on
   PCI with its queues in the pool; boot 4b): a test swipe opened **iOS's Home screen**, then the owner's finger (Settings, Control
   Center; boot 5). Step 5, four vCPUs (ArmCpu's PSCI CPU_ON by HVC; boot 6): the Home screen and the apps in about two
-  minutes. Next: the clock, less work per frame, the GPU.
+  minutes. Step 6 (boots 7 and 8): the screen's path at about 5% of a core (write-only buffers in the helper, 1080x2340)
+  and the real date (crosvm's PL030, patch 0078). Next: the GPU.

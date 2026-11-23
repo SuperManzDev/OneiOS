@@ -32,6 +32,7 @@
 // and the phone's bridge (runtime/display displayctl pool) reads it out of the pool and hands it to oneios-display.
 // OUT.disks then has "fb OFFSET BYTES WIDTH HEIGHT STRIDE" (OFFSET in the pool). /chosen display-scale and the boot
 // arguments as xnuloader-qemu gives them (offline-legacy-unit-scale, sheng-vsync).
+// The calendar: /chosen "oneios,rtc" is crosvm's PL030 (0x2000, absolute), which kernel patch 0078 reads for the time.
 // The touch, with --display: the input bus, node /arm-io/input-pci (bus 0 of crosvm's CAM: the kernel finds crosvm's
 // virtio-input functions there, wherever crosvm put them), and a 64 KiB window of the pool after the disks' for their
 // queues and events (three 4 KiB pages a device); OUT.disks then has "input touch": vm-boot hands crosvm the phone's
@@ -62,6 +63,8 @@
 #define DMA_SLICE     0x110000ull       // a disk's DMA window: its queue page, then 1 MiB of transfer buffer at 64 KiB
 #define INPUT_WINDOW  0x10000ull        // the input devices' window: three 4 KiB pages a device
 #define PCI_BUS0      0x10000ull        // bus 0 of the CAM: 32 devices, 0x800 apart
+#define RTC           0x2000ull         // crosvm's PL030 (rtc@2000 in its tree): RTCDR is the host's seconds since 1970
+#define RTC_SIZE      0x1000ull
 
 // xnuloader-qemu's arguments: xnuhost's default (runtime/xnuhost/src/config.c), less the hosted kernel's devices.
 static const char default_args[] =
@@ -257,6 +260,12 @@ int main(int argc, char **argv)
     xl_adt_node *bus = xl_adt_find(tree, "arm-io/input-pci");
     const uint64_t window[2] = { input_pa, INPUT_WINDOW };
     if (!bus || xl_adt_set(bus, "oneios,dma-window", window, sizeof window)) { fprintf(stderr, "board: no /arm-io/input-pci for the touch\n"); return 1; }
+  }
+  // The calendar: crosvm's PL030, absolute (below the arm-io window), for kernel patch 0078's getGMTTimeOfDay.
+  {
+    xl_adt_node *chosen = xl_adt_find(tree, "chosen");
+    const uint64_t rtc[2] = { RTC, RTC_SIZE };
+    if (!chosen || xl_adt_set(chosen, "oneios,rtc", rtc, sizeof rtc)) { fprintf(stderr, "board: no /chosen for the clock\n"); return 1; }
   }
   // The console: the node /defaults serial-device names by its AAPL,phandle (pe_serial.c get_serial_device_phandle).
   xl_adt_node *uart = xl_adt_find(tree, "arm-io/uart0"), *defaults = xl_adt_find(tree, "defaults");

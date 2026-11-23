@@ -542,6 +542,38 @@ the Home screen at 122 s**, the App Library at 136 s, the Phone app and its menu
 vCPU the lock screen itself came at about 170 s). crosvm at 144% of a host core while the owner used the Phone app,
 the guest's report at 15 to 21% (of 400), 41.8 °C (thermal_zone0), SpringBoard without a restart.
 
+### Less work for the screen, and the clock (step 6, 2026-11-23)
+Where the screen's time went, measured on the S25 with `displayctl test` (the bouncing square, 60 frames a second at
+1080x2340) and simpleperf on the helper: **85% of it in the CPU caches' maintenance** (`dcache_inval_poc` 36.0%,
+`dcache_clean_poc` 31.5%, `arch_sync_dma_for_cpu` 9.0%, `arch_sync_dma_for_device` 8.7%), the copy itself 9.8%:
+the window's buffers are the CPU's cached ones (Surface::lock asks for SW_READ_OFTEN and SW_WRITE_OFTEN) and each lock
+and post maintains the whole buffer, whatever the damage (the lock 13.7 ms a frame with its wait, the copy 0.07 ms).
+The helper's uclamp.min of 1024 only moved that onto the prime cores (52% of a core at 2 to 2.8 GHz, 68% at 1.8 to
+2.2 GHz without it).
+- The helper (runtime/display `jni.c`): with `ONEIOS_DISPLAY_PRESENT=ahb` the frames go into three AHardwareBuffers of
+  its own that the CPU only writes (`CPU_WRITE_RARELY`: nothing to maintain), on a child of the layer (made by
+  OneiOSDisplay.java, taken with `ASurfaceControl_fromJava`: `ASurfaceControl_createFromWindow` gives none for the BLAST
+  window), posted with ASurfaceTransaction, each buffer given the damage of every frame since it was last filled, two
+  transactions in flight at most, a buffer filled again after the compositor's release fence. Measured: 114 frames a
+  second at 17.1% of a core against 60 at 49.5% (**0.15% a frame a second against 0.83%**), the picture right
+  (`logs/pa3q-vmboot/ahb-test.png`). `ONEIOS_DISPLAY_UCLAMP_MIN` sets the copy loop's floor (0: none).
+- `displayctl pool` starts its helper with both (`ONEIOS_DISPLAY_PRESENT=ahb`, `ONEIOS_DISPLAY_UCLAMP_MIN=0`), and
+  `phone vm-boot` pushes the VM's own helper (`oneios-display`, its library and dex, root's) beside the bridge: the
+  hosted session keeps its staged helper and the window path.
+- A smaller frame: `xnuloader-crosvm --display 1080x2340 --scale 3` (the panel's aspect, 44% fewer pixels for the
+  guest to draw on its CPU and for every copy; the compositor scales it to the panel).
+- Boot 7 (1080x2340, 4 vCPUs, the helper without its floor, the window path; the pool grown first, One UI down 57 s):
+  over 60 s the helper at 10.7% and the bridge at 1.3% of a core against boot 3's 50% and 14% (11 frames a second there
+  against 45). Boot 8 (the same, write-only buffers, 1792 MiB: the pool had 784 pages after `acquire`): in use, the
+  helper at **3.3%** and the bridge at **1.9%** of a core at about 10 frames a second; the guest itself at 266% (it
+  draws with its CPU), the phone from 52.3 to 54.6 °C in 30 s while the owner typed. What is left of the heat is the
+  guest's own drawing: the GPU's.
+- **The clock** (kernel patch 0078, `kernel/patches/oneios-hosted/README.md`): the native kernel's getGMTTimeOfDay
+  answered 0, and the calendar ran from 1970 plus the phone's counter since it booted. crosvm has a PL030 at `0x2000`
+  (`rtc@2000`), whose first register reads the host's time in seconds; `xnuloader-crosvm` names it in `/chosen`
+  (`oneios,rtc`) and the kernel reads it. Boot 8: "oneios-native: the real-time clock at 0x2000 (crosvm's PL030)", the
+  lock screen's "Mon Nov 23". The time zone is iOS's own (Settings, General, Date & Time).
+
 ## Next
 1. The Gunyah VM fits iOS with gh_hugepage_reserve ("Verdict, revised"). Its road to an iOS guest, each step a
    test on the phone: the native kernel booted by crosvm with its console on the 8250 at `0x3f8` (done: "The native
@@ -549,10 +581,11 @@ the guest's report at 15 to 21% (of 400), 41.8 °C (thermal_zone0), SpringBoard 
    as virtio-blk from /data (done: step 2, boot 2: launchd, the 60 boot tasks, the daemons, SpringBoard); the screen
    (done: step 3, boot 3: the boot video in the pool, the lock screen on the panel, SpringBoard stays up); touch
    (done: step 4, boot 4b: crosvm's multi-touch device fed by `displayctl touch`, the kernel's virtio-input on PCI, the
-   Home screen from the test swipe, boot 5: the owner's finger, Settings and Control Center); next the clock (crosvm's RTC in the
-   VM's tree, or the time as a boot argument), less work per frame (the guest copies all 17 MiB of a frame for 69
-   changed rows: the differential copy, `sheng-fb-diff=1`, or the compositor's damage; the helper's copy loop at
-   uclamp.min 1024), more vCPUs (done: step 5, boot 6: four, ArmCpu's PSCI CPU_ON by HVC); then the GPU (drm2kgsl, as the hosted path's). The GPU, the
+   Home screen from the test swipe, boot 5: the owner's finger, Settings and Control Center); more vCPUs (done: step 5,
+   boot 6: four, ArmCpu's PSCI CPU_ON by HVC); the screen's work and the clock (done: step 6, boots 7 and 8: write-only
+   buffers in the helper, 1080x2340, crosvm's PL030 read by patch 0078); next the GPU (drm2kgsl, as the hosted path's:
+   what is left of the heat is the guest's drawing on its CPU). Still to try for the guest's copy: the differential
+   copy (`sheng-fb-diff=1`) and the changed rows told to the bridge. The GPU, the
    owner's question (2026-11-23: a host module that shares memory with the VM, "gunyah_host_share", none such is
    published): the Adreno stays Android's (One UI needs it, and its power, clocks and GMU firmware are kgsl's), so the
    VM's GPU work goes to Android's kgsl and its buffers must lie in memory both sides keep. Gunyah lends, shares or

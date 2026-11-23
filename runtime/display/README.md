@@ -240,6 +240,25 @@ under `/proc` or `/dev`). The host tests (`make test`) check the maps lookup on 
 row copy with a page that is not resident, the count, a whole run against the stand-in helper with a moving count,
 and the refusals.
 
+## Write-only buffers: `ONEIOS_DISPLAY_PRESENT=ahb` (2026-11-23)
+
+The window path's buffers are the CPU's cached ones (`ANativeWindow_lock` is Surface::lock, which asks for
+SW_READ_OFTEN and SW_WRITE_OFTEN): on the S25 each lock and each post cleaned and invalidated the CPU caches over the
+whole buffer, whatever the damage (simpleperf at 1080x2340, 60 frames a second: `dcache_inval_poc` 36%,
+`dcache_clean_poc` 31%, `arch_sync_dma_for_cpu` 9%, `arch_sync_dma_for_device` 9%, the copy 10%; the lock 13.7 ms a
+frame with its wait). With `ONEIOS_DISPLAY_PRESENT=ahb` in its environment the helper posts its frames otherwise:
+OneiOSDisplay.java makes a child of the layer ("OneiOS frame", `setParent`), the native side takes it
+(`ASurfaceControl_fromJava`, looked up: Android 14's, the library is built for API 30), and three AHardwareBuffers of
+the frame's size that the CPU only writes (`CPU_WRITE_RARELY | CPU_READ_NEVER | GPU_SAMPLED_IMAGE | COMPOSER_OVERLAY`,
+B,G,R,A, else R,G,B,X) go to it with ASurfaceTransaction (`setBuffer`, `setDamageRegion`; the first one shown, opaque,
+with the frame's dataspace). Each buffer gets the union of the damage of the frames since it was last filled; at most
+two transactions are in flight, and a buffer is filled again after the release fence its replacement's completion gave.
+The layer's matrix and position (set by the Java side) place the child. When anything of it is missing the helper says
+so and keeps the window path. Measured (`displayctl test`, the same frame): 114 frames a second at 17.1% of a core
+against 60 at 49.5% on the window path. `displayctl pool` starts its helper with it, and with
+`ONEIOS_DISPLAY_UCLAMP_MIN=0` (the copy loop's floor: 1024 by default, 0 none); the hosted session keeps the window
+path and its floor.
+
 ## The touch of a VM of crosvm: `displayctl touch`
 
 ```sh

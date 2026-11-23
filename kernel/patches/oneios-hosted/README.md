@@ -1226,6 +1226,21 @@ All under `#if XNU_ONEIOS_NATIVE`: the hosted kernel compiles as before. The ker
 that `/defaults serial-device` names (`xnuloader-crosvm` sets it and the node's `AAPL,phandle`). On the S25 (boot 1,
 2026-11-23) it printed the whole start up to the root device's wait.
 
+## 0078-native-pl030-rtc.patch (native path, 2026-11-23)
+
+The calendar of the native kernel in a VM of Android's crosvm (`docs/native.md`, "Less work for the screen, and the
+clock"). `IOPlatformExpert::getGMTTimeOfDay` answered 0 outside the hosted kernel, and the calendar ran from 1970 plus
+the phone's counter since it booted (the lock screen of boot 3: "Thu Jan 1, 2:57", 10 h 57 min of the phone's uptime
+in the guest's time zone). crosvm has a PL030 at `0x2000` (`rtc@2000`, `arm,primecell-periphid = <0x41030>` in its
+tree), whose first register (RTCDR) reads the host's time in seconds since 1970.
+
+| Where | What |
+|---|---|
+| `iokit/Kernel/IOPlatformExpert.cpp` | `oneios_native_rtc`: `/chosen`'s `oneios,rtc` (address and size, absolute: `xnuloader-crosvm` writes `<0x2000 0x1000>`) mapped as device memory (`IODeviceMemory`, as IOKit code may: `ml_io_map` is the kernel's private), RTCDR read with one 32-bit load; looked for at each call until the device tree has it; `getGMTTimeOfDay` returns it |
+
+Under `#if XNU_ONEIOS_NATIVE`: the hosted kernel compiles as before. On the S25 (boot 8, 2026-11-23): "oneios-native:
+the real-time clock at 0x2000 (crosvm's PL030)", and the lock screen said "Mon Nov 23".
+
 ## 0049-wifi-association-event.patch (radio2, 2026-11-12)
 
 `kev_post_msg` (bsd/kern/kern_event.c) refuses an event that does not fit one mbuf without a cluster (`MLEN`), with

@@ -16,6 +16,7 @@ public final class OneiOSDisplay {
     private static native int[] nBuffer(int frameFormat);              // buffer format, dataspace
     // ready: SESSION/ready with --session (the first post waits for it: src/xhd.h xhd_hold_first), null with --socket
     private static native int nRun(long handle, Object surface, int format, int dataspace, String ready);
+    private static native boolean nChild(Object surfaceControl);   // ONEIOS_DISPLAY_PRESENT=ahb: the frames' own layer
     private static native void nClose(long handle);
 
     private static final int RGBX_8888 = 2, BGRA_8888 = 5, RGBA_FP16 = 22;
@@ -104,7 +105,7 @@ public final class OneiOSDisplay {
         int[] fit = nFit(guest[0], guest[1], panel[0], panel[1]);
         log("panel " + panel[0] + "x" + panel[1] + " at " + hz + " Hz; the frame at " + fit[0] + "," + fit[1] + " " + fit[2] + "x" + fit[3]);
 
-        Object back = null, backQueue = null, backSurface = null, layer = null, queue = null, surface = null;
+        Object back = null, backQueue = null, backSurface = null, layer = null, queue = null, surface = null, child = null;
         int result;
         try {
             // Black behind the frame where its aspect leaves bars (and under its first buffer).
@@ -141,9 +142,20 @@ public final class OneiOSDisplay {
             place(transaction, layer, TOP);
             tx(transaction, "apply", new Class<?>[]{});
             log("layer up");
+            // ONEIOS_DISPLAY_PRESENT=ahb (displayctl pool): the frames go to a child of the layer, in buffers of the native
+            // side's own that the CPU only writes (jni.c, "the present path without the CPU caches' maintenance"); the
+            // layer's matrix and position place the child too. Without it, or if the child cannot be had, the window path.
+            if ("ahb".equals(System.getenv("ONEIOS_DISPLAY_PRESENT"))) {
+                try {
+                    child = layerUnder("OneiOS frame", layer);
+                    if (!nChild(child)) log("the frames' child layer was not taken: the window path");
+                } catch (Exception | LinkageError e) {
+                    log("no child layer for the frames (" + e + "): the window path");
+                }
+            }
             result = nRun(handle, surface, format, dataspace, ready);
         } finally {
-            for (Object gone : new Object[]{layer, back}) {
+            for (Object gone : new Object[]{child, layer, back}) {
                 if (gone == null) continue;
                 if (!tx(transaction, "remove", new Class<?>[]{SC}, gone)) tx(transaction, "hide", new Class<?>[]{SC}, gone);
             }
@@ -162,6 +174,14 @@ public final class OneiOSDisplay {
         Object builder = Class.forName("android.view.SurfaceControl$Builder").getConstructor().newInstance();
         builder.getClass().getMethod("setName", String.class).invoke(builder, name);
         builder.getClass().getMethod("setBLASTLayer").invoke(builder);
+        return builder.getClass().getMethod("build").invoke(builder);
+    }
+
+    private static Object layerUnder(String name, Object parent) throws Exception {
+        Object builder = Class.forName("android.view.SurfaceControl$Builder").getConstructor().newInstance();
+        builder.getClass().getMethod("setName", String.class).invoke(builder, name);
+        builder.getClass().getMethod("setBLASTLayer").invoke(builder);
+        builder.getClass().getMethod("setParent", SC).invoke(builder, parent);
         return builder.getClass().getMethod("build").invoke(builder);
     }
 
