@@ -179,6 +179,52 @@ start:
         sub     x1, x22, x21
         bl      putkv
 
+        // Pointer authentication at EL1, as an arm64e kernel uses it: the IA and GA keys written, EnIA, EnIB, EnDA
+        // and EnDB set, a pointer signed (PACIA) and authenticated back (AUTIA), a generic PAC (PACGA), then an AUTIA
+        // with the wrong modifier: with FEAT_FPAC that one traps (an EXCEPTION line, EC 0x1c), else it gives a
+        // pointer with an error code in it. A key write or PAC instruction the hypervisor traps also shows as an
+        // EXCEPTION line. With the MMU on (39-bit VA): the PAC sits in bits 39 to 54 and 56 to 63.
+        movz    x1, #0x1111
+        movk    x1, #0x2222, lsl #16
+        movk    x1, #0x3333, lsl #32
+        movk    x1, #0x4444, lsl #48
+        msr     S3_0_C2_C1_0, x1        // APIAKEYLo_EL1
+        msr     S3_0_C2_C1_1, x1        // APIAKEYHi_EL1
+        msr     S3_0_C2_C3_0, x1        // APGAKEYLo_EL1
+        msr     S3_0_C2_C3_1, x1        // APGAKEYHi_EL1
+        isb
+        mrs     x1, sctlr_el1
+        orr     x1, x1, #(1 << 31)      // EnIA
+        orr     x1, x1, #(1 << 30)      // EnIB
+        orr     x1, x1, #(1 << 27)      // EnDA
+        orr     x1, x1, #(1 << 13)      // EnDB
+        msr     sctlr_el1, x1
+        isb
+        adr     x0, s_sctlr_pac
+        mrs     x1, sctlr_el1
+        bl      putkv
+        adr     x25, _head              // a pointer of ours
+        mov     x26, #0x42              // the modifier
+        mov     x27, x25
+        pacia   x27, x26
+        adr     x0, s_pac_signed
+        mov     x1, x27
+        bl      putkv
+        mov     x28, x27
+        autia   x28, x26
+        adr     x0, s_pac_auth
+        mov     x1, x28
+        bl      putkv
+        pacga   x1, x25, x26
+        adr     x0, s_pacga
+        bl      putkv
+        mov     x28, x27
+        mov     x26, #0x43              // the wrong modifier
+        autia   x28, x26
+        adr     x0, s_pac_wrong
+        mov     x1, x28
+        bl      putkv
+
         // Every 4 KiB page of the RAM above the image, but the tree's 2 MiB blocks, gets its own address written and
         // then read back: what a VM of this size costs the host, and whether all of it is there. "MEM_AT" every 256 MiB.
         cbz     x24, 29f
@@ -478,6 +524,11 @@ s_sctlr_now: .asciz "SCTLR_EL1_ICACHE "
 s_loop_off:  .asciz "LOOP_MMUOFF_2E20_TICKS "
 s_sctlr_mmu: .asciz "SCTLR_EL1_MMU "
 s_loop_on:   .asciz "LOOP_MMUON_2E28_TICKS "
+s_sctlr_pac: .asciz "SCTLR_EL1_PAC "
+s_pac_signed: .asciz "PAC_SIGNED "
+s_pac_auth:  .asciz "PAC_AUTH "
+s_pacga:     .asciz "PACGA "
+s_pac_wrong: .asciz "PAC_WRONG_AUTH "
 s_mem_base:  .asciz "MEM_BASE "
 s_mem_size:  .asciz "MEM_SIZE "
 s_image:     .asciz "IMAGE "

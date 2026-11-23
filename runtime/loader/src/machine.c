@@ -369,8 +369,14 @@ xl_adt_node *xl_machine_tree(const xl_machine *m, const char **error)
     xl_adt_set_str(freq, "compatible", "oneios,cpufreq");
     reg(freq, m->armio_base, m->cpufreq_base, m->cpufreq_size);
   }
-  // XNU's PL011 console finds the node named "uart0" at soc_base + reg.
-  if (m->uart_size) {
+  // XNU's PL011 console finds the node named "uart0" at soc_base + reg; the native kernel's ns16550 driver (patch
+  // 0077) takes its reg as the physical address itself.
+  if (m->uart_size && m->uart_ns16550) {
+    xl_adt_node *uart = xl_adt_add(io, "uart0");
+    xl_adt_set_str(uart, "compatible", "ns16550a");
+    const uint64_t absolute[2] = { m->uart_base, m->uart_size };
+    xl_adt_set(uart, "reg", absolute, sizeof absolute);
+  } else if (m->uart_size) {
     xl_adt_node *uart = xl_adt_add(io, "uart0");
     xl_adt_set_str(uart, "compatible", "arm,pl011");
     reg(uart, m->armio_base, m->uart_base, m->uart_size);

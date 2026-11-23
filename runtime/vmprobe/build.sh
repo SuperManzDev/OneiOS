@@ -7,7 +7,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
 OUT=${1:-$repo/out/vmprobe}
 mkdir -p "$OUT"
-F=(--target=aarch64-none-elf -march=armv8-a -nostdlib -ffreestanding)
+F=(--target=aarch64-none-elf -march=armv8.3-a -nostdlib -ffreestanding)
 for v in "vmprobe 0x3f8 2" "vmprobe-qemu 0x09000000 1"; do
   set -- $v
   clang "${F[@]}" -DUART_BASE="$2" -DRAM_GIB_BLOCK="$3" -c "$here/probe.S" -o "$OUT/$1.o"

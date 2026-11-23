@@ -17,6 +17,7 @@ pub mod phone;
 pub mod pull;
 pub mod session;
 pub mod sparse;
+pub mod vmboot;
 pub mod vmprobe;
 
 use adb::Adb;
@@ -119,6 +120,26 @@ pub enum Command {
     Hugepool {
         #[command(subcommand)]
         command: HugepoolCommand,
+    },
+    /// The native kernel (an Image of runtime/loader's xnuloader-crosvm) booted in a protected VM of AVF's crosvm under
+    /// Gunyah, its console followed live; the VM's RAM and vCPUs from the Image's label. --stop ends a running one.
+    /// Refused during a session
+    VmBoot {
+        /// The Image (xnuloader-crosvm KERNEL OUT)
+        #[arg(long, value_name = "FILE", default_value = "out/crosvm/kernel.img")]
+        image: String,
+        /// Seconds before crosvm stop
+        #[arg(long, value_name = "SECONDS", default_value_t = 120)]
+        seconds: u32,
+        /// 2 MiB folios for the VM's RAM for the run (needs gh_hugepage_reserve's pool above ~0.5 GB)
+        #[arg(long)]
+        thp: bool,
+        /// Where serial.txt, crosvm.log, dmesg.txt, run.txt and fdt.dtb go
+        #[arg(long, value_name = "DIR", default_value = "phone-vmboot")]
+        out: String,
+        /// Stop the running VM now (crosvm stop through its socket) instead
+        #[arg(long)]
+        stop: bool,
     },
     /// One run of runtime/vmprobe's payload as a protected VM under Gunyah with AVF's crosvm: 1 vCPU, no device but
     /// the serial port; it powers off by itself, else crosvm stop after SECONDS. Refused during a session
@@ -378,6 +399,9 @@ pub fn main(cli: Cli) -> i32 {
             HugepoolCommand::Grow { want, mode, limit, out } => hugepool::grow(&adb, want, mode, limit, &out),
             HugepoolCommand::Acquire { want, mode, seconds } => hugepool::acquire(&adb, want, mode, seconds),
             HugepoolCommand::Unload => hugepool::unload(&adb),
+        }),
+        Command::VmBoot { image, seconds, thp, out, stop } => Adb::connect(serial).and_then(|adb| {
+            if stop { vmboot::stop(&adb) } else { vmboot::vm_boot(&adb, &image, &out, &vmboot::Options { seconds, thp }) }
         }),
         Command::VmProbe { payload, mem, timeout, out, thp } => {
             Adb::connect(serial).and_then(|adb| vmprobe::vm_probe(&adb, &payload, &out, &vmprobe::Options { mem, timeout, thp }))

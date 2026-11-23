@@ -39,6 +39,9 @@ typedef struct {
   uint64_t    armio_base, armio_size;     // must not start at 0 (pexpert takes it as the SoC base)
   uint64_t    gic_dist, gic_dist_size, gic_redist, gic_redist_size, gic_redist_stride;
   uint64_t    uart_base, uart_size;       // PL011, node "uart0"; size 0 for none
+  // The uart0 node an ns16550a (8250, byte-spaced) instead, its "reg" the absolute physical address: crosvm's serial
+  // ports sit at 0x3f8 and the like, below the arm-io window (kernel patch 0077, docs/native.md "A VM under Gunyah")
+  bool        uart_ns16550;
   const char *psci_method;                // "hvc" or "smc"
   xl_device   dev[XL_MAX_DEVICES];
   unsigned    ndev;

@@ -1,0 +1,116 @@
+diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
+--- a/pexpert/arm/pe_serial.c
++++ b/pexpert/arm/pe_serial.c
+@@ -733,6 +733,89 @@
+ 
+ /*****************************************************************************/
+ 
++#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE
++
++/*
++ * OneiOS native: the ns16550 (8250) with byte-spaced registers that a VM of Android's crosvm has (its four serial
++ * ports, at their I/O port numbers 0x3f8, 0x2f8, 0x3e8 and 0x2e8 as physical addresses; AVF's crosvm has no PL011).
++ * They sit below the arm-io window, which may not start at 0 (pe_arm_get_soc_base_phys): the node's "reg" is the
++ * absolute physical address, not an offset from the SoC base. Polled, 8-N-1, FIFOs on; crosvm needs no divisor.
++ * docs/native.md, "A VM under Gunyah".
++ */
++static volatile uint8_t *ns16550_registers = NULL;
++
++#define NS16550_RBR_THR  0      /* read: receive buffer; write: transmit holding */
++#define NS16550_IER      1
++#define NS16550_FCR      2
++#define NS16550_LCR      3
++#define NS16550_MCR      4
++#define NS16550_LSR      5
++#define NS16550_LSR_DR   0x01   /* data ready */
++#define NS16550_LSR_THRE 0x20   /* transmit holding register empty */
++
++static unsigned int
++ns16550_uart_transmit_ready(void)
++{
++	return (ns16550_registers[NS16550_LSR] & NS16550_LSR_THRE) != 0;
++}
++
++static void
++ns16550_uart_transmit_data(uint8_t c)
++{
++	ns16550_registers[NS16550_RBR_THR] = c;
++}
++
++static unsigned int
++ns16550_uart_receive_ready(void)
++{
++	return (ns16550_registers[NS16550_LSR] & NS16550_LSR_DR) != 0;
++}
++
++static uint8_t
++ns16550_uart_receive_data(void)
++{
++	return ns16550_registers[NS16550_RBR_THR];
++}
++
++static void
++ns16550_uart_init(void)
++{
++	ns16550_registers[NS16550_IER] = 0x00;  /* no interrupts: polled */
++	ns16550_registers[NS16550_LCR] = 0x03;  /* 8-N-1, DLAB clear */
++	ns16550_registers[NS16550_FCR] = 0x07;  /* FIFOs on, both cleared */
++	ns16550_registers[NS16550_MCR] = 0x03;  /* DTR, RTS */
++}
++
++SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) ns16550_uart_serial_functions =
++{
++	.init = ns16550_uart_init,
++	.transmit_ready = ns16550_uart_transmit_ready,
++	.transmit_data = ns16550_uart_transmit_data,
++	.receive_ready = ns16550_uart_receive_ready,
++	.receive_data = ns16550_uart_receive_data,
++	.device = SERIAL_NS16550_UART
++};
++
++static void
++ns16550_uart_setup(const DeviceTreeNode *const devicetree_node)
++{
++	const struct {
++		uint64_t block_base; // the absolute physical address (see above)
++		uint64_t block_size;
++	} *reg;
++	unsigned int reg_size;
++	if (SecureDTGetProperty(devicetree_node, "reg", (const void **)&reg, &reg_size) != kSuccess) {
++		panic("Unable to find the 'reg' property on the ns16550 UART devicetree node");
++	}
++	assert(reg_size == sizeof(*reg));
++	ns16550_registers = (volatile uint8_t *)ml_io_map(reg->block_base, reg->block_size);
++	register_serial_functions(&ns16550_uart_serial_functions);
++}
++
++#endif /* XNU_ONEIOS_NATIVE */
++
++/*****************************************************************************/
++
+ /**
+  * Output @str onto every registered serial interface by polling.
+  *
+@@ -809,6 +892,9 @@
+ #ifdef PL011_UART
+ 	{ .compatible = "arm,pl011", .setup = pl011_uart_setup },
+ #endif // PL011_UART
++#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE
++	{ .compatible = "ns16550a", .setup = ns16550_uart_setup },
++#endif // XNU_ONEIOS_NATIVE
+ };
+ 
+ /**
+diff --git a/pexpert/pexpert/arm/protos.h b/pexpert/pexpert/arm/protos.h
+--- a/pexpert/pexpert/arm/protos.h
++++ b/pexpert/pexpert/arm/protos.h
+@@ -48,6 +48,9 @@
+ 	SERIAL_DOCKCHANNEL=0x2,
+ 	SERIAL_PL011_UART=0x4,
+ 	SERIAL_DCC_UART=0x8
++#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE
++	, SERIAL_NS16550_UART=0x10
++#endif
+ } serial_device_t;
+ 
+ kern_return_t serial_irq_enable(serial_device_t device);

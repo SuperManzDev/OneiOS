@@ -249,6 +249,12 @@
 # calls in them stay hosted: the blocked-thread dump, the user backtraces, and the restart into a new seed (on a native
 # machine PEHaltRestart). makedefs passes -DXNU_ONEIOS_NATIVE=1. For the hosted kernel nothing compiles differently.
 0076-native-os-layer.patch
+# native-ns16550-uart (2026-11-23): a serial console for the native kernel in a VM of Android's crosvm (docs/native.md,
+# "A VM under Gunyah"), whose only serial ports are ns16550a (8250, byte-spaced registers) at 0x3f8, 0x2f8, 0x3e8 and
+# 0x2e8: pe_serial.c's driver for "ns16550a" (polled, 8-N-1, FIFOs on), its node's "reg" an absolute physical address
+# (the ports sit below the arm-io window, which may not start at 0), and SERIAL_NS16550_UART in pexpert's serial ids.
+# All under #if XNU_ONEIOS_NATIVE: the hosted kernel compiles as before.
+0077-native-ns16550-uart.patch
 # radio2: no numbered patch for the Wi-Fi: net/ is an archive of this build (kernel/build-hosted.sh,
 # oneios-tool kernel gen net), started by oneios_drivers_start's oneios_net_start (weak in drivers/bridge/OneiOSBridge.c).
 # net/README.md: IO80211Controller/IO80211Interface under the collection's original IOEthernetController and

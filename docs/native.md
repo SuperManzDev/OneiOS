@@ -341,10 +341,17 @@ reads no other guest RAM: protected VM).
    temporary root (`hugepool load`, `hugepool grow`); `hugepool unload` gives the 3 GiB back.
    The other paths stay: the hosted one that runs today, and XNU alone (the hand-off under Samsung's protections,
    the command-mode panel, UFS behind file-based encryption).
-2. On the bench: the unlock and the Home screen (more time, or less work: the display's size, the jobs that a bench has
+2. **Later, the owner asked (2026-11-23): tell gh_hugepage_reserve's authors about its fragility** (an issue on
+   https://github.com/Droid-VM/gh-hugepage-reserve, with the owner's go before anything is posted): an insmod line
+   without `pageblock_order_val` leaves `gh_cma_order` at -1, so `GH_S` is `1u << (-1 - 9)` (undefined; 4 Mi on
+   arm64) and the first acquire panics the kernel in `gh_try_complete_block`, which reads `gh_slot_at()` without a
+   NULL check (crash 1 above: the panic text, the registers, the S25's 22 RAM ranges). Suggest: refuse or default
+   the order at insmod, and the NULL checks in the sibling loops (`gh_try_complete_block`, `gh_classify`,
+   `gh_rehome`).
+3. On the bench: the unlock and the Home screen (more time, or less work: the display's size, the jobs that a bench has
    no use for), a network (QEMU's virtio-net: mDNSResponder, rapportd and the others have nothing to talk to), the RTC
    (virt's PL031) for the clock, and the CPU report's idle time (`hosted_processors_idle_mach` from XNU's own processor
    idle counters, so that `all` is bounded by the CPUs). The bench's speed is QEMU's (TCG on x86): it proves the paths,
    not the frame rate.
-3. The phone's ID registers (FEAT_LVA: the assertion above), from the first test's payload.
-4. The Adreno 830's kernel side for XNU with Turnip (references: UniXNU's Adreno740, UniXNU-houji's A750 port).
+4. The phone's ID registers: read by vmprobe run 1 (no FEAT_LVA, 4 KiB only, PAC APA 5).
+5. The Adreno 830's kernel side for XNU with Turnip (references: UniXNU's Adreno740, UniXNU-houji's A750 port).
