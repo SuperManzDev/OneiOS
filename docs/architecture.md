@@ -93,8 +93,9 @@ capabilities, never grabbed). The audit table of every path, and each bridge's s
 ## What it is not
 
 - Not a VM: no hypervisor, no Gunyah, no bootloader unlock (xnuhost is a Linux process). The phone's Gunyah runs our
-  protected VMs at the core's own speed, but their RAM ends near 0.5 GB (its heap of 18 MiB, 4 KiB pages; tried
-  2026-11-20 to 23): too little for iOS, `docs/native.md` "A VM under Gunyah".
+  protected VMs at the core's own speed; in 4 KiB pages their RAM ends near 0.5 GB (its heap of 18 MiB), and with
+  Droid-VM's gh_hugepage_reserve and its pool grown while One UI's framework is stopped a 3 GiB VM ran (2026-11-23):
+  `docs/native.md` "A VM under Gunyah", the road to an iOS guest there.
 - Not an emulator: no instruction translation (that is the vphone app's QEMU path).
 - Not a secure store: no Secure Enclave, no passcode, no lock. The guest's key store is software with keys anyone can
   derive (`kernel/patches/oneios-hosted/keystore/README.md`); the Data store is as private as One UI keeps the file.

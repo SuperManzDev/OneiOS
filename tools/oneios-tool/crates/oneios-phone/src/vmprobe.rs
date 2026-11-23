@@ -240,9 +240,18 @@ pub fn vm_probe(adb: &Adb, payload: &str, out: &str, o: &Options) -> Result<()> 
     if !up.trim().is_empty() {
         bail!("a probe VM is still up on the phone: {}", up.trim());
     }
-    let meminfo = adb.root_ok("grep '^MemAvailable:' /proc/meminfo\n", "the memory check")?;
+    // gh_hugepage_reserve's pool (`phone hugepool`) is RAM set aside for a VM that MemAvailable does not count: what
+    // the VM takes from it leaves Android's own as it is
+    let meminfo = adb.root_ok(
+        "grep '^MemAvailable:' /proc/meminfo; grep '^pool_avail=' /sys/module/gh_hugepage_reserve/parameters/refill_stat 2>/dev/null\n",
+        "the memory check",
+    )?;
     let available = mem_available_mib(&meminfo).with_context(|| format!("no MemAvailable in \"{}\"", meminfo.trim()))?;
-    check_mem(o.mem, available)?;
+    let pool_mib = crate::hugepool::stat(&meminfo, "pool_avail").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) * 2;
+    if pool_mib > 0 {
+        println!("vm-probe: gh_hugepage_reserve holds {pool_mib} MiB for VMs, beside Android's {available} MiB available");
+    }
+    check_mem(o.mem, available + pool_mib.min(o.mem as u64))?;
     adb.root_ok(&format!("mkdir -p {DIR} && chmod 777 {DIR}\n"), "the probe's folder")?;
     adb.push(payload, &format!("{DIR}/probe.bin"))?;
     println!("vm-probe: {} bytes, sha256 {sha}; crosvm runs it (1 vCPU, {} MiB, at most {} s, then crosvm stop)", data.len(), o.mem, o.timeout);

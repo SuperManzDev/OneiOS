@@ -305,12 +305,42 @@ for android15-6.6 by digest, under bubblewrap); `oneios-tool phone hugepool` loa
   (slot 1024, 4 GiB) and read a NULL slot. `hugepool load` now passes `pageblock_order_val` (refusing a phone
   whose order is not 9), `migrate_cma_val=-1` and `pool_want_with_cma=0` (the CMA side off). The module's own
   fragility (no check of that value, no NULL check there) is the authors' to hear about.
+- Load 2 (`pageblock_order_val=9`, `pb_order=9` in its line), then `acquire 1` beside One UI: 11 pages of 2 MiB,
+  "migration exhausted", no crash.
+- **Grow 1, the owner's cycle** (`hugepool grow --want 1536 --mode 3 --limit 180`; `logs/pa3q-hugepool/grow1/`,
+  the phone's `cycle.log`): One UI's framework stopped at 02:16:41 (MemFree 0.66 GB to 2.15 GB), the file cache
+  dropped (MemFree 9.14 GB), the module's acquire took 680, 1,086, 1,401 and then **1,536 pages of 2 MiB (3 GiB),
+  "reached target", in 20 s**; One UI started again at 02:17:03, system_server at 02:17:06, user 0 unlocked
+  after 13 s: One UI was down about 37 s, and **the phone did not restart** (the temporary root stays). Samsung's
+  `/dev/watchdog` refused the feeder's first writes ("Device or resource busy") while system_server went; One UI
+  was back long before its 100 s. The tool gave up on the start's adb status 255 (adb goes with the framework)
+  while the cycle ran to its end on the phone: the start now counts as started when the phone said so.
+- **Run 9, 1 GiB VM** (`vm-probe --mem 1024 --thp`, `logs/pa3q-vmprobe/run9-1g-pool/`): the whole probe, **261,120
+  pages written and read back, none bad**, in 0.70 s of first touches (2.7 us a page on average against 16.7 us in
+  4 KiB pages), ended by itself; `total_served` 512 (the VM's RAM came from the pool) and the pool full again after.
+- **Run 10, 3 GiB VM** (`--mem 3072 --thp`, `run10-3g-pool/`): **785,408 pages (3,068 MiB) written and read back,
+  none bad**, 0.89 s of first touches, ended by itself; Android's MemAvailable the same before and after (2.84 and
+  2.88 GB). `vm-probe` counts the pool beside MemAvailable for its 1 GiB floor.
+
+**Verdict, revised: a VM of iOS's size fits on this phone** [F], with gh_hugepage_reserve loaded after the
+temporary root and its pool grown once per boot with One UI's framework stopped for under a minute. Its vCPU runs at
+the core's speed, PSCI ends it, 3 GiB of RAM are there. crosvm's machine for it (`fdt.dtb` of run 10): "linux,dummy-
+virt", RAM at `0x80000000`, GICv3 (GICD `0x3fff0000`, GICR `0x3ffd0000`), the arch timer, four ns16550a (`0x3f8`,
+`0x2f8`, `0x3e8`, `0x2e8`), PSCI by HVC, a PL030 RTC at `0x2000`, a vCPU stall detector at `0x3000`
+("qemu,vcpu-stall-detector": a guest must pet it), virtio over PCI (`pci-host-cam-generic`, CAM `0x10000`, BARs
+assigned, `linux,pci-probe-only`) whose DMA goes through an 8 MiB `restricted-dma-pool` at `0x1_3f800000` (the host
+reads no other guest RAM: protected VM).
 
 ## Next
-1. The owner's choice, with the facts above. The Gunyah VM was tried (2026-11-20 to 23) and does not fit iOS on this
-   phone ("A VM under Gunyah", verdict). Left: the hosted path that runs today, or XNU alone, whose unknowns are the
-   hand-off under Samsung's protections, the command-mode panel with no display driver, and UFS behind file-based
-   encryption (a RAM disk cannot hold the 16 GB image set).
+1. The Gunyah VM fits iOS with gh_hugepage_reserve ("Verdict, revised"). Its road to an iOS guest, each step a
+   test on the phone: the native kernel booted by crosvm (a Linux-Image stub that places the kernel collection, its
+   device tree from crosvm's `fdt.dtb` and the boot arguments, as xnuloader-qemu does for QEMU); its console on the
+   8250 at `0x3f8`, PSCI by HVC, the stall detector petted; virtio over PCI with every buffer in the restricted DMA
+   pool (or Droid-VM's crosvm, virtio-mmio as on the bench, BSD-3); the image set's disks as virtio-blk from /data;
+   then the display, input and the GPU (drm2kgsl, as the hosted path's). The pool is grown once per boot after the
+   temporary root (`hugepool load`, `hugepool grow`); `hugepool unload` gives the 3 GiB back.
+   The other paths stay: the hosted one that runs today, and XNU alone (the hand-off under Samsung's protections,
+   the command-mode panel, UFS behind file-based encryption).
 2. On the bench: the unlock and the Home screen (more time, or less work: the display's size, the jobs that a bench has
    no use for), a network (QEMU's virtio-net: mDNSResponder, rapportd and the others have nothing to talk to), the RTC
    (virt's PL031) for the clock, and the CPU report's idle time (`hosted_processors_idle_mach` from XNU's own processor

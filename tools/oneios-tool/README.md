@@ -1596,9 +1596,12 @@ check, THP set and written back, the verdict). Runs 1 to 4 on the S25 (2026-11-2
 VM at the core's own speed and it ends by itself; 128 MiB of RAM works, 1 GiB stops at 256 MiB; the results are in
 `docs/native.md` "A VM under Gunyah".
 
-**`phone dmesg [--grep REGEX]... [--tail N]`** (2026-11-23; `crates/oneios-phone/src/hw.rs`). Read only: root's `dmesg`,
-filtered on the PC (any of the REGEXes; `(?i)` for no case), the last N lines (200). The phone's kernel log holds only
-minutes of lines (Wi-Fi's driver writes most of them). 1 unit test.
+**`phone dmesg [--grep REGEX]... [--tail N] [--previous]`** (2026-11-23; `crates/oneios-phone/src/hw.rs`). Read only:
+root's `dmesg`, filtered on the PC (any of the REGEXes; `(?i)` for no case), the last N lines (200). The phone's kernel
+log holds only minutes of lines (Wi-Fi's driver writes most of them). `--previous`: the log of the boot before this
+one, as the phone kept it through the restart, by name (`/sys/fs/pstore/console-ramoops-0`, `console-ramoops`,
+`dmesg-ramoops-0`, Samsung's `/proc/last_kmsg`; each that exists after a `=== NAME` line): where a panic is read
+(crash 1 of gh_hugepage_reserve, `docs/native.md`). 1 unit test.
 
 **`phone hugeblocks [--free]`** (2026-11-23; `crates/oneios-phone/src/vmprobe.rs`). Refused during a session; no VM:
 MemFree, MemAvailable, Cached and the free memory in blocks of 2 MiB or more (buddyinfo's orders 9 and 10, every
@@ -1633,10 +1636,15 @@ allocations, so that Gunyah lends a VM's RAM in 2 MiB pieces (`docs/native.md` "
   its trap and the failsafe (LIMIT s after the stop) comes first; a system_server that is not up 90 s after the
   start, or dies, makes the phone restart (`sys.powerctl`, the return's last resort). Nothing is written under
   `/sys/power`. The tool follows `cycle.log` over adb, waits through adb's absence, and ends on `result`.
+- `acquire [--want N] [--mode 1|2|3] [--seconds 60]`: the module's own acquire beside One UI, nothing stopped (the
+  want first when given; `acquire_active` polled each second, `acquire 0` after SECONDS), then `status`.
 - `unload`: `rmmod`, refused while a VM holds pages or an acquire runs.
+- `load` passes `pageblock_order_val` from `/proc/pagetypeinfo` and refuses a phone whose order is not 9: without it
+  the module takes -1 for its block order and panics the kernel in its first acquire (crash 1, 2026-11-23).
 3 unit tests (the preflight's parsing; the cycle's order: preflight before any change, the way back before the stop,
 the feeder's end after system_server, one start, the only writes; the cycle parses under `bash --posix -n` and
-`sh -n`, and was checked with `dash -n`). Not yet run on the phone.
+`sh -n`, and was checked with `dash -n`). Run on the S25 on 2026-11-23: load, acquire, grow to 3 GiB with One UI down
+about 37 s and no restart of the phone (`docs/native.md` "gh_hugepage_reserve with One UI stopped").
 
 **`phone cpu [--trace SECONDS] [--out FILE]`** (fix-host-overhead, 2026-11-15; `crates/oneios-phone/src/cpu.rs`). Read
 only, with or without a session: for each of cpu0-7 by name, the core (`regs/identification/midr_el1`), `cpu_capacity`,

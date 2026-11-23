@@ -359,10 +359,17 @@ pub fn grow(adb: &Adb, want: u32, mode: u32, limit: u32, out: &str) -> Result<()
     adb.root_ok(&format!("mkdir -p {DIR} && chmod 777 {DIR} && rm -f {DIR}/cycle.log {DIR}/result\n"), "the cycle's folder")?;
     adb.push(local.to_str().context("path")?, &format!("{DIR}/cycle.sh"))?;
     println!("grow: One UI's framework stops for at most {limit} s while the pool grows to {want} pages of 2 MiB");
-    adb.root_ok(
-        &format!("chmod 755 {DIR}/cycle.sh; (command -v setsid >/dev/null && setsid /system/bin/sh {DIR}/cycle.sh || /system/bin/sh {DIR}/cycle.sh) </dev/null >/dev/null 2>&1 &\necho started\n"),
-        "the cycle's start",
-    )?;
+    // started is started: the adb shell that starts it may end with 255 when One UI's framework goes (grow 1,
+    // 2026-11-23: the cycle ran to its end while the tool had given up on that status)
+    let r = adb.root(&format!(
+        "chmod 755 {DIR}/cycle.sh; (command -v setsid >/dev/null && setsid /system/bin/sh {DIR}/cycle.sh || /system/bin/sh {DIR}/cycle.sh) </dev/null >/dev/null 2>&1 &\necho started\n"
+    ))?;
+    if !r.out.contains("started") {
+        bail!("the cycle did not start (status {}): {}", r.status, r.err.trim());
+    }
+    if !r.ok() {
+        println!("(the start's adb shell ended with status {}: adb went with One UI's framework; following the log)", r.status);
+    }
     // its log, over adb, which may go and come back while system_server is gone
     let t0 = Instant::now();
     let mut printed = 0usize;
