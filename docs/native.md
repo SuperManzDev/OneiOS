@@ -517,6 +517,31 @@ an edge); the last began at x 49.9% y 100.0%, the last lift was at x 49.9% y 50.
 service's client(s), 0 dropped". Every piece of the touch between crosvm and SpringBoard works; the touchscreen's own
 frames through the forwarder are the one piece a finger still has to show.
 
+**Boot 5 on the S25, 2026-11-23: the owner's finger** (`phone vm-boot --image out/crosvm/kernel-touch.img --seconds 900
+--thp`, `logs/pa3q-vmboot/boot5/`; the Image `--ram-mib 2048`: `hugepool acquire` brought the pool from 680 free pages,
+479 "served" with no VM up, to 992 and no further: "acquire_stop_reason=migration"). The forwarder read the
+touchscreen from the first seconds ("touch screen: 808 virtio-input events, 238 frames, 221 HID reports ... 14 contacts
+begun", while the kernel was still starting); then the lock screen, the unlock, **Settings opened by a tap**
+(`finger3.png`, "Preferences[246]" in the guest's CPU report) and **Control Center pulled down over it**
+(`finger4.png`): 6,088 events, 1,761 HID reports, 45 contacts in the first three minutes. The touch is done. The owner
+ended the run at 485 s with volume down held 5 s ("touch: volume down held 5 s: the VM stops"): 11,996 touch frames
+passed on, 207 contacts, 10,007 HID reports, SpringBoard up throughout, the touchscreen Android's again.
+
+### Four vCPUs (step 5, 2026-11-23)
+Nothing new was needed: `xnuloader-crosvm --cpus 4` gives `/cpus/cpu0..3` (reg = Aff0, as crosvm numbers its vCPUs),
+four GICv3 redistributors right below the distributor (`0x3ff70000`, 0x20000 each, where crosvm puts them for four
+vCPUs) and `/psci` with method `hvc`; the kernel's ArmCpu (`external/Droid-VM-UniXNU/drivers/ArmCpu`) reads that method
+and starts each core with PSCI CPU_ON (0xc4000003) at the kernel's reset vector page, which Gunyah serves for crosvm's
+protected VM.
+
+**Boot 6 on the S25, 2026-11-23** (`--ram-mib 2048 --cpus 4`, `phone vm-boot --image out/crosvm/kernel-4cpu.img
+--seconds 900 --thp`, `logs/pa3q-vmboot/boot6/`; the pool at 974 pages after `hugepool acquire`): the guest's CPU report
+during the boot "(all 264%)" (several processes at once: more than one core); backboardd's first frame 96 s after the
+start (100 to 110 s on one vCPU: the boot's early part is mostly one thread and the disks), and the owner **already in
+the Home screen at 122 s**, the App Library at 136 s, the Phone app and its menu at 149 and 162 s (`strip.png`; on one
+vCPU the lock screen itself came at about 170 s). crosvm at 144% of a host core while the owner used the Phone app,
+the guest's report at 15 to 21% (of 400), 41.8 °C (thermal_zone0), SpringBoard without a restart.
+
 ## Next
 1. The Gunyah VM fits iOS with gh_hugepage_reserve ("Verdict, revised"). Its road to an iOS guest, each step a
    test on the phone: the native kernel booted by crosvm with its console on the 8250 at `0x3f8` (done: "The native
@@ -524,10 +549,10 @@ frames through the forwarder are the one piece a finger still has to show.
    as virtio-blk from /data (done: step 2, boot 2: launchd, the 60 boot tasks, the daemons, SpringBoard); the screen
    (done: step 3, boot 3: the boot video in the pool, the lock screen on the panel, SpringBoard stays up); touch
    (done: step 4, boot 4b: crosvm's multi-touch device fed by `displayctl touch`, the kernel's virtio-input on PCI, the
-   Home screen from the test swipe; a finger on the touchscreen still to be seen); next the clock (crosvm's RTC in the
+   Home screen from the test swipe, boot 5: the owner's finger, Settings and Control Center); next the clock (crosvm's RTC in the
    VM's tree, or the time as a boot argument), less work per frame (the guest copies all 17 MiB of a frame for 69
    changed rows: the differential copy, `sheng-fb-diff=1`, or the compositor's damage; the helper's copy loop at
-   uclamp.min 1024), more vCPUs (PSCI CPU_ON by HVC); then the GPU (drm2kgsl, as the hosted path's). The GPU, the
+   uclamp.min 1024), more vCPUs (done: step 5, boot 6: four, ArmCpu's PSCI CPU_ON by HVC); then the GPU (drm2kgsl, as the hosted path's). The GPU, the
    owner's question (2026-11-23: a host module that shares memory with the VM, "gunyah_host_share", none such is
    published): the Adreno stays Android's (One UI needs it, and its power, clocks and GMU firmware are kgsl's), so the
    VM's GPU work goes to Android's kgsl and its buffers must lie in memory both sides keep. Gunyah lends, shares or

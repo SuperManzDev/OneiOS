@@ -439,5 +439,6 @@ guest is still iPhone18,2 iOS 27.0.1.
   vCPU. Step 3, the screen (the boot video and a frame count in the pool, read by `displayctl pool` out of crosvm's
   own mapping of it; boot 3): **iOS's lock screen on the S25's panel**, SpringBoard up for the whole run. Step 4, the
   touch (crosvm's multi-touch device fed by `displayctl touch`, which takes the touchscreen; the kernel's virtio-input on
-  PCI with its queues in the pool; boot 4b): a test swipe opened **iOS's Home screen**. Next: a finger's touches, the
-  clock, less work per frame, more vCPUs.
+  PCI with its queues in the pool; boot 4b): a test swipe opened **iOS's Home screen**, then the owner's finger (Settings, Control
+  Center; boot 5). Step 5, four vCPUs (ArmCpu's PSCI CPU_ON by HVC; boot 6): the Home screen and the apps in about two
+  minutes. Next: the clock, less work per frame, the GPU.
