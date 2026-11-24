@@ -64,11 +64,13 @@ pub struct Options {
     pub restart: bool,
     /// Then `ioslog boots`, `ioslog checks` and `ioslog health` on the copy (`ioslog-health.txt` beside it).
     pub ioslog: bool,
+    /// The store on the phone: None, the hosted session's (STAGE/data/data.img); vm-boot's is --vm (vmboot::DIR/data.img)
+    pub image: Option<String>,
 }
 
 impl Default for Options {
     fn default() -> Options {
-        Options { chunk: None, retries: 5, backoff: 2, stall: 120, verify: Verify::Chunk, restart: false, ioslog: false }
+        Options { chunk: None, retries: 5, backoff: 2, stall: 120, verify: Verify::Chunk, restart: false, ioslog: false, image: None }
     }
 }
 
@@ -616,7 +618,10 @@ pub fn pull_data(adb: &Adb, out: &str, o: &Options) -> Result<()> {
     if o.chunk == Some(0) {
         bail!("--chunk 0: a chunk is at least 1 MiB");
     }
-    let image = format!("{STAGE}/data/data.img");
+    let image = o.image.clone().unwrap_or_else(|| format!("{STAGE}/data/data.img"));
+    if !image.starts_with("/data/local/tmp/") || !image.ends_with(".img") || image.contains("..") || image.contains(char::is_whitespace) {
+        bail!("{image}: a store under /data/local/tmp, named *.img");
+    }
     let (size, mtime) = stat(adb, &image)?;
     let part = format!("{out}.part");
     let list = format!("{part}.progress");

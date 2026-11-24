@@ -199,6 +199,7 @@ xl_adt_node *xl_machine_tree(const xl_machine *m, const char **error)
   xl_adt_set_u32(chosen, "kernel-ctrr-to-be-enabled", 0);
   if (m->panic_size) xl_adt_set_u32(chosen, "embedded-panic-log-size", (uint32_t)m->panic_size);
   if (m->text_fixups && m->text_fixups_length) xl_adt_set(chosen, "text-fixups", m->text_fixups, m->text_fixups_length);
+  if (m->prime_list && m->prime_list_length) xl_adt_set(chosen, "oneios-prime-list", m->prime_list, m->prime_list_length);
   {
     uint8_t image[8192];
     xl_nvram_proxy(image);
@@ -334,8 +335,9 @@ xl_adt_node *xl_machine_tree(const xl_machine *m, const char **error)
     const xl_device *d = &m->dev[i];
     char name[32];
     const char *compat;
-    if (d->pci && d->kind != XL_DEV_BLOCK && d->kind != XL_DEV_DATA_STORE && d->kind != XL_DEV_INPUT)
-      FAIL("only a disk or the input bus can be on PCI");
+    if (d->pci && d->kind != XL_DEV_BLOCK && d->kind != XL_DEV_DATA_STORE && d->kind != XL_DEV_INPUT && d->kind != XL_DEV_GPU &&
+        d->kind != XL_DEV_SND && d->kind != XL_DEV_NET)
+      FAIL("only a disk, the input bus, the GPU, the sound card or the network card can be on PCI");
     switch (d->kind) {
     case XL_DEV_BLOCK:
       snprintf(name, sizeof name, d->pci ? "virtio-pci-%u" : "virtio-mmio-%u", blocks++);
@@ -347,9 +349,21 @@ xl_adt_node *xl_machine_tree(const xl_machine *m, const char **error)
       if (d->pci) { snprintf(name, sizeof name, "input-pci"); compat = "oneios,virtio-input-pci"; }
       else { snprintf(name, sizeof name, "input-%u", inputs++); compat = "droidvm,virtio-input"; }
       break;
-    case XL_DEV_NET:        snprintf(name, sizeof name, "net"); compat = "droidvm,net"; break;
-    case XL_DEV_GPU:        snprintf(name, sizeof name, "virtio-gpu"); compat = "droidvm,virtio-gpu"; break;
-    case XL_DEV_SND:        snprintf(name, sizeof name, "virtio-snd"); compat = "droidvm,virtio-snd"; break;
+    case XL_DEV_NET:
+      // on PCI: bus 0 of crosvm's ECAM, where the kernel takes the first virtio-pci network card (DroidVMVirtioNet.c, staged)
+      snprintf(name, sizeof name, "net");
+      compat = d->pci ? "oneios,virtio-net-pci" : "droidvm,net";
+      break;
+    case XL_DEV_GPU:
+      // on PCI: a virtio-pci function, its configuration space as reg (DroidVMVirtioGpu.cpp, staged/gpu.rs TRANSPORT_PCI)
+      snprintf(name, sizeof name, "virtio-gpu");
+      compat = d->pci ? "oneios,virtio-gpu-pci" : "droidvm,virtio-gpu";
+      break;
+    case XL_DEV_SND:
+      // on PCI: bus 0 of crosvm's ECAM, where the kernel takes the first virtio-pci sound card (DroidVMVirtioSnd.c, staged)
+      snprintf(name, sizeof name, "virtio-snd");
+      compat = d->pci ? "oneios,virtio-snd-pci" : "droidvm,virtio-snd";
+      break;
     case XL_DEV_BRIDGE:     snprintf(name, sizeof name, "bridge"); compat = "oneios,bridge"; break;
     case XL_DEV_CAMERA:     snprintf(name, sizeof name, "camera"); compat = "oneios,camera"; break;
     case XL_DEV_MEDIA:      snprintf(name, sizeof name, "virtio-media-0"); compat = "droidvm,virtio-media"; break;

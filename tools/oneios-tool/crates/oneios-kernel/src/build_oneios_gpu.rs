@@ -50,7 +50,7 @@
 use crate::class_record::{pylist, ClassRecord};
 use crate::drivers_build::Record;
 use crate::gen::{self, fail, Compile, Ctx};
-use crate::staged::gpu::{GPU, GPU3D, TRANSPORT};
+use crate::staged::gpu::{GPU, GPU3D, GPU3D_NATIVE, TRANSPORT, TRANSPORT_PCI};
 use anyhow::{Context, Result};
 use oneios_common::pyjson::Value;
 use std::collections::BTreeSet;
@@ -162,6 +162,31 @@ pub fn staged_transport_text(text: String) -> std::result::Result<String, String
     for (anchor, replacement) in TRANSPORT {
         if text.matches(anchor).count() != 1 {
             return Err(format!("DroidVMVirtioGpu.cpp no longer has exactly one {}", anchor.trim()));
+        }
+        text = text.replace(anchor, replacement);
+    }
+    Ok(text)
+}
+
+/// DroidVMVirtioGpu.cpp, after staged_transport_text, with staged/gpu.rs TRANSPORT_PCI: the native kernel's GPU as a
+/// virtio-pci function of crosvm's ECAM host. Err is the anchor that is not there exactly once.
+pub fn staged_transport_pci_text(text: String) -> std::result::Result<String, String> {
+    let mut text = text;
+    for (anchor, replacement) in TRANSPORT_PCI {
+        if text.matches(anchor).count() != 1 {
+            return Err(format!("DroidVMVirtioGpu.cpp no longer has exactly one {}", anchor.trim()));
+        }
+        text = text.replace(anchor, replacement);
+    }
+    Ok(text)
+}
+
+/// DroidVMVirtioGpu3D.cpp, after staged_3d_text, with staged/gpu.rs GPU3D_NATIVE: the native kernel logs refused user calls.
+pub fn staged_3d_native_text(text: String) -> std::result::Result<String, String> {
+    let mut text = text;
+    for (anchor, replacement) in GPU3D_NATIVE {
+        if text.matches(anchor).count() != 1 {
+            return Err(format!("DroidVMVirtioGpu3D.cpp no longer has exactly one {}", anchor.trim()));
         }
         text = text.replace(anchor, replacement);
     }
@@ -298,11 +323,16 @@ pub fn main() -> Result<()> {
     let staged_dir = out.join("staged");
     gen::mkdirs(&staged_dir)?;
     let staged_3d = staged_dir.join("DroidVMVirtioGpu3D.cpp");
-    gen::write_text(&staged_3d, &staged_3d_text(gen::read_text(&sources[2])?).map_err(|e| anyhow::anyhow!("build-oneios-gpu: {e}"))?)?;
+    gen::write_text(&staged_3d,
+                    &staged_3d_text(gen::read_text(&sources[2])?)
+                        .and_then(staged_3d_native_text)
+                        .map_err(|e| anyhow::anyhow!("build-oneios-gpu: {e}"))?)?;
     // DroidVMVirtioGpu.cpp the same way (staged/gpu.rs TRANSPORT: the control queue as long as the device takes).
     let staged_transport = staged_dir.join("DroidVMVirtioGpu.cpp");
     gen::write_text(&staged_transport,
-                    &staged_transport_text(gen::read_text(&sources[1])?).map_err(|e| anyhow::anyhow!("build-oneios-gpu: {e}"))?)?;
+                    &staged_transport_text(gen::read_text(&sources[1])?)
+                        .and_then(staged_transport_pci_text)
+                        .map_err(|e| anyhow::anyhow!("build-oneios-gpu: {e}"))?)?;
     let mut objects = Vec::new();
     for source in &sources {
         let compiled = if source == &sources[2] { &staged_3d } else if source == &sources[1] { &staged_transport } else { source };

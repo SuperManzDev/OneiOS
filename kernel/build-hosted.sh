@@ -118,12 +118,14 @@ stage_tool
 if [ "$MACHINE" = native ]; then
   # The native kernel's archives, in the hosted order: the disks before the board's own entry, then the software AES,
   # the key store, touch and keys, the GPU's transport and the display (oneios_native_defconfig force-loads all but the
-  # display, which UniXNU's build links with CONFIG_XNU_NATIVE_LEGACY_DISPLAY). No audio or Wi-Fi: those are the host's.
+  # display, which UniXNU's build links with CONFIG_XNU_NATIVE_LEGACY_DISPLAY), and the speaker and microphone (the audio
+  # archive: crosvm's virtio-snd card on its ECAM bus, xnuloader-crosvm --audio), and the Wi-Fi (the network archive: crosvm's
+  # virtio-net card on that bus, xnuloader-crosvm --wifi, bridged to the phone's wlan0 by wifictl tap).
   awk '/^[[:space:]]*"oneios-tool kernel gen board",?[[:space:]]*$/ {
          match($0, /^[[:space:]]*/); pad = substr($0, 1, RLENGTH); n++
          printf "%s\"oneios-tool kernel gen storage\",\n%s\"oneios-tool kernel gen board\",\n", pad, pad
          printf "%s\"oneios-tool kernel gen aes\",\n%s\"oneios-tool kernel gen keystore\",\n", pad, pad
-         printf "%s\"oneios-tool kernel gen hid\",\n", pad
+         printf "%s\"oneios-tool kernel gen hid\",\n%s\"oneios-tool kernel gen audio\",\n%s\"oneios-tool kernel gen net\",\n", pad, pad, pad
          printf "%s\"oneios-tool kernel gen gpu\",\n%s\"oneios-tool kernel gen display\",\n", pad, pad
          next }
        { print }

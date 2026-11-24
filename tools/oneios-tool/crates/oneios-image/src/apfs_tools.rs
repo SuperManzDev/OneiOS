@@ -65,6 +65,29 @@ fn with_backend<T>(image: &str, volume: Option<&str>, backend: Backend, own: imp
     }
 }
 
+/// The walk's regular files (S_IFREG) whose name ends with `suffix`, as absolute paths under `prefix`, sorted.
+pub fn matching(walked: &[(String, crate::apfs::Rec)], path: &str, suffix: &str, prefix: &str) -> Vec<String> {
+    let base = path.trim_matches('/');
+    let mut out: Vec<String> = walked
+        .iter()
+        .filter(|(rel, rec)| rel != "." && rec.m & 0o170000 == 0o100000 && rel.ends_with(suffix))
+        .map(|(rel, _)| {
+            let inner = if base.is_empty() { rel.clone() } else { format!("{base}/{rel}") };
+            format!("{}/{inner}", prefix.trim_end_matches('/'))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// `image apfs-find`.
+pub fn find(image: &str, path: &str, suffix: &str, prefix: &str, volume: Option<&str>, pick: Pick) -> Result<(), Fail> {
+    let tree = open(image, volume, pick)?;
+    let walked = tree.walk(path)?;
+    let found = matching(&walked, path, suffix, prefix);
+    say(found.join("\n").as_str())
+}
+
 pub fn ls(image: &str, path: &str, volume: Option<&str>, pick: Pick, backend: Backend) -> Result<(), Fail> {
     let own = || -> Result<String, Fail> {
         let tree = open(image, volume, pick)?;
@@ -397,4 +420,25 @@ pub fn copy(image: &str, src: &str, dst: &str, volume: Option<&str>, pick: Pick,
     let was = if done.compressed == 0 { String::new() } else { format!(" ({} of them were kept compressed)", done.compressed) };
     let more = if done.skipped == 0 { String::new() } else { format!(", skipped {} compressed files", done.skipped) };
     say(&format!("copied {} files, {} bytes{was}{more}", done.files, done.bytes))
+}
+
+#[cfg(test)]
+mod find_tests {
+    use super::matching;
+    use crate::apfs::Rec;
+
+    #[test]
+    fn find_keeps_regular_files_with_the_suffix_under_the_prefix() {
+        let rec = |m: u16| Rec { u: 0, g: 0, m, x: Vec::new() };
+        let walked = vec![
+            (".".to_string(), rec(0o040755)),
+            ("Library/a.metallib".to_string(), rec(0o100644)),
+            ("Library/b.metallib".to_string(), rec(0o120755)),   // a link: not taken
+            ("Library/c.metallib.txt".to_string(), rec(0o100644)),
+            ("Library/dir.metallib".to_string(), rec(0o040755)), // a folder: not taken
+            ("Apps/z.metallib".to_string(), rec(0o100644)),
+        ];
+        assert_eq!(matching(&walked, "", ".metallib", "/System/Cryptexes/OS/"), ["/System/Cryptexes/OS/Apps/z.metallib", "/System/Cryptexes/OS/Library/a.metallib"]);
+        assert_eq!(matching(&walked, "/System/", ".metallib", ""), ["/System/Apps/z.metallib", "/System/Library/a.metallib"]);
+    }
 }

@@ -25,6 +25,7 @@ extern "C" { volatile uint64_t oneios_actuator_frames; }
 // (before anchor 4)
         if (isActuator) oneios_haptic_actuator_running(false); else transportSet(!isInput, false);
 // (before anchor 5)
+            if (!isActuator) oneiosVolume(at, PeriodFrames * ch);   // OneiOS: iOS's volume (the speaker's control)
             const uint32_t played = isActuator ? oneios_haptic_actuator_play(at, PeriodFrames, ch) : droidvm_snd_play(at, PeriodFrames);
 // (before anchor 6)
             if (isActuator) oneios_actuator_frames = oneios_actuator_frames + played;
@@ -82,6 +83,8 @@ extern "C" { volatile uint64_t oneios_actuator_frames; }
 uint32_t droidvm_snd_capture(int16_t *frames, uint32_t count);
 // OneiOS (fix-audio-latency): the speaker's ring (oneios-audio-ring) and its engine's timing (OneiOSAudio.c reports it).
 uint32_t oneios_speaker_ring = 1920;
+// OneiOS (fix-audio-volume): the speaker's volume step (0..128, VirtualAudio's), its gain (Q16) and how often it changed.
+volatile uint32_t oneios_speaker_volume = 128, oneios_speaker_gain = 65536, oneios_speaker_volume_sets;
 volatile uint64_t oneios_speaker_periods, oneios_speaker_late_sum, oneios_speaker_late_max, oneios_speaker_leads,
     oneios_speaker_lead_sum, oneios_speaker_lead_min = ~0ULL, oneios_speaker_lead_max, oneios_speaker_lead_last, oneios_speaker_tight;
 // (before anchor 20)
@@ -89,6 +92,7 @@ volatile uint64_t oneios_speaker_periods, oneios_speaker_late_sum, oneios_speake
     uint32_t ringFrames = RingFrames;   // OneiOS: the speaker's is oneios_speaker_ring
     bool speakerEngine() const { return !isInput && !isActuator; }   // OneiOS: hands a period on as it starts
     void oneiosSpeakerPeriod(uint64_t deadline, uint64_t done);
+    uint32_t oneiosSetVolume(uint64_t value, IORegistryEntry *client);   // OneiOS: the speaker's volume control
 // (before anchor 21)
     ringFrames = speakerEngine() ? oneios_speaker_ring : RingFrames;   // OneiOS
     ring = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, Shared, ringFrames * 2 * channels(), page_size);
@@ -129,6 +133,32 @@ void DroidVMAudioDevice::oneiosSpeakerPeriod(uint64_t deadline, uint64_t done) {
     if (lead > oneios_speaker_lead_max) oneios_speaker_lead_max = lead;
     if (lead + PeriodFrames > ringFrames) oneios_speaker_tight = oneios_speaker_tight + 1;
 }
+
+// OneiOS (fix-audio-volume): VirtualAudio's volume through the HAL's SetControlValue: the step (clamped to 0..128), its
+// gain for the engine, and the description again (on the device and the client: the HAL reads it through both). The
+// first 16 changes are logged, then every 64th.
+uint32_t DroidVMAudioDevice::oneiosSetVolume(uint64_t value, IORegistryEntry *client) {
+    const int32_t asked = int32_t(uint32_t(value));
+    const uint32_t v = asked < 0 ? 0 : asked > int32_t(OneiosVolumeSteps) ? OneiosVolumeSteps : uint32_t(asked);
+    const bool changed = v != oneios_speaker_volume;
+    oneios_speaker_gain = oneios_volume_gain[v];
+    oneios_speaker_volume = v;
+    if (OSArray *a = oneiosControls(true)) {
+        setProperty("controls", a);
+        if (client) client->setProperty("controls", a);
+        a->release();
+    }
+    if (changed) {
+        const uint32_t n = oneios_speaker_volume_sets + 1;   // no read of a volatile assignment (C++20)
+        oneios_speaker_volume_sets = n;
+        const uint32_t down = OneiosVolumeSteps - v;   // half dB below 0 dB
+        if (n <= 16 || n % 64 == 0)
+            IOLog("DroidVMAudio: speaker volume %u of %u (%s%u.%u dB, gain %u of 65536), change %u: iOS's volume, applied here "
+                  "(the host plays at full scale)\n", v, (unsigned)OneiosVolumeSteps, v == 0 ? "silent, -" : down ? "-" : "",
+                  down / 2, down % 2 * 5, oneios_speaker_gain, n);
+    }
+    return v;
+}
 // (before anchor 25)
         // OneiOS: the speaker takes a period as it starts (the HAL has written it a safety offset of one period
         // ahead), the others once it has passed.
@@ -168,4 +198,62 @@ void DroidVMAudioDevice::oneiosSpeakerPeriod(uint64_t deadline, uint64_t done) {
     droidvm_audio_stage = 4;
     IOLog("DroidVMAudio: speaker: ring %u frames (iOS's I/O buffer at most %u), safety offset %u, each period handed on as it "
           "starts; output latency %u frames\n", oneios_speaker_ring, oneios_speaker_ring * 3 / 8, (unsigned)PeriodFrames, oneios_output_latency);
+// (before anchor 33)
+uint64_t absolute(uint64_t frames) { uint64_t t; nanoseconds_to_absolutetime(frames * 1000000000ULL / Rate, &t); return t; }
+// OneiOS (fix-audio-volume): the speaker's volume control as the HAL reads it (24A446 CoreAudio's HALS_IOA2Control):
+// class 'vlme', base class 'levl', output scope, main element; integers 0..128 over one range from -64 dB in 0.5 dB
+// steps (dB values Fixed64, as the sample rates). Step 0 is silence, 128 is 0 dB (the stream as iOS made it).
+enum : uint32_t { OneiosVolumeID = 1, OneiosVolumeSteps = 128 };
+const uint32_t oneios_volume_gain[OneiosVolumeSteps + 1] = {   // Q16: 65536 x 10^((step / 2 - 64) / 20), 0 at step 0
+    0, 44, 46, 49, 52, 55, 58, 62, 66, 69, 74, 78, 83, 87, 93, 98,
+    104, 110, 117, 123, 131, 139, 147, 155, 165, 174, 185, 196, 207, 220, 233, 246,
+    261, 276, 293, 310, 328, 348, 369, 390, 414, 438, 464, 491, 521, 551, 584, 619,
+    655, 694, 735, 779, 825, 874, 926, 981, 1039, 1100, 1165, 1234, 1308, 1385, 1467, 1554,
+    1646, 1744, 1847, 1957, 2072, 2195, 2325, 2463, 2609, 2764, 2927, 3101, 3285, 3479, 3685, 3904,
+    4135, 4380, 4640, 4915, 5206, 5514, 5841, 6187, 6554, 6942, 7353, 7789, 8250, 8739, 9257, 9806,
+    10387, 11002, 11654, 12345, 13076, 13851, 14672, 15541, 16462, 17437, 18471, 19565, 20724, 21952, 23253, 24631,
+    26090, 27636, 29274, 31008, 32846, 34792, 36854, 39037, 41350, 43801, 46396, 49145, 52057, 55142, 58409, 61870,
+    65536,
+};
+OSArray *oneiosControls(bool volume) {
+    OSArray *list = OSArray::withCapacity(1);
+    if (!list || !volume) return list;
+    OSDictionary *c = OSDictionary::withCapacity(12), *range = OSDictionary::withCapacity(4);
+    OSArray *map = OSArray::withCapacity(1);
+    if (c && range && map) {
+        setNumber(c, "control ID", OneiosVolumeID);
+        setNumber(c, "base class", 0x6c65766c);   // 'levl'
+        setNumber(c, "class", 0x766c6d65);        // 'vlme'
+        setNumber(c, "scope", 0x6f757470);        // 'outp'
+        setNumber(c, "element", 0);
+        c->setObject("read only", kOSBooleanFalse);
+        setNumber(c, "value", oneios_speaker_volume);
+        setNumber(c, "minimum value", 0);
+        setNumber(c, "maximum value", OneiosVolumeSteps);
+        setNumber(range, "start int value", 0);
+        setNumber(range, "start db value", uint64_t(int64_t(-64) * (int64_t(1) << 32)), 64);
+        setNumber(range, "integer steps", OneiosVolumeSteps);
+        setNumber(range, "db per step", uint64_t(1) << 31, 64);   // 0.5 dB
+        map->setObject(range);
+        c->setObject("range map", map);
+        list->setObject(c);
+    }
+    OSSafeReleaseNULL(c); OSSafeReleaseNULL(range); OSSafeReleaseNULL(map);
+    return list;
+}
+// One period of the speaker at the volume's gain, in place (480 multiplies a 5 ms period; nothing at 0 dB).
+void oneiosVolume(int16_t *s, uint32_t n) {
+    const int32_t g = int32_t(oneios_speaker_gain);
+    if (g >= 65536) return;
+    for (uint32_t i = 0; i < n; i++) s[i] = int16_t((int32_t(s[i]) * g) >> 16);
+}
+// (before anchor 34)
+    if (OSArray *a = oneiosControls(speakerEngine())) { e->setProperty("controls", a); a->release(); }   // OneiOS: the speaker's volume
+// (before anchor 35)
+    case 2: {                                              // SetControlValue: the speaker's volume (OneiOS)
+        if (!device->speakerEngine() || a->scalarInputCount < 2 || a->scalarInput[0] != OneiosVolumeID) return kIOReturnBadArgument;
+        const uint32_t v = device->oneiosSetVolume(a->scalarInput[1], this);
+        if (a->scalarOutputCount >= 1) { a->scalarOutput[0] = v; a->scalarOutputCount = 1; }
+        return kIOReturnSuccess;
+    }
 // (the end)

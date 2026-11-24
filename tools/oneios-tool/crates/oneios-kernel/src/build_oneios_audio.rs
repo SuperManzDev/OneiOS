@@ -4,7 +4,9 @@
 //! The hosted kernel's speaker and microphone: build/oneios-audio/liboneiosaudio.a, built between the two kernel
 //! passes from the compile records of the first.
 //!
-//!   DroidVMVirtioSnd.c   UniXNU-droidvm's virtio-snd transport (external/UniXNU-droidvm/package), unchanged, compiled
+//!   DroidVMVirtioSnd.c   UniXNU-droidvm's virtio-snd transport (external/UniXNU-droidvm/package), staged with the native
+//!                        kernel's PCI transport (SND_TRANSPORT_PCI, compiled only there: crosvm's card on its ECAM bus,
+//!                        xnuloader-crosvm --audio; the hosted kernel compiles the source as it is), compiled
 //!                        as its iPadOS 27 board does (Mach universe, -DDROIDVM_DEVICE_DYNAMIC=1: its rings and buffers
 //!                        come from one region allocated at start): xnuhost's /arm-io/virtio-snd
 //!   DroidVMAudio.cpp     UniXNU-droidvm's two IOAudio2Devices (VirtualAudio's "Speaker" and "Mic"), staged with boot
@@ -23,6 +25,10 @@
 //! oneios-audio-selftest=SECONDS (a quiet 1 kHz tone from the kernel, OneiOSAudio.c), oneios-actuator=0 (no Actuator
 //! device), oneios-actuator-channels=1|2 (default 1).
 //!
+//! The Speaker's volume (2026-11-22): a hardware volume control in its "controls" (VirtualAudio's speaker route is
+//! HardwareOnly), set by the HAL's SetControlValue, applied to each period before the transport (staged/audio.rs,
+//! "fix-audio-volume"); log `DroidVMAudio: speaker volume N of 128 (...)`.
+//!
 //! The Actuator device: VirtualAudio makes VirtualAudioDevice_Actuator (Device_Actuator_Aspen, iOS 27's VirtualAudio.plugin)
 //! on a physical device with UID "Actuator"; Core Haptics, UIFeedbackGenerator and the keyboard play their haptics on it
 //! as audio once MobileGestalt says closed-loop haptics (IODeviceTree:/product/haptics, drivers/haptics). Its engine runs
@@ -40,7 +46,7 @@
 //! DroidVMAudio.cpp, which is the upstream source with the edit list applied.
 
 use crate::gen::{self, fail, Compile, Ctx};
-use crate::staged::{audio::AUDIO, OUTPUT_LATENCY};
+use crate::staged::{audio::{AUDIO, SND_TRANSPORT_PCI}, OUTPUT_LATENCY};
 use anyhow::Result;
 use oneios_common::pyjson::Value;
 use std::path::{Path, PathBuf};
@@ -52,6 +58,20 @@ pub fn staged_text(text: String) -> Result<String> {
     gen::replace_once(text, AUDIO, |anchor| {
         format!("build-oneios-audio: DroidVMAudio.cpp no longer has exactly one `{}`", gen::first(anchor.trim(), 90))
     })
+}
+
+/// DroidVMVirtioSnd.c with the native kernel's PCI transport (staged/audio.rs SND_TRANSPORT_PCI: compiled only with
+/// XNU_ONEIOS_NATIVE, so the hosted kernel's object is what the source alone makes).
+pub fn staged_transport_text(text: String) -> Result<String> {
+    gen::replace_once(text, SND_TRANSPORT_PCI, |anchor| {
+        format!("build-oneios-audio: DroidVMVirtioSnd.c no longer has exactly one `{}`", gen::first(anchor.trim(), 90))
+    })
+}
+
+fn stage_transport(transport: &Path, out: &Path) -> Result<PathBuf> {
+    let staged = out.join("DroidVMVirtioSnd.c");
+    gen::write_text(&staged, &staged_transport_text(gen::read_text(transport)?)?)?;
+    Ok(staged)
 }
 
 /// The same file name: the static initializer droidvm_audio_attach calls is named after it.
@@ -80,7 +100,8 @@ pub fn main() -> Result<()> {
         ["-I".to_string(), gen::s(&package)].into_iter().chain(extra.iter().map(|e| e.to_string())).collect()
     };
     let mach = ctx.record("mach")?;
-    let transport_object = compile.object(&mach, &transport, &out.join("DroidVMVirtioSnd.o"), &include(&["-DDROIDVM_DEVICE_DYNAMIC=1"]))?;
+    let staged_transport = stage_transport(&transport, &out)?;
+    let transport_object = compile.object(&mach, &staged_transport, &out.join("DroidVMVirtioSnd.o"), &include(&["-DDROIDVM_DEVICE_DYNAMIC=1"]))?;
     let start_object = compile.object(&mach, &start, &out.join("OneiOSAudio.o"), &include(&[]))?;
     let staged = stage_audio(&devices, &out)?;
     let devices_object = compile.object(&ctx.record("iokit")?, &staged, &out.join("DroidVMAudio.o"), &include(&[]))?;
@@ -97,7 +118,7 @@ pub fn main() -> Result<()> {
     }
     // The staged source in the script's place (the module comment).
     let mut list = Value::list();
-    for path in [transport, devices, package.join("DroidVMDmaRegion.h"), start, staged] {
+    for path in [transport, devices, package.join("DroidVMDmaRegion.h"), start, staged, staged_transport] {
         list.push(gen::source_entry(ctx.relative(&path).unwrap_or_else(|_| gen::s(&path)), None, &path)?);
     }
     let mut listing = Value::dict();
@@ -106,4 +127,24 @@ pub fn main() -> Result<()> {
     println!("build-oneios-audio: {} ({} objects: the virtio-snd transport, the Speaker, Mic and Actuator IOAudio2Devices, \
               the start; output latency {OUTPUT_LATENCY} frames)", archive.display(), objects.len());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_transport_takes_the_pci_card_in_the_native_kernel_only() {
+        let made_up: String = SND_TRANSPORT_PCI.iter().map(|(anchor, _)| format!("{anchor}--\n")).collect();
+        let staged = staged_transport_text(made_up.clone()).unwrap();
+        // the native kernel's accessors, and the hosted kernel's as they were
+        assert!(staged.contains("#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE\n// OneiOS native (staged/audio.rs SND_TRANSPORT_PCI)"));
+        assert!(staged.contains(&format!("#else\n{}#endif\n", SND_TRANSPORT_PCI[0].0)));
+        assert!(staged.contains("!memcmp(value, \"oneios,virtio-snd-pci\", 22))\n"));
+        // a late reply taken off before the next request, the speaker's START tried once more, no microphone unless asked
+        assert!(staged.contains("snd_control_late++; return false; }   // 2 s; its reply is taken later\n#else\n"));
+        assert!(staged.contains("PE_parse_boot_argn(\"oneios-audio-mic\", &mic, sizeof(mic));"));
+        assert!(staged.contains("pcm_command(SND_R_PCM_STOP, snd.out_stream);\n                snd.out_running = pcm_command(SND_R_PCM_START"));
+        assert!(staged_transport_text(made_up.repeat(2)).is_err());
+    }
 }

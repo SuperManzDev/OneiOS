@@ -186,4 +186,317 @@ pub const AUDIO: &[(&str, &str)] = &[
      concat!("    droidvm_audio_stage = 4;\n",
              "    IOLog(\"DroidVMAudio: speaker: ring %u frames (iOS's I/O buffer at most %u), safety offset %u, each period handed on as it \"\n",
              "          \"starts; output latency %u frames\\n\", oneios_speaker_ring, oneios_speaker_ring * 3 / 8, (unsigned)PeriodFrames, oneios_output_latency);\n")),
+    // fix-audio-volume (2026-11-22): the speaker's hardware volume. VirtualAudio's speaker route has the software volume
+    // mode HardwareOnly, and a physical device without a volume control made audiomxd throw at every volume set
+    // ("Volume Mode is HardwareOnly but physical device does not support HW volume", OutputVolumeControl_HAL_Common.cpp
+    // :1423, 10-17 times a boot): no volume, no HUD, the keys and the slider changed nothing. The Speaker now publishes
+    // a volume control in its "controls" (the HAL's IOAudio2 description, read in 24A446's CoreAudio:
+    // HALS_IOA2Control::SynchronizeWithDictionary, HALS_IOA2UCDevice::SetControlValue), takes the HAL's SetControlValue
+    // (selector 2: control ID and value in, the value taken out) and scales its periods by it before the transport,
+    // so iOS's volume is the one that counts (the host's helper plays at full scale, runtime/bridges/audio).
+    ("uint32_t oneios_speaker_ring = 1920;\n",
+     concat!("uint32_t oneios_speaker_ring = 1920;\n",
+             "// OneiOS (fix-audio-volume): the speaker's volume step (0..128, VirtualAudio's), its gain (Q16) and how often it changed.\n",
+             "volatile uint32_t oneios_speaker_volume = 128, oneios_speaker_gain = 65536, oneios_speaker_volume_sets;\n")),
+    ("uint64_t absolute(uint64_t frames) { uint64_t t; nanoseconds_to_absolutetime(frames * 1000000000ULL / Rate, &t); return t; }\n",
+     concat!("uint64_t absolute(uint64_t frames) { uint64_t t; nanoseconds_to_absolutetime(frames * 1000000000ULL / Rate, &t); return t; }\n",
+             "// OneiOS (fix-audio-volume): the speaker's volume control as the HAL reads it (24A446 CoreAudio's HALS_IOA2Control):\n",
+             "// class 'vlme', base class 'levl', output scope, main element; integers 0..128 over one range from -64 dB in 0.5 dB\n",
+             "// steps (dB values Fixed64, as the sample rates). Step 0 is silence, 128 is 0 dB (the stream as iOS made it).\n",
+             "enum : uint32_t { OneiosVolumeID = 1, OneiosVolumeSteps = 128 };\n",
+             "const uint32_t oneios_volume_gain[OneiosVolumeSteps + 1] = {   // Q16: 65536 x 10^((step / 2 - 64) / 20), 0 at step 0\n",
+             "    0, 44, 46, 49, 52, 55, 58, 62, 66, 69, 74, 78, 83, 87, 93, 98,\n",
+             "    104, 110, 117, 123, 131, 139, 147, 155, 165, 174, 185, 196, 207, 220, 233, 246,\n",
+             "    261, 276, 293, 310, 328, 348, 369, 390, 414, 438, 464, 491, 521, 551, 584, 619,\n",
+             "    655, 694, 735, 779, 825, 874, 926, 981, 1039, 1100, 1165, 1234, 1308, 1385, 1467, 1554,\n",
+             "    1646, 1744, 1847, 1957, 2072, 2195, 2325, 2463, 2609, 2764, 2927, 3101, 3285, 3479, 3685, 3904,\n",
+             "    4135, 4380, 4640, 4915, 5206, 5514, 5841, 6187, 6554, 6942, 7353, 7789, 8250, 8739, 9257, 9806,\n",
+             "    10387, 11002, 11654, 12345, 13076, 13851, 14672, 15541, 16462, 17437, 18471, 19565, 20724, 21952, 23253, 24631,\n",
+             "    26090, 27636, 29274, 31008, 32846, 34792, 36854, 39037, 41350, 43801, 46396, 49145, 52057, 55142, 58409, 61870,\n",
+             "    65536,\n",
+             "};\n",
+             "OSArray *oneiosControls(bool volume) {\n",
+             "    OSArray *list = OSArray::withCapacity(1);\n",
+             "    if (!list || !volume) return list;\n",
+             "    OSDictionary *c = OSDictionary::withCapacity(12), *range = OSDictionary::withCapacity(4);\n",
+             "    OSArray *map = OSArray::withCapacity(1);\n",
+             "    if (c && range && map) {\n",
+             "        setNumber(c, \"control ID\", OneiosVolumeID);\n",
+             "        setNumber(c, \"base class\", 0x6c65766c);   // 'levl'\n",
+             "        setNumber(c, \"class\", 0x766c6d65);        // 'vlme'\n",
+             "        setNumber(c, \"scope\", 0x6f757470);        // 'outp'\n",
+             "        setNumber(c, \"element\", 0);\n",
+             "        c->setObject(\"read only\", kOSBooleanFalse);\n",
+             "        setNumber(c, \"value\", oneios_speaker_volume);\n",
+             "        setNumber(c, \"minimum value\", 0);\n",
+             "        setNumber(c, \"maximum value\", OneiosVolumeSteps);\n",
+             "        setNumber(range, \"start int value\", 0);\n",
+             "        setNumber(range, \"start db value\", uint64_t(int64_t(-64) * (int64_t(1) << 32)), 64);\n",
+             "        setNumber(range, \"integer steps\", OneiosVolumeSteps);\n",
+             "        setNumber(range, \"db per step\", uint64_t(1) << 31, 64);   // 0.5 dB\n",
+             "        map->setObject(range);\n",
+             "        c->setObject(\"range map\", map);\n",
+             "        list->setObject(c);\n",
+             "    }\n",
+             "    OSSafeReleaseNULL(c); OSSafeReleaseNULL(range); OSSafeReleaseNULL(map);\n",
+             "    return list;\n",
+             "}\n",
+             "// One period of the speaker at the volume's gain, in place (480 multiplies a 5 ms period; nothing at 0 dB).\n",
+             "void oneiosVolume(int16_t *s, uint32_t n) {\n",
+             "    const int32_t g = int32_t(oneios_speaker_gain);\n",
+             "    if (g >= 65536) return;\n",
+             "    for (uint32_t i = 0; i < n; i++) s[i] = int16_t((int32_t(s[i]) * g) >> 16);\n",
+             "}\n")),
+    ("    if (OSArray *a = OSArray::withCapacity(1)) { e->setProperty(\"controls\", a); a->release(); }\n",
+     "    if (OSArray *a = oneiosControls(speakerEngine())) { e->setProperty(\"controls\", a); a->release(); }   // OneiOS: the speaker's volume\n"),
+    ("    void oneiosSpeakerPeriod(uint64_t deadline, uint64_t done);\n",
+     concat!("    void oneiosSpeakerPeriod(uint64_t deadline, uint64_t done);\n",
+             "    uint32_t oneiosSetVolume(uint64_t value, IORegistryEntry *client);   // OneiOS: the speaker's volume control\n")),
+    ("    if (lead + PeriodFrames > ringFrames) oneios_speaker_tight = oneios_speaker_tight + 1;\n}\n",
+     concat!("    if (lead + PeriodFrames > ringFrames) oneios_speaker_tight = oneios_speaker_tight + 1;\n}\n",
+             "\n",
+             "// OneiOS (fix-audio-volume): VirtualAudio's volume through the HAL's SetControlValue: the step (clamped to 0..128), its\n",
+             "// gain for the engine, and the description again (on the device and the client: the HAL reads it through both). The\n",
+             "// first 16 changes are logged, then every 64th.\n",
+             "uint32_t DroidVMAudioDevice::oneiosSetVolume(uint64_t value, IORegistryEntry *client) {\n",
+             "    const int32_t asked = int32_t(uint32_t(value));\n",
+             "    const uint32_t v = asked < 0 ? 0 : asked > int32_t(OneiosVolumeSteps) ? OneiosVolumeSteps : uint32_t(asked);\n",
+             "    const bool changed = v != oneios_speaker_volume;\n",
+             "    oneios_speaker_gain = oneios_volume_gain[v];\n",
+             "    oneios_speaker_volume = v;\n",
+             "    if (OSArray *a = oneiosControls(true)) {\n",
+             "        setProperty(\"controls\", a);\n",
+             "        if (client) client->setProperty(\"controls\", a);\n",
+             "        a->release();\n",
+             "    }\n",
+             "    if (changed) {\n",
+             "        const uint32_t n = oneios_speaker_volume_sets + 1;   // no read of a volatile assignment (C++20)\n",
+             "        oneios_speaker_volume_sets = n;\n",
+             "        const uint32_t down = OneiosVolumeSteps - v;   // half dB below 0 dB\n",
+             "        if (n <= 16 || n % 64 == 0)\n",
+             "            IOLog(\"DroidVMAudio: speaker volume %u of %u (%s%u.%u dB, gain %u of 65536), change %u: iOS's volume, applied here \"\n",
+             "                  \"(the host plays at full scale)\\n\", v, (unsigned)OneiosVolumeSteps, v == 0 ? \"silent, -\" : down ? \"-\" : \"\",\n",
+             "                  down / 2, down % 2 * 5, oneios_speaker_gain, n);\n",
+             "    }\n",
+             "    return v;\n",
+             "}\n")),
+    (concat!("    case 2:                                                // SetControlValue: no controls are published\n",
+             "        return kIOReturnBadArgument;\n"),
+     concat!("    case 2: {                                              // SetControlValue: the speaker's volume (OneiOS)\n",
+             "        if (!device->speakerEngine() || a->scalarInputCount < 2 || a->scalarInput[0] != OneiosVolumeID) return kIOReturnBadArgument;\n",
+             "        const uint32_t v = device->oneiosSetVolume(a->scalarInput[1], this);\n",
+             "        if (a->scalarOutputCount >= 1) { a->scalarOutput[0] = v; a->scalarOutputCount = 1; }\n",
+             "        return kIOReturnSuccess;\n",
+             "    }\n")),
+    ("            const uint32_t played = isActuator ? oneios_haptic_actuator_play(at, PeriodFrames, ch) : droidvm_snd_play(at, PeriodFrames);\n",
+     concat!("            if (!isActuator) oneiosVolume(at, PeriodFrames * ch);   // OneiOS: iOS's volume (the speaker's control)\n",
+             "            const uint32_t played = isActuator ? oneios_haptic_actuator_play(at, PeriodFrames, ch) : droidvm_snd_play(at, PeriodFrames);\n")),
+];
+
+/// The native kernel's virtio-snd on crosvm's PCI (xnuloader-crosvm --audio): Droid-VM's crosvm has no virtio-mmio sound
+/// card, so the card is a virtio-pci function of its ECAM host, and crosvm picks its device (`--virtio-snd` has no
+/// pci-address). /arm-io/virtio-snd ("oneios,virtio-snd-pci") is all of bus 0, and the transport takes the first
+/// 1af4:1059 function there. DroidVMVirtioSnd.c's lines that change for it, compiled only with XNU_ONEIOS_NATIVE: the
+/// MMIO transport's register offsets go to the function's regions (VirtIO 1.2 4.1.4), as the GPU's do (gpu.rs
+/// TRANSPORT_PCI), with the device configuration (the stream count at 0x104) and the four queues' notifications. The
+/// queues and periods stay in the transport's DMA region of the guest's RAM, which the shared-RAM VM's host reads; polled,
+/// as before. The hosted kernel compiles the file as before.
+pub const SND_TRANSPORT_PCI: &[(&str, &str)] = &[
+    (r#"// A trapped MMIO access must be a single load/store with a plain base register (see DroidVMVirtioInput.c).
+static uint32_t snd_read32(unsigned offset) {
+    uint32_t value;
+    __asm__ volatile("ldr %w0, [%1]" : "=r"(value) : "r"(snd.registers + offset) : "memory");
+    return value;
+}
+static void snd_write32(unsigned offset, uint32_t value) {
+    __asm__ volatile("str %w0, [%1]\n\tdsb oshst" :: "r"(value), "r"(snd.registers + offset) : "memory");
+}
+"#,
+     r#"#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE
+// OneiOS native (staged/audio.rs SND_TRANSPORT_PCI): the card as a virtio-pci function of crosvm's ECAM host
+// (/arm-io/virtio-snd "oneios,virtio-snd-pci" is bus 0, xnuloader-crosvm --audio), the MMIO transport's offsets
+// (VirtIO 1.2 4.2.2) on its regions (4.1.4), as the GPU's (staged/gpu.rs TRANSPORT_PCI). Single loads and stores with a
+// plain base register, as the MMIO accessors.
+extern int printf(const char *, ...);
+static bool snd_pci;
+static uintptr_t snd_pci_common, snd_pci_notify, snd_pci_device;
+static uint32_t snd_pci_multiplier;
+static uint16_t snd_pci_notify_off[4];
+static uint32_t snd_pci_rd32(uintptr_t p) { uint32_t v; __asm__ volatile("ldr %w0, [%1]" : "=r"(v) : "r"(p) : "memory"); return v; }
+static uint16_t snd_pci_rd16(uintptr_t p) { uint32_t v; __asm__ volatile("ldrh %w0, [%1]" : "=r"(v) : "r"(p) : "memory"); return (uint16_t)v; }
+static uint8_t snd_pci_rd8(uintptr_t p) { uint32_t v; __asm__ volatile("ldrb %w0, [%1]" : "=r"(v) : "r"(p) : "memory"); return (uint8_t)v; }
+static void snd_pci_wr32(uintptr_t p, uint32_t v) { __asm__ volatile("str %w0, [%1]\n\tdsb oshst" :: "r"(v), "r"(p) : "memory"); }
+static void snd_pci_wr16(uintptr_t p, uint16_t v) { __asm__ volatile("strh %w0, [%1]\n\tdsb oshst" :: "r"((uint32_t)v), "r"(p) : "memory"); }
+static void snd_pci_wr8(uintptr_t p, uint8_t v) { __asm__ volatile("strb %w0, [%1]\n\tdsb oshst" :: "r"((uint32_t)v), "r"(p) : "memory"); }
+static uint32_t snd_pci_read(unsigned offset) {
+    if (offset >= 0x100) return snd_pci_rd32(snd_pci_device + (offset - 0x100));   // the card's configuration
+    switch (offset) {
+    case 0x00: return 0x74726976;                                // MagicValue, Version, DeviceID: the function is 1af4:1059
+    case 0x04: return 2;
+    case 0x08: return 25;
+    case 0x10: return snd_pci_rd32(snd_pci_common + 0x04);       // DeviceFeatures, of the word DeviceFeaturesSel chose
+    case 0x34: return snd_pci_rd16(snd_pci_common + 0x18);       // QueueNumMax: the selected queue's size until it is set
+    case 0x44: return snd_pci_rd16(snd_pci_common + 0x1c);       // QueueReady: queue_enable
+    case 0x70: return snd_pci_rd8(snd_pci_common + 0x14);        // Status
+    default: return 0;
+    }
+}
+static void snd_pci_write(unsigned offset, uint32_t value) {
+    switch (offset) {
+    case 0x14: snd_pci_wr32(snd_pci_common + 0x00, value); break;   // DeviceFeaturesSel
+    case 0x20: snd_pci_wr32(snd_pci_common + 0x0c, value); break;   // DriverFeatures (the driver keeps ACCESS_PLATFORM)
+    case 0x24: snd_pci_wr32(snd_pci_common + 0x08, value); break;   // DriverFeaturesSel
+    case 0x30:                                                      // QueueSel, and that queue's notification offset
+        snd_pci_wr16(snd_pci_common + 0x16, (uint16_t)value);
+        if (value < 4) snd_pci_notify_off[value] = snd_pci_rd16(snd_pci_common + 0x1e);
+        break;
+    case 0x38: snd_pci_wr16(snd_pci_common + 0x18, (uint16_t)value); break;
+    case 0x44: snd_pci_wr16(snd_pci_common + 0x1c, (uint16_t)value); break;
+    case 0x50:                                                      // QueueNotify
+        if (value < 4) snd_pci_wr16(snd_pci_notify + (uintptr_t)snd_pci_notify_off[value] * snd_pci_multiplier, (uint16_t)value);
+        break;
+    case 0x70: snd_pci_wr8(snd_pci_common + 0x14, (uint8_t)value); break;
+    case 0x80: case 0x84: snd_pci_wr32(snd_pci_common + 0x20 + (offset - 0x80), value); break;   // queue_desc
+    case 0x90: case 0x94: snd_pci_wr32(snd_pci_common + 0x28 + (offset - 0x90), value); break;   // queue_driver
+    case 0xa0: case 0xa4: snd_pci_wr32(snd_pci_common + 0x30 + (offset - 0xa0), value); break;   // queue_device
+    default: break;
+    }
+}
+// The function's regions from its vendor capabilities: common configuration (1), notifications (2) and the card's
+// configuration (4), each in the BAR crosvm assigned, mapped as device memory; the ISR (3) is not read (polled). False
+// when one is missing.
+static bool snd_pci_regions(uintptr_t config) {
+    if (!(snd_pci_rd16(config + 0x06) & 0x10)) return false;                    // no capabilities list
+    struct { uint8_t bar; uint32_t offset, length; bool found; } r[5];
+    memset(r, 0, sizeof(r));
+    uint32_t multiplier = 0;
+    uint8_t at = snd_pci_rd8(config + 0x34) & 0xfc;
+    for (unsigned walked = 0; at >= 0x40 && at <= 0x100 - 20 && walked < 48; ++walked) {
+        const uint8_t id = snd_pci_rd8(config + at), next = snd_pci_rd8(config + at + 1) & 0xfc, type = snd_pci_rd8(config + at + 3);
+        if (id == 0x09 && type >= 1 && type <= 4 && !r[type].found) {
+            r[type].bar = snd_pci_rd8(config + at + 4);
+            r[type].offset = snd_pci_rd32(config + at + 8);
+            r[type].length = snd_pci_rd32(config + at + 12);
+            r[type].found = true;
+            if (type == 2) multiplier = snd_pci_rd32(config + at + 16);
+        }
+        at = next;
+    }
+    if (!r[1].found || !r[2].found || !r[4].found || r[1].length < 0x38 || r[2].length < 2 || r[4].length < 12) return false;
+    snd_pci_wr16(config + 0x04, (uint16_t)(snd_pci_rd16(config + 0x04) | 6));   // memory space and bus master
+    uintptr_t mapped[5] = {0};
+    for (unsigned t = 1; t <= 4; ++t) {
+        if (t == 3) continue;
+        const unsigned bar = r[t].bar;
+        if (bar > 5 || r[t].offset > UINT32_MAX - r[t].length) return false;
+        const uint32_t low = snd_pci_rd32(config + 0x10 + bar * 4);
+        if (low & 1) return false;                                              // an I/O BAR
+        uint64_t base = low & ~(uint64_t)0xf;
+        if ((low & 6) == 4) base |= (uint64_t)snd_pci_rd32(config + 0x10 + bar * 4 + 4) << 32;
+        if (!base) return false;
+        const uint64_t from = (base + r[t].offset) & ~(uint64_t)0x3fff;
+        const uint64_t to = (base + r[t].offset + r[t].length + 0x3fff) & ~(uint64_t)0x3fff;
+        const uintptr_t m = ml_io_map((vm_offset_t)from, (vm_size_t)(to - from));
+        if (!m) return false;
+        mapped[t] = m + (uintptr_t)(base + r[t].offset - from);
+    }
+    snd_pci_common = mapped[1]; snd_pci_notify = mapped[2]; snd_pci_device = mapped[4];
+    snd_pci_multiplier = multiplier;
+    return true;
+}
+// The bus's first 1af4:1059 function (function 0 of each device: 32 KiB a device on crosvm's ECAM) with its regions
+// mapped: its configuration space, or 0.
+static uintptr_t snd_pci_find(vm_offset_t bus, uint64_t size) {
+    const uintptr_t space = ml_io_map(bus, (vm_size_t)size);
+    if (!space) { printf("droidvm-snd: the PCI bus at %#llx not mapped\n", (unsigned long long)bus); return 0; }
+    for (unsigned dev = 0; dev < 32 && ((uint64_t)dev << 15) + 0x1000 <= size; ++dev) {
+        const uintptr_t config = space + ((uintptr_t)dev << 15);
+        if (snd_pci_rd32(config) != (0x1af4u | 0x1059u << 16)) continue;
+        if (!snd_pci_regions(config)) { printf("droidvm-snd: the sound card at 00:%02x.0 has not its regions\n", dev); return 0; }
+        snd_pci = true;
+        printf("droidvm-snd: virtio-pci sound card at 00:%02x.0 (1af4:1059), notifications x%u, polled\n", dev, snd_pci_multiplier);
+        return config;
+    }
+    printf("droidvm-snd: no 1af4:1059 function on bus 0 (crosvm without --virtio-snd?)\n");
+    return 0;
+}
+static uint32_t snd_read32(unsigned offset) {
+    if (snd_pci) return snd_pci_read(offset);
+    uint32_t value;
+    __asm__ volatile("ldr %w0, [%1]" : "=r"(value) : "r"(snd.registers + offset) : "memory");
+    return value;
+}
+static void snd_write32(unsigned offset, uint32_t value) {
+    if (snd_pci) { snd_pci_write(offset, value); return; }
+    __asm__ volatile("str %w0, [%1]\n\tdsb oshst" :: "r"(value), "r"(snd.registers + offset) : "memory");
+}
+#else
+// A trapped MMIO access must be a single load/store with a plain base register (see DroidVMVirtioInput.c).
+static uint32_t snd_read32(unsigned offset) {
+    uint32_t value;
+    __asm__ volatile("ldr %w0, [%1]" : "=r"(value) : "r"(snd.registers + offset) : "memory");
+    return value;
+}
+static void snd_write32(unsigned offset, uint32_t value) {
+    __asm__ volatile("str %w0, [%1]\n\tdsb oshst" :: "r"(value), "r"(snd.registers + offset) : "memory");
+}
+#endif
+"#),
+    ("                snd.registers = ml_io_map((vm_offset_t)(reg[0] - ranges[0] + ranges[1]), 0x1000);\n",
+     r#"#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE
+                // OneiOS native: on crosvm's ECAM bus ("oneios,virtio-snd-pci", xnuloader-crosvm --audio) its 1af4:1059
+                // function, wherever crosvm put it; an MMIO window as before
+                if (SecureDTGetProperty(node, "compatible", &value, &size) == kSuccess && size >= 22 &&
+                    !memcmp(value, "oneios,virtio-snd-pci", 22))
+                    snd.registers = snd_pci_find((vm_offset_t)(reg[0] - ranges[0] + ranges[1]), reg[1]);
+                else
+#endif
+                snd.registers = ml_io_map((vm_offset_t)(reg[0] - ranges[0] + ranges[1]), 0x1000);
+"#),
+    // A request the device answered after its 2 s wait: its reply is taken off the used ring before the next request, which
+    // otherwise read that late reply as its own (take7: Android's audio server, One UI stopped, took 10 s to open the
+    // microphone at its PREPARE; the speaker's START then looked refused, the stream stayed started on the device and every
+    // later START was "START to START", NOT_SUPP, so no period reached the phone).
+    ("static bool control(uint32_t request_size, uint32_t reply_size) {\n",
+     r#"#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE
+// OneiOS native (staged/audio.rs SND_TRANSPORT_PCI): requests the device answered after their wait; their replies are taken
+// off the used ring before the next request, so that each request reads its own reply.
+static uint16_t snd_control_late;
+#endif
+static bool control(uint32_t request_size, uint32_t reply_size) {
+#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE
+    while (snd_control_late && used(SND_CONTROL)[1] != snd.used[SND_CONTROL]) { snd_barrier(); ++snd.used[SND_CONTROL]; --snd_control_late; }
+    if (snd_control_late) { droidvm_snd_errors++; return false; }   // still unanswered: the queue's one chain is the device's
+#endif
+"#),
+    ("        if (waited == 2000) { droidvm_snd_errors++; return false; }   // 2 s\n",
+     r#"#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE
+        if (waited == 2000) { droidvm_snd_errors++; snd_control_late++; return false; }   // 2 s; its reply is taken later
+#else
+        if (waited == 2000) { droidvm_snd_errors++; return false; }   // 2 s
+#endif
+"#),
+    // A START that failed (a late reply of its own) may have left the stream started on the device: STOP and START once more.
+    ("            snd.out_running = pcm_command(SND_R_PCM_START, snd.out_stream);\n",
+     r#"            snd.out_running = pcm_command(SND_R_PCM_START, snd.out_stream);
+#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE
+            if (!snd.out_running) {   // OneiOS native: a START the device may have taken late: stop it and start again, once
+                pcm_command(SND_R_PCM_STOP, snd.out_stream);
+                snd.out_running = pcm_command(SND_R_PCM_START, snd.out_stream);
+                printf("droidvm-snd: the speaker's START failed once; again: %s\n", snd.out_running ? "running" : "refused");
+            }
+#endif
+"#),
+    // No microphone unless asked: crosvm's AAudio backend opens the phone's input at its PREPARE, which with One UI stopped
+    // waits 10 s (take7), and nothing in the VM records yet.
+    ("    if (snd.in_stream >= 0 && !set_params(snd.in_stream, snd.in_channels)) snd.in_stream = -1;\n",
+     r#"#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE
+    {   // OneiOS native: the microphone only with oneios-audio-mic=1 (crosvm opens the phone's input at PREPARE: 10 s, take7)
+        uint32_t mic = 0;
+        PE_parse_boot_argn("oneios-audio-mic", &mic, sizeof(mic));
+        if (!mic) snd.in_stream = -1;
+    }
+#endif
+    if (snd.in_stream >= 0 && !set_params(snd.in_stream, snd.in_channels)) snd.in_stream = -1;
+"#),
 ];

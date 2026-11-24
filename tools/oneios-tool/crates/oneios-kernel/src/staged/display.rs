@@ -114,3 +114,19 @@ pub const GOP_BOOT_VIDEO: &[(&str, &str)] = &[(
         "#endif\n"
     ),
 )];
+
+/// The board probe's lines that change in the native kernel (LegacyDisplayProbe.cpp, after DISPLAY): crosvm's virtio-gpu is
+/// the 3D device only there, and its scanout has no display on the phone, so the probe does not start the scanout client;
+/// every frame stays in the boot video, which the phone's bridge shows (displayctl pool). `oneios-virtio-scanout=1` starts it
+/// anyway. The hosted kernel starts it as before.
+pub const NATIVE_PROBE: &[(&str, &str)] = &[(
+    "void native_legacy_display_late_probe(void) {\n    droidvm_virtio_gpu_display_start();\n",
+    concat!(
+        "void native_legacy_display_late_probe(void) {\n",
+        "#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE\n",
+        "    {unsigned scanout=0;PE_parse_boot_argn(\"oneios-virtio-scanout\",&scanout,sizeof(scanout));if(scanout)droidvm_virtio_gpu_display_start();}\n",
+        "#else\n",
+        "    droidvm_virtio_gpu_display_start();\n",
+        "#endif\n"
+    ),
+)];

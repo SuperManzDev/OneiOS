@@ -1,0 +1,170 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -9667,6 +9667,158 @@
+ 	}
+ }
+ #endif /* XNU_HOSTED */
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
++/*
++ * OneiOS native (0081: upstream's hosted 0078 and 0086 in one): the haptic engine's tunings. audiomxd's haptic server
++ * (the Mach service com.apple.audio.hapticd, Core Haptics' server, which plays every UI and keyboard haptic) loads its
++ * synth preset from /Library/Audio/Tunings/<hardware model>/Haptics/hapticengineconfig.plist at its start and,
++ * without it, gives up ("-[AVHapticServer init]: ERROR: Failed to set up SSS client -- server bailing out", "Haptic
++ * Engine & Server Failure"). launchd still holds the service's port, so every client's first call waits for an answer
++ * that never comes ("AVHapticClient ... Initial XPC call to server timed out"), and each key tap of the keyboard hangs
++ * its app (upstream's phone, 2026-11-15; the S25's native VM: the keyboard comes up and stops at the first key, the
++ * owner, 2026-11-24). The hardware model is the guest tree's first compatible, "oneios,xnuhost" in the native VM too
++ * (xnuloader-crosvm: the identity tree has no compatible), and the OS volume has the iPhone's own folder,
++ * /Library/Audio/Tunings/V54. So the Data folder /private/var/oneios/addons/AudioTunings gets a folder named as the
++ * model with links into the sealed folders below it:
++ *   <model>/Haptics -> ../V54/Haptics            the haptic engine's preset and its tap and keyboard waveforms
++ *   <model>/VAD/d42_actuator_general.{austrip,dspg} -> ../../AID8022/VAD/actuator_general.{austrip,dspg}
++ *                                                the Actuator's DSP chain (upstream's 0086; unused without an Actuator)
++ * shown over /Library/Audio/Tunings read-only as a union (0031's mount, as 0056 shows the capture plug-in): the sealed
++ * folders stay visible below it and the links resolve to them. Nothing of Apple's is copied; an entry that is there
++ * already is left as it is (an earlier boot's link at <model> is replaced by the folder). A model whose own sealed
++ * folder has the preset gets nothing. oneios-audio-tunings=0: nothing made or mounted; oneios-audio-tunings=NAME: the
++ * links point into NAME instead of V54; oneios-audio-tunings-vad=0: no VAD links. One line:
++ *   oneios-audio-tunings: /private/var/oneios/addons/AudioTunings over /Library/Audio/Tunings: oneios,xnuhost/Haptics
++ *       -> V54/Haptics (N entries made), stage 5, status 0 (stage 5 status 0: mounted, the iPhone's haptics preset
++ *       visible as oneios,xnuhost's)
++ */
++extern int oneios_kern_symlink(const char *target, const char *path, vfs_context_t ctx);      /* 0004 */
++extern int oneios_kern_unlink(const char *path, vfs_context_t ctx);                           /* 0004 */
++static volatile int oneios_audio_tunings_stage = 0;
++static volatile int oneios_audio_tunings_status = -1;
++/* The folder of links: how many entries were made, or -errno. */
++static int
++oneios_audio_tunings_folder(const char *board, const char *folder, vfs_context_t ctx)
++{
++	static const char *const vad[][2] = {
++		{ "VAD/d42_actuator_general.austrip", "../../AID8022/VAD/actuator_general.austrip" },
++		{ "VAD/d42_actuator_general.dspg", "../../AID8022/VAD/actuator_general.dspg" },
++	};
++	char path[192], target[64];
++	int made = 0, error;
++	uint32_t with_vad = 1;
++	(void)PE_parse_boot_argn("oneios-audio-tunings-vad", &with_vad, sizeof(with_vad));
++	vnode_t vp = NULLVP;
++	if (vnode_lookup(folder, VNODE_LOOKUP_NOFOLLOW, &vp, ctx) == 0) {
++		int is_link = vnode_islnk(vp);
++		vnode_put(vp);
++		if (is_link && (error = oneios_kern_unlink(folder, ctx)) != 0) {
++			return -error;
++		}
++	}
++	error = oneios_kern_mkdir(folder, 0755, ctx);
++	if (error && error != EEXIST) {
++		return -error;
++	}
++	made += error == 0;
++	snprintf(path, sizeof(path), "%s/Haptics", folder);
++	snprintf(target, sizeof(target), "../%s/Haptics", board);
++	if (vnode_lookup(path, VNODE_LOOKUP_NOFOLLOW, &vp, ctx) == 0) {
++		vnode_put(vp);
++	} else if ((error = oneios_kern_symlink(target, path, ctx)) != 0) {
++		return -error;
++	} else {
++		made++;
++	}
++	if (!with_vad) {
++		return made;
++	}
++	snprintf(path, sizeof(path), "%s/VAD", folder);
++	error = oneios_kern_mkdir(path, 0755, ctx);
++	if (error && error != EEXIST) {
++		return -error;
++	}
++	made += error == 0;
++	for (unsigned i = 0; i < sizeof(vad) / sizeof(vad[0]); i++) {
++		snprintf(path, sizeof(path), "%s/%s", folder, vad[i][0]);
++		if (vnode_lookup(path, VNODE_LOOKUP_NOFOLLOW, &vp, ctx) == 0) {
++			vnode_put(vp);
++		} else if ((error = oneios_kern_symlink(vad[i][1], path, ctx)) != 0) {
++			return -error;
++		} else {
++			made++;
++		}
++	}
++	return made;
++}
++static void
++oneios_audio_tunings(proc_t p, user_addr_t scratch)
++{
++	static const char parent1[] = "/private/var/oneios", parent2[] = "/private/var/oneios/addons";
++	static const char source[] = "/private/var/oneios/addons/AudioTunings", point[] = "/Library/Audio/Tunings";
++	char board[32] = "V54", model[64] = "oneios,xnuhost";
++	if (PE_parse_boot_argn("oneios-audio-tunings", board, sizeof(board) - 1) && !strcmp(board, "0")) {
++		printf("oneios-audio-tunings: off (oneios-audio-tunings=0): no haptic engine preset, Core Haptics' server gives up\n");
++		return;
++	}
++	if (board[0] == 0 || board[0] == '.' || strchr(board, '/') != NULL) {
++		printf("oneios-audio-tunings: \"%s\": not a folder name of /Library/Audio/Tunings: V54 taken\n", board);
++		strlcpy(board, "V54", sizeof(board));
++	}
++	/* the hardware model: the tree's first compatible */
++	DTEntry root;
++	void const *value = NULL;
++	unsigned int size = 0;
++	if (SecureDTLookupEntry(NULL, "/", &root) == kSuccess && SecureDTGetProperty(root, "compatible", &value, &size) == kSuccess &&
++	    value && size > 1) {
++		size_t n = strnlen((const char *)value, size);
++		if (n > 0 && n < sizeof(model)) {
++			memcpy(model, value, n);
++			model[n] = 0;
++		}
++	}
++	if (model[0] == '.' || strchr(model, '/') != NULL) {
++		printf("oneios-audio-tunings: the model \"%s\" is not a folder name: nothing made\n", model);
++		return;
++	}
++	char own[192], folder[128], visible[96];
++	snprintf(own, sizeof(own), "%s/%s/Haptics/hapticengineconfig.plist", point, model);
++	snprintf(folder, sizeof(folder), "%s/%s", source, model);
++	snprintf(visible, sizeof(visible), "%s/%s", point, board);
++	vfs_context_t ctx = vfs_context_current();
++	vnode_t vp = NULLVP;
++	if (vnode_lookup(own, 0, &vp, ctx) == 0) {
++		vnode_put(vp);
++		printf("oneios-audio-tunings: %s is there already: nothing made\n", own);
++		return;
++	}
++	const char *dirs[] = { parent1, parent2, source };
++	int error = 0;
++	for (unsigned i = 0; i < 3 && !error; i++) {
++		vnode_t dvp = NULLVP;
++		error = vnode_lookup(dirs[i], VNODE_LOOKUP_NOFOLLOW, &dvp, ctx);
++		if (error == 0) {
++			vnode_put(dvp);
++		} else if (error == ENOENT) {
++			error = oneios_kern_mkdir(dirs[i], 0755, ctx);
++		}
++		if (error) {
++			printf("oneios-audio-tunings: %s could not be made (%d): nothing mounted\n", dirs[i], error);
++			return;
++		}
++	}
++	int made = oneios_audio_tunings_folder(board, folder, ctx);
++	if (made < 0) {
++		printf("oneios-audio-tunings: %s: error %d\n", folder, -made);
++	}
++	/* Scratch 0xa00..0xb28, as 0056's mount (done by now): the mount's type, point and source. */
++	native_gpu_addon_mount(p, scratch, 0xa00, source, sizeof(source), point, sizeof(point), visible, own,
++	    &oneios_audio_tunings_stage, &oneios_audio_tunings_status);
++	printf("oneios-audio-tunings: %s over %s: %s/Haptics -> %s/Haptics (%d entries made%s), stage %d, status %d (stage 5 "
++	    "status 0: mounted, the iPhone's haptics preset visible as %s's)\n", source, point, model, board, made < 0 ? 0 : made,
++	    made < 0 ? ", an error" : "", oneios_audio_tunings_stage, oneios_audio_tunings_status, model);
++}
++#endif
+ static void
+ native_gpu_addon_prepare(proc_t p, user_addr_t scratch)
+ {
+@@ -9752,6 +9904,7 @@
+ 	oneios_jobs_disable();                        /* 0053 */
+ 	oneios_swap_folder();                         /* 0057 */
+ 	oneios_log_persist();                         /* 0070 */
++	oneios_audio_tunings(p, scratch);             /* 0081 */
+ #endif
+ }
+ 

@@ -369,6 +369,22 @@ int xhd_frame_seq(const uint8_t *page, uint64_t *count)
   return 1;
 }
 
+unsigned xhd_side_key(uint16_t type, uint16_t code, int32_t value, double now, double *power_down, int *toggle,
+                      struct xhd_vinput out[2])
+{
+  if (type != EV_KEY || (code != KEY_POWER && code != KEY_VOLUMEUP && code != KEY_VOLUMEDOWN) || (value != 0 && value != 1)) return 0;
+  if (code == KEY_POWER) {
+    if (value == 1) *power_down = now;
+    else {
+      if (*power_down > 0 && now - *power_down < XHD_POWER_CLICK_S) *toggle = 1;
+      *power_down = 0;
+    }
+  }
+  out[0] = (struct xhd_vinput){ EV_KEY, code, (uint32_t)value };
+  out[1] = (struct xhd_vinput){ EV_SYN, SYN_REPORT, 0 };
+  return 2;
+}
+
 int xhd_touch_event(uint16_t type, uint16_t code, int32_t value, struct xhd_vinput *out)
 {
   int keep = 0;

@@ -275,3 +275,30 @@
 # oneios-display-wide=1 (xnuhost's display-format=rgba16f) a half-float 'RGhA' frame goes to the virtio scanout as it
 # is (xnuhost's format 0x52476841); OneiOSDisplay.cpp logs each surface format the compositor swaps and the display
 # service's properties (display/README.md, "Colour, depth and the panel").
+# native-gpu-open-grant (2026-11-24): the GPU's grant and its record of opens in the native kernel too. With crosvm's
+# virtio-gpu and Metal's accelerator published (shared-RAM VM, docs/native.md "The GPU in the shared-RAM VM"), every
+# process read MetalPluginName and none made a device: the native kernel still let the iPhone's sandbox profiles decide
+# who opens the accelerator once the class chains are adopted, which 0033 replaced for the hosted kernel with the grant
+# (it refused iconservicesagent there, and the home screen had no icons), and it logged none of the opens and the plug-in's
+# progress markers and text rows (0031, 0039). The four #if XNU_HOSTED of those in IOUserClient.cpp also take
+# XNU_ONEIOS_NATIVE.
+0079-native-gpu-open-grant.patch
+# native-prime-list (2026-11-24): the Metal plug-in's shader priming list in the native kernel. The render server's
+# sandbox lets the plug-in list few folders, so without NativeAdrenoMetal.primelist beside its bundle it primed a few
+# libraries and the rest compiled cold when an app first drew with them (slow first launches). The loader carries the
+# list (every .metallib of the OS image: oneios-tool image apfs-find) in /chosen/oneios-prime-list
+# (xnuloader-crosvm --prime-list); native_gpu_addon_prepare writes it beside the plug-in at every boot that has it, as
+# 0039 writes the client list: "oneios-gpu-prime: PATH N libraries: written (0)".
+0080-native-prime-list.patch
+# native-audio-tunings (2026-11-24): upstream's hosted 0078 and 0086 in one, for the native kernel. Core Haptics' server
+# (hapticd) loads /Library/Audio/Tunings/<model>/Haptics/hapticengineconfig.plist and gives up without it; the model is
+# the tree's first compatible, "oneios,xnuhost" in the native VM too, and only V54's folder exists, so every keyboard
+# tap waited for an XPC answer that never came (the keyboard comes up and stops at the first key). A Data folder
+# <model> with links into V54/Haptics (and AID8022's actuator chain) is shown over /Library/Audio/Tunings read-only.
+0081-native-audio-tunings.patch
+# native-dictation-status (2026-11-24): upstream's hosted 0083 for the native kernel. With no "Offline Dictation Status"
+# in com.apple.assistant.support, AFDictationConnection's cache stays nil and every app that shows a keyboard loops on
+# its main thread (dictation availability -> the keyboard dock redraws -> asks again): Notes and Settings at 100 % of a
+# core while typing, every key seconds late (take9). Before launchd the key is written as an empty dictionary when
+# missing. And com.apple.navd in 0044's default enabled jobs (the Maps widget's reconnect loop).
+0082-native-dictation-status.patch

@@ -218,6 +218,24 @@ pub enum Command {
         #[arg(long, value_enum, default_value = "auto")]
         apfs: apfs::fuse::Backend,
     },
+    /// Only in this tool: every regular file under PATH whose name ends with SUFFIX, one absolute path a line (PREFIX
+    /// before each: the volume's mount point in iOS), read without a mount by this tool's reader
+    ApfsFind {
+        image: String,
+        path: Option<String>,
+        #[arg(long)]
+        suffix: String,
+        #[arg(long, default_value = "")]
+        prefix: String,
+        #[arg(long, value_name = "N|NAME")]
+        volume: Option<String>,
+        /// The newest checkpoint that passes the checks, for a store copied after use
+        #[arg(long)]
+        newest: bool,
+        /// The checkpoint of this transaction (see `apfs-checkpoints`)
+        #[arg(long, value_name = "XID", conflicts_with = "newest")]
+        checkpoint: Option<u64>,
+    },
     /// Only in this tool: copy a file or a folder out of an image, without a mount
     ApfsCopy {
         image: String,
@@ -421,6 +439,9 @@ fn dispatch(command: Command) -> Result<(), Fail> {
         }
         Command::Im4p { input, out, .. } => say(&im4p::cmd(&input, &out)?),
         Command::ApfsLs { image, path, volume, newest, checkpoint, apfs } => apfs_tools::ls(&image, path.as_deref().unwrap_or(""), volume.as_deref(), apfs_tools::pick(newest, checkpoint), apfs),
+        Command::ApfsFind { image, path, suffix, prefix, volume, newest, checkpoint } => {
+            apfs_tools::find(&image, path.as_deref().unwrap_or(""), &suffix, &prefix, volume.as_deref(), apfs_tools::pick(newest, checkpoint))
+        }
         Command::ApfsCopy { image, src, dst, volume, newest, checkpoint, apfs } => apfs_tools::copy(&image, &src, &dst, volume.as_deref(), apfs_tools::pick(newest, checkpoint), apfs),
         Command::ApfsCheckpoints { image } => say(apfs::Container::open(&image, apfs::Pick::Newest)?.report().trim_end()),
         Command::CheckIpsw(Raw { args }) => ipsw::cmd_check_ipsw(arg(&args, 0)?, opt(&args, "--source")?),

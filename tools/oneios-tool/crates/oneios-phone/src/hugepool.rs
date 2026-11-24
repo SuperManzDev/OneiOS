@@ -142,6 +142,24 @@ pub fn load(adb: &Adb, ko: &str, kapi_check: &str, want: u32, out: &str) -> Resu
     status(adb)
 }
 
+/// The cycle's helpers, for another script that stops and starts One UI (vm-boot --takeover): `now` .. `start_ui` and the
+/// word modes (`--stop-loop`, `--feed`, `--failsafe`), as CYCLE has them. They use $D, $SELF, $CTL, $P and $LIMIT.
+pub fn ui_functions() -> &'static str {
+    let begin = CYCLE.find("now() {").expect("the cycle's helpers");
+    let end = CYCLE.find("\nesac\n").expect("the cycle's word modes") + "\nesac\n".len();
+    &CYCLE[begin..end]
+}
+
+/// The cycle's stop of One UI (oneios_switch.sh [3/5]): the watchdog nodes system_server holds, the way back armed (the
+/// failsafe and a trap), the framework stopped and kept so, the watchdogs closed and fed. Expects $CTL made and the
+/// services' base states saved.
+pub fn ui_stop() -> &'static str {
+    let begin = CYCLE.find("# the watchdog nodes system_server keeps open").expect("the cycle's stop");
+    let line = CYCLE.find("say \"stopped: zygote").expect("the cycle's stopped line");
+    let end = line + CYCLE[line..].find('\n').expect("a line") + 1;
+    &CYCLE[begin..end]
+}
+
 /// `grow`'s script on the phone. WANT pages of 2 MiB, acquire MODE (2 sweep + reclaim, 3 sweep + per-window evict),
 /// LIMIT seconds of One UI down before the failsafe starts it.
 pub fn cycle_script(want: u32, mode: u32, limit: u32) -> String {
@@ -460,6 +478,18 @@ pub fn unload(adb: &Adb) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_ui_helpers_are_the_cycles_own() {
+        let f = ui_functions();
+        assert!(f.starts_with("now() {") && f.ends_with("\nesac\n"));
+        assert!(f.contains("start_ui() {") && f.contains("--stop-loop)") && f.contains("--feed)") && f.contains("--failsafe)"));
+        let s = ui_stop();
+        assert!(s.starts_with("# the watchdog nodes system_server keeps open"));
+        assert!(s.contains("bg /system/bin/sh $SELF --failsafe") && s.contains("setprop ctl.stop zygote") && s.ends_with("echo gone); memory $(mem_line)\"\n"));
+        // the cycle itself is unchanged by them
+        assert!(cycle_script(64, 3, 180).contains(f) && cycle_script(64, 3, 180).contains(s));
+    }
 
     #[test]
     fn kapi_args_and_the_kernel_version() {

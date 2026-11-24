@@ -40,7 +40,7 @@
 
 use crate::gen::{self, fail, Compile, Ctx, Stubs};
 use crate::macho_object::Object;
-use crate::staged::{display::{DISPLAY, GOP_BOOT_VIDEO, LEGACY_BOOT_VIDEO, SCANOUT}, display_header};
+use crate::staged::{display::{DISPLAY, GOP_BOOT_VIDEO, LEGACY_BOOT_VIDEO, NATIVE_PROBE, SCANOUT}, display_header};
 use anyhow::{anyhow, Result};
 use oneios_common::pyjson::Value;
 use siphasher::sip::SipHasher24;
@@ -283,6 +283,14 @@ pub fn staged_text(text: String) -> Result<String> {
     gen::replace_once(text, DISPLAY, |anchor| format!("build-oneios-display: LegacyDisplayProbe.cpp no longer has exactly one {}", anchor.trim()))
 }
 
+/// LegacyDisplayProbe.cpp, after staged_text, with staged/display.rs's NATIVE_PROBE: the native kernel leaves the virtio
+/// scanout alone (the frames stay in the boot video the phone's bridge shows).
+pub fn staged_native_probe(text: String) -> Result<String> {
+    gen::replace_once(text, NATIVE_PROBE, |anchor| {
+        format!("build-oneios-display: LegacyDisplayProbe.cpp no longer has exactly one {}", anchor.trim())
+    })
+}
+
 /// DroidVMVirtioGpuDisplay.cpp with the lines of staged/display.rs's SCANOUT: half-float surfaces scanned out as such.
 pub fn staged_scanout(text: String) -> Result<String> {
     gen::replace_once(text, SCANOUT, |anchor| {
@@ -355,7 +363,7 @@ pub fn main() -> Result<()> {
     let bound = bind(&gen::read_bytes(&native)?, &abi)?;
     let staged = out.join("LegacyDisplayProbe.cpp");
     let mut objects = vec![late(native)?, late(compile_cpp(&gop, &flags(&["-I", &display_s]))?)?];
-    gen::write_text(&staged, &staged_text(gen::read_text(&package.join("LegacyDisplayProbe.cpp"))?)?)?;
+    gen::write_text(&staged, &staged_native_probe(staged_text(gen::read_text(&package.join("LegacyDisplayProbe.cpp"))?)?)?)?;
     objects.push(compile_cpp(&staged, &flags(&["-I", &package_s]).into_iter().chain(probe_defines()).collect::<Vec<_>>())?);
     // DYNAMIC as the transport in liboneiosgpu.a: its scratch entries are allocated when the display starts. Staged with
     // the scanout format of each surface (staged/display.rs SCANOUT).

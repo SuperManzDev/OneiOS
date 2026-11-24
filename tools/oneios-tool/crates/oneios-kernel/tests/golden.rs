@@ -112,9 +112,14 @@ fn the_boot_video_edits_fit_the_pinned_sources() {
         build_oneios_display::staged_legacy(std::fs::read_to_string(&legacy).unwrap()).unwrap(),
         build_oneios_display::staged_gop(std::fs::read_to_string(&gop).unwrap()).unwrap(),
     ] {
-        let at = staged.find("#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE\n").unwrap();
-        let block = &staged[at..at + staged[at..].find("#endif\n").unwrap()];
-        assert!(block.contains("kIOMapCopybackCache") && block.contains("#else\n") && block.contains("kIOMapInhibitCache"));
+        // the native block of the boot video's mapping (NativeLegacyDisplay.cpp has another: the CPU copy's wait for the GPU)
+        let block = staged
+            .split("#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE\n")
+            .skip(1)
+            .map(|rest| &rest[..rest.find("#endif\n").unwrap()])
+            .find(|block| block.contains("kIOMapCopybackCache"))
+            .unwrap();
+        assert!(block.contains("#else\n") && block.contains("kIOMapInhibitCache"));
         assert_eq!(staged.matches("kIOMapCopybackCache); // OneiOS native: crosvm's pool").count(), 1);
     }
 }
@@ -275,4 +280,78 @@ fn the_input_pci_edits_fit_the_pinned_source() {
     let pages = staged.find("        droidvm_input_pages[d->index] = NULL;").unwrap();
     assert!(pages < staged[pages..].find("const char *why = input_start(d);").unwrap() + pages);
     assert!(build_oneios_hid::staged_transport_pci(hosted.repeat(2)).is_err());
+}
+
+#[test]
+fn the_gpu_pci_edits_fit_the_pinned_source() {
+    // native, 2026-11-24: the virtio-gpu transport on crosvm's PCI (staged/gpu.rs TRANSPORT_PCI), after the hosted
+    // edits, against the real DroidVMVirtioGpu.cpp where external/ has it.
+    let source = repo().join("external/UniXNU-droidvm/package/DroidVMVirtioGpu.cpp");
+    if !source.exists() {
+        eprintln!("external/UniXNU-droidvm is not here: the GPU transport's PCI edits were not checked");
+        return;
+    }
+    let text = std::fs::read_to_string(&source).unwrap();
+    let hosted = build_oneios_gpu::staged_transport_text(text.clone()).unwrap();
+    let staged = build_oneios_gpu::staged_transport_pci_text(hosted.clone()).unwrap();
+    // the MMIO accessors renamed, the dispatchers in their place
+    assert_eq!(staged.matches("uint32_t mmioRd(unsigned offset) {\n").count(), 1);
+    assert_eq!(staged.matches("void mmioWr(unsigned offset, uint32_t v) {\n").count(), 1);
+    assert!(staged.contains("uint32_t rd(unsigned offset) {\n#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE\n    if (pci) return pciRd(offset);\n#endif\n    return mmioRd(offset);\n}\n"));
+    assert!(staged.contains("void wr(unsigned offset, uint32_t v) {\n#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE\n    if (pci) { pciWr(offset, v); return; }\n#endif\n    mmioWr(offset, v);\n}\n"));
+    // the PCI start: the node's compatible, the function's identity, its regions; the MMIO start kept on both sides
+    assert!(staged.contains("!memcmp(value, \"oneios,virtio-gpu-pci\", 22)"));
+    assert!(staged.contains("pciRd32(config) != (0x1af4u | 0x1050u << 16)"));
+    assert_eq!(staged.matches("registers = ml_io_map(reg[0] - ranges[0] + ranges[1], 0x1000);").count(), 2);
+    // every native block is flat, and the accessors' block comes before the start that uses it
+    for block in staged.split("#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE\n").skip(1) {
+        let inside = &block[..block.find("#endif\n").unwrap()];
+        assert!(!inside.contains("#if "), "a native block holds another #if");
+    }
+    assert!(staged.find("bool pciRegions(uintptr_t config) {").unwrap() < staged.find("bool start() {").unwrap());
+    // the notification goes to the selected queue's offset times the multiplier, the ISR read acknowledges
+    assert!(staged.contains("pciWr16(pciNotify + uintptr_t(pciNotifyOffset[value]) * pciNotifyMultiplier, uint16_t(value));"));
+    assert!(staged.contains("case 0x60: return pciRd8(pciIsr) & 3;"));
+    assert!(build_oneios_gpu::staged_transport_pci_text(staged.clone()).is_err());
+    assert!(build_oneios_gpu::staged_transport_pci_text(text).is_ok(), "the PCI edits do not depend on the hosted ones");
+}
+
+#[test]
+fn the_native_probe_leaves_the_virtio_scanout_alone() {
+    // native, 2026-11-24: the board probe does not start crosvm's scanout in the native kernel (staged/display.rs
+    // NATIVE_PROBE), after DISPLAY, against the real LegacyDisplayProbe.cpp where external/ has it.
+    let probe = repo().join("external/UniXNU-droidvm/package/LegacyDisplayProbe.cpp");
+    if !probe.exists() {
+        eprintln!("external/UniXNU-droidvm is not here: the native probe's edit was not checked");
+        return;
+    }
+    let staged = build_oneios_display::staged_text(std::fs::read_to_string(&probe).unwrap()).unwrap();
+    let native = build_oneios_display::staged_native_probe(staged).unwrap();
+    let at = native.find("void native_legacy_display_late_probe(void) {\n").unwrap();
+    let body = &native[at..at + 400];
+    assert!(body.contains("PE_parse_boot_argn(\"oneios-virtio-scanout\",&scanout,sizeof(scanout));if(scanout)droidvm_virtio_gpu_display_start();"));
+    assert!(body.contains("#else\n    droidvm_virtio_gpu_display_start();\n#endif\n"));
+    assert_eq!(native.matches("droidvm_virtio_gpu_display_start();").count(), 2);
+    assert!(build_oneios_display::staged_native_probe(native.clone()).is_err());
+}
+
+#[test]
+fn the_native_3d_edit_logs_refusals_in_the_pinned_source() {
+    // native, 2026-11-24: the refused user calls of the 3D driver in the kernel's log (staged/gpu.rs GPU3D_NATIVE), after GPU3D.
+    let source = repo().join("external/UniXNU-droidvm/package/DroidVMVirtioGpu3D.cpp");
+    if !source.exists() {
+        eprintln!("external/UniXNU-droidvm is not here: the 3D driver's native edit was not checked");
+        return;
+    }
+    let hosted = build_oneios_gpu::staged_3d_text(std::fs::read_to_string(&source).unwrap()).unwrap();
+    let native = build_oneios_gpu::staged_3d_native_text(hosted).unwrap();
+    let at = native.find("#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE\n        {\n            static volatile uint32_t refusalsLogged;").unwrap();
+    assert!(native[at..at + 500].contains("droidvm_virtgpu_last_refusal[0] = op;"), "the log sits where the refusal is counted");
+    // the creating task's hint only outside the native kernel: crosvm's virglrenderer refuses context_init bits above the capset
+    assert!(native.contains("#if !(defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE)\n        create.contextInit |= uint32_t(hint[0]) << 8 | uint32_t(hint[1]) << 16;\n#endif\n"));
+    // the display's fence counters from the virtio GPU, before the function whose names they use
+    let fences = native.find("extern \"C\" bool native_adreno_fences(uint32_t *submitted, uint32_t *retired) {").unwrap();
+    assert!(fences < native.find("extern \"C\" bool droidvm_virtgpu_finished_by(uint64_t order, int pid) {\n").unwrap());
+    assert!(native.contains("    *retired = uint32_t(oldest - 1);\n"));
+    assert!(build_oneios_gpu::staged_3d_native_text(native).is_err());
 }

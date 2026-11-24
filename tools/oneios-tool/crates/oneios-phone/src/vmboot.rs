@@ -34,7 +34,8 @@
 //! `touch.sock`, and when crosvm connects there (`--input multi-touch[path=...]`) it takes the touchscreen for the VM's
 //! life (One UI under the layer gets no touches) and passes its frames on. crosvm's own `--evdev` cannot take it: it wants
 //! the device's serial name, which sec_touchscreen has none of (boot 4's first start). The kernel reads crosvm's device as
-//! a virtio-input PCI function, its queues in the pool. The side keys stay with Android; volume down held 3 s stops the
+//! a virtio-input PCI function, its queues in the pool. The side keys stay with Android (a takeover reads their presses, without
+//! taking them, and passes them on to the VM: power, volume up and down); volume down held 10 s stops the
 //! VM (getevent reads the key and does not take it): the way back without the PC. Their logs are `touch.txt` and run.txt.
 //!
 //! The shared-RAM VM: an Image of xnuloader-crosvm --shared-ram (label `shared-ram=1`) runs under Droid-VM's own crosvm
@@ -46,6 +47,18 @@
 //! guest's RAM (`displayctl pool --vm shared`). The window comes from gh_hugepage_reserve's 2 MiB pages as before: only
 //! they stay where they are when gunyah_host_share pins them (vm-probe shared2: 1 GiB of other pages moved, 126651 runs,
 //! and the resource manager refused to map it).
+//!
+//! The GPU: a shared-RAM Image of xnuloader-crosvm --gpu (label `gpu=1`, FILE.disks `gpu PCI-ADDRESS DRM-HOST-MIB
+//! DRM-HOST-PA`) gets crosvm's virtio-gpu with Droid-VM's virglrenderer and drm2kgsl (`--gpu backend=virglrenderer,
+//! context-types=drm,udmabuf=true,pci-address=...,pci-bar-size=0x10000000`: no host-visible window is needed, a guest
+//! blob is the guest's own pages, and the 8 GiB default does not fit that crosvm's 64-bit window) and drm2kgsl's host arena
+//! (`--pre-alloc drm-host-mb=N`); the tree's `drm2kgsl_host@PA` node is checked beside the shim's.
+//!
+//! The screen through the GPU's scanout (xnuloader-crosvm --gpu-scanout, FILE.disks `scanout WIDTH HEIGHT HZ`): crosvm's
+//! virtio-gpu gets that display (`displays=[[mode=windowed[W,H],refresh-rate=HZ]]`) and its Android display backend
+//! (`--android-display-service name=oneios_disp,screen=gpu-0`, which registers that service), and the display helper
+//! starts in its crosvm mode (`oneios-display --crosvm-display oneios_disp`): its layer's Surface goes to crosvm, which
+//! blits each frame the guest flushes into it on the GPU. No bridge, no copy on either CPU.
 use crate::adb::Adb;
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
@@ -55,6 +68,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 pub const DIR: &str = "/data/local/tmp/oneios-vmboot";
+/// The service name crosvm registers its Android display under (--android-display-service), and the helper looks up.
+pub const CROSVM_DISPLAY: &str = "oneios_disp";
 /// crosvm's DRAM on aarch64 (xnuloader-crosvm RAM_BASE).
 const RAM_BASE: u64 = 0x8000_0000;
 /// What /data must have free before a VM with a Data store starts: its first start writes the seed's ~2 GB into it.
@@ -68,6 +83,8 @@ pub struct Label {
     pub swiotlb: u32,
     /// xnuloader-crosvm --shared-ram: Droid-VM's pseudo-unprotected VM
     pub shared: bool,
+    /// xnuloader-crosvm --gpu: the VM's virtio-gpu, and drm2kgsl's host arena at the RAM's top
+    pub gpu: bool,
 }
 
 pub fn label(image: &[u8]) -> Option<Label> {
@@ -77,7 +94,7 @@ pub fn label(image: &[u8]) -> Option<Label> {
     let end = image[0x100..0x200].iter().position(|b| *b == 0)?;
     let text = std::str::from_utf8(&image[0x100..0x100 + end]).ok()?;
     let rest = text.strip_prefix("oneios-crosvm ")?;
-    let (mut ram, mut cpus, mut swiotlb, mut shared) = (None, None, Some(8), false);
+    let (mut ram, mut cpus, mut swiotlb, mut shared, mut gpu) = (None, None, Some(8), false, false);
     for word in rest.split_whitespace() {
         if let Some(v) = word.strip_prefix("ram-mib=") {
             ram = v.parse().ok();
@@ -87,9 +104,11 @@ pub fn label(image: &[u8]) -> Option<Label> {
             swiotlb = v.parse().ok();
         } else if word == "shared-ram=1" {
             shared = true;
+        } else if word == "gpu=1" {
+            gpu = true;
         }
     }
-    Some(Label { ram: ram?, cpus: cpus?, swiotlb: swiotlb?, shared })
+    Some(Label { ram: ram?, cpus: cpus?, swiotlb: swiotlb?, shared, gpu })
 }
 
 /// FILE.disks: the pool crosvm's tree must name, the Data store and crosvm's `--block` values.
@@ -105,6 +124,22 @@ pub struct Disks {
     pub fb: Option<Fb>,
     /// The kernel has the input bus (`input touch`): the phone's touchscreen goes to crosvm.
     pub input: bool,
+    /// `gpu PCI-ADDRESS DRM-HOST-MIB DRM-HOST-PA` (xnuloader-crosvm --gpu)
+    pub gpu: Option<Gpu>,
+    /// `scanout WIDTH HEIGHT HZ` (xnuloader-crosvm --gpu-scanout): the screen through crosvm's own display
+    pub scanout: Option<(u32, u32, u32)>,
+    /// `audio` (xnuloader-crosvm --audio): the kernel's sound card, crosvm's virtio-snd with its AAudio backend (the speaker)
+    pub audio: bool,
+    /// `wifi` (xnuloader-crosvm --wifi): the kernel's Wi-Fi, crosvm's virtio-net on a tap that `wifictl tap` carries to wlan0
+    pub wifi: bool,
+}
+
+/// The GPU's PCI address (crosvm's pci-address=), drm2kgsl's host arena in MiB and where the Image expects it.
+#[derive(Debug, PartialEq)]
+pub struct Gpu {
+    pub pci: String,
+    pub drm_mib: u64,
+    pub drm_host: u64,
 }
 
 /// `fb OFFSET BYTES WIDTH HEIGHT STRIDE SEQ`: offsets in the pool, the frame first, the count's page after it.
@@ -124,7 +159,8 @@ fn plain(text: &str) -> bool {
 }
 
 pub fn parse_disks(text: &str) -> Result<Disks> {
-    let (mut swiotlb, mut pool, mut store, mut fb, mut input) = (None, None, None, None, false);
+    let (mut swiotlb, mut pool, mut store, mut fb, mut input, mut gpu, mut scanout) = (None, None, None, None, false, None, None);
+    let (mut audio, mut wifi) = (false, false);
     let mut blocks = Vec::new();
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         let words: Vec<&str> = line.split_whitespace().collect();
@@ -147,11 +183,34 @@ pub fn parse_disks(text: &str) -> Result<Disks> {
                 })
             }
             ["input", "touch"] => input = true,
-            _ => bail!("a line of the disks list that is not one of swiotlb-mib, pool, store, block, fb, input: {line:?}"),
+            ["audio"] => audio = true,
+            ["wifi"] => wifi = true,
+            ["gpu", pci, mib, pa] => {
+                let ok = pci.len() == 7 && pci.as_bytes()[2] == b':' && pci.as_bytes()[5] == b'.' && plain(pci);
+                if !ok {
+                    bail!("gpu: {pci:?} is not a PCI address of the form 00:0c.0");
+                }
+                gpu = Some(Gpu {
+                    pci: pci.to_string(),
+                    drm_mib: mib.parse().context("gpu DRM-HOST-MIB")?,
+                    drm_host: u64::from_str_radix(pa.strip_prefix("0x").context("gpu DRM-HOST-PA 0x...")?, 16).context("gpu DRM-HOST-PA")?,
+                })
+            }
+            ["scanout", w, h, hz] => {
+                let (w, h, hz): (u32, u32, u32) = (w.parse().context("scanout WIDTH")?, h.parse().context("scanout HEIGHT")?, hz.parse().context("scanout HZ")?);
+                if !(320..=4096).contains(&w) || !(320..=4096).contains(&h) || !(24..=120).contains(&hz) {
+                    bail!("scanout {w}x{h} at {hz} Hz: 320 to 4096 a side, 24 to 120 Hz");
+                }
+                scanout = Some((w, h, hz));
+            }
+            _ => bail!("a line of the disks list that is not one of swiotlb-mib, pool, store, block, fb, input, gpu, scanout, audio, wifi: {line:?}"),
         }
     }
     let (store, store_gib) = store.context("no store line")?;
-    let d = Disks { swiotlb: swiotlb.context("no swiotlb-mib line")?, pool: pool.context("no pool line")?, store, store_gib, blocks, fb, input };
+    let d = Disks { swiotlb: swiotlb.context("no swiotlb-mib line")?, pool: pool.context("no pool line")?, store, store_gib, blocks, fb, input, gpu, scanout, audio, wifi };
+    if d.scanout.is_some() && (d.gpu.is_none() || d.fb.is_none()) {
+        bail!("a scanout without the GPU or the screen: xnuloader-crosvm gives it with --gpu-scanout and --display");
+    }
     if d.input && d.fb.is_none() {
         bail!("the input bus without a screen: xnuloader-crosvm gives both with --display");
     }
@@ -190,15 +249,219 @@ pub fn parse_disks(text: &str) -> Result<Disks> {
 }
 
 /// The run on the phone (detached; its own log is `run.txt`).
+/// The GPU's lowest clock while an Image with the GPU runs, by default (`vm-boot --gpu-floor`, MHz): the phone's Adreno
+/// idles at 160-222 MHz and its governor (msm-adreno-tz) takes some frames to raise it, so a swipe's first frames were
+/// drawn at the idle clock. 607 MHz is one of the S25 GPU's 15 clocks (160 to 1200 MHz).
+pub const GPU_FLOOR_MHZ: u32 = 607;
+
 pub fn boot_script(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Option<&Disks>) -> String {
-    boot_script_with(l, seconds, thp, sha, disks, false, false)
+    boot_script_with(l, seconds, thp, sha, disks, false, false, &Tuning::DEFAULT)
 }
 
 /// The same, with `swipe`: the touch forwarder's test swipes (`--swipe-test`: 200 s after crosvm connected, then every
 /// 60 s), a test of the VM's touch without a finger.
 /// `pin` (`--pin`): vCPU N on the phone's core N (crosvm `--cpu-affinity`), each where the scheduler would otherwise
 /// move it about: on the S25 cores 0 to 5 run at up to 3.53 GHz and 6 and 7 at 4.47 GHz.
-pub fn boot_script_with(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Option<&Disks>, swipe: bool, pin: bool) -> String {
+/// The GPU's floor for the VM's life (an Image with the GPU and `floor_mhz` > 0): devfreq's lowest clock becomes the
+/// lowest of the GPU's clocks at or above `floor_mhz`, and is put back at the end; the governor still raises the clock as
+/// it likes. KGSL's min_pwrlevel is not it: on the S25 the level written there was back at 14 (160 MHz) seconds later,
+/// while devfreq's min_freq stays (full2). Without the GPU, or at 0: nothing.
+/// How long the GPU stays awake after its last work while the VM runs (KGSL's idle_timer, ms; Android's is 80).
+pub const GPU_AWAKE_MS: u32 = 30000;
+
+pub fn gpu_floor_script(l: &Label, floor_mhz: u32) -> (String, String) {
+    if !l.gpu || floor_mhz == 0 {
+        return (String::new(), String::new());
+    }
+    let hz = u64::from(floor_mhz) * 1_000_000;
+    (
+        format!(
+            "G=/sys/class/kgsl/kgsl-3d0/devfreq\nK=/sys/class/kgsl/kgsl-3d0\ngpu_min=\ngpu_idle=\n\
+             gpu_restore() {{\n  \
+             [ -z \"$gpu_idle\" ] || {{ echo \"$gpu_idle\" > $K/idle_timer && echo \"gpu: it sleeps $(cat $K/idle_timer) ms after its work again\"; }}\n  \
+             gpu_idle=\n  [ -n \"$gpu_min\" ] || return 0\n  \
+             echo \"$gpu_min\" > $G/min_freq && echo \"gpu: its lowest clock is $(cat $G/min_freq) Hz again\"\n  \
+             gpu_min=\n}}\n\
+             # awake 30 s after its last work, not 80 ms: the first frames after a pause waited for it to wake (take2)\n\
+             if [ -w $K/idle_timer ]; then gpu_idle=$(cat $K/idle_timer); echo {GPU_AWAKE_MS} > $K/idle_timer && \
+             echo \"gpu: it stays awake $(cat $K/idle_timer) ms after its last work while the VM runs (it was $gpu_idle ms)\"; fi\n\
+             if [ -w $G/min_freq ] && [ -r $G/available_frequencies ]; then\n  \
+             floor=\n  \
+             for f in $(cat $G/available_frequencies); do\n    \
+             if [ \"$f\" -ge {hz} ] && {{ [ -z \"$floor\" ] || [ \"$f\" -lt \"$floor\" ]; }}; then floor=$f; fi\n  done\n  \
+             if [ -n \"$floor\" ]; then\n    \
+             gpu_min=$(cat $G/min_freq)\n    \
+             echo $floor > $G/min_freq && echo \"gpu: the GPU's lowest clock is $(cat $G/min_freq) Hz while the VM runs (it was $gpu_min Hz)\"\n  \
+             else echo \"gpu: no clock of {floor_mhz} MHz or more: the GPU's clocks are the governor's\"; fi\n\
+             else echo \"gpu: no $G/min_freq: the GPU's clocks are the governor's\"; fi\n"
+        ),
+        "gpu_restore\n".to_string(),
+    )
+}
+
+/// The thermal log (`vm-boot --thermal-log`, thermal.txt beside the VM's other files): once a second while crosvm runs, the
+/// hottest zone of each CPU cluster (cpu-0-*: cores 0-5, cpu-1-*: 6 and 7), of the GPU (gpuss-*), the board (sys-therm-0), in
+/// tenths of a degree, the battery's (tenths), each cluster's clock and its top, the GPU's clock and load. The zones are found
+/// by their type once, at the start (the owner allowed reading /sys/class/thermal for this, 2026-11-24): the material of a
+/// controller of our own for smoothness and temperature. Read only.
+pub fn thermal_log_script(on: bool) -> String {
+    if !on {
+        return String::new();
+    }
+    concat!(
+        "# the thermal log (vm-boot --thermal-log): read only, once a second while crosvm runs\n",
+        "tz() { for z in /sys/class/thermal/thermal_zone*; do case \"$(cat $z/type 2>/dev/null)\" in $1) echo $z/temp ;; esac; done; }\n",
+        "hot() { m=-1000000; for f in \"$@\"; do v=$(cat $f 2>/dev/null); [ -n \"$v\" ] && [ \"$v\" -gt $m ] && m=$v; done; echo $((m / 100)); }\n",
+        "(\n",
+        "  c0=$(tz 'cpu-0-*'); c1=$(tz 'cpu-1-*'); gz=$(tz 'gpuss-*'); bz=$(tz 'sys-therm-0'); Q=/sys/devices/system/cpu/cpufreq; K=/sys/class/kgsl/kgsl-3d0\n",
+        "  echo \"# time c0 c1 gpu board bat (tenths of a degree) f0/top0 f6/top6 (kHz) gpu-clock gpu-busy\"\n",
+        "  while kill -0 $pid 2>/dev/null; do\n",
+        "    echo \"$(date +%T) c0 $(hot $c0) c1 $(hot $c1) gpu $(hot $gz) board $(hot $bz) bat $(cat /sys/class/power_supply/battery/temp 2>/dev/null) \\\n",
+        "f0 $(cat $Q/policy0/scaling_cur_freq)/$(cat $Q/policy0/scaling_max_freq) f6 $(cat $Q/policy6/scaling_cur_freq)/$(cat $Q/policy6/scaling_max_freq) \\\n",
+        "g $(cat $K/gpuclk) $(cat $K/gpu_busy_percentage | tr -d ' %')\"\n",
+        "    sleep 1\n",
+        "  done\n",
+        ") > $D/thermal.txt 2>&1 &\n",
+        "echo \"thermal: the log is $D/thermal.txt, once a second\"\n",
+    )
+    .to_string()
+}
+
+/// The CPUs' floor for the VM's life, by default (`vm-boot --cpu-floor`, percent of each cluster's top clock now): the
+/// vCPUs' cores idled at 0.5-1 GHz and the governor (WALT) took frames to raise them when the VM woke, and Android's touch
+/// boost never comes (the touchscreen is the VM's), so a swipe from idle stuttered (full2). The hosted session's switch
+/// pinned the floors at the top, which heated the phone into its thermal caps; 60% of the top (2.25 GHz perf, 2.84 GHz prime
+/// once Samsung's limit is lifted) keeps the ramp short and the heat lower.
+pub const CPU_FLOOR_PERCENT: u32 = 60;
+
+/// The CPUs' floor for the VM's life (`floor_percent` > 0): each cpufreq policy's lowest clock becomes the lowest of its
+/// clocks at or above that share of its top one now (scaling_max_freq: a cap Android set stays), put back at the end.
+/// Policies are looked for by name (policy0 to policy7), not by a walk of /sys.
+pub fn cpu_floor_script(floor_percent: u32) -> (String, String) {
+    if floor_percent == 0 {
+        return (String::new(), String::new());
+    }
+    let pct = floor_percent.min(100);
+    (
+        format!(
+            "CF=/sys/devices/system/cpu/cpufreq\ncpu_mins=\n\
+             cpu_restore() {{\n  [ -n \"$cpu_mins\" ] || return 0\n  \
+             for pm in $cpu_mins; do echo \"${{pm#*=}}\" > $CF/policy${{pm%%=*}}/scaling_min_freq; done\n  \
+             echo \"cpu: the clusters' lowest clocks are back:$cpu_mins\"\n  cpu_mins=\n}}\n\
+             for p in 0 1 2 3 4 5 6 7; do\n  \
+             f=$CF/policy$p\n  [ -w $f/scaling_min_freq ] && [ -r $f/scaling_available_frequencies ] || continue\n  \
+             old=$(cat $f/scaling_min_freq); top=$(cat $f/scaling_max_freq); want=$((top * {pct} / 100)); floor=\n  \
+             for c in $(cat $f/scaling_available_frequencies); do\n    \
+             if [ \"$c\" -ge \"$want\" ] && [ \"$c\" -le \"$top\" ] && {{ [ -z \"$floor\" ] || [ \"$c\" -lt \"$floor\" ]; }}; then floor=$c; fi\n  done\n  \
+             [ -n \"$floor\" ] || floor=$top\n  \
+             echo $floor > $f/scaling_min_freq && cpu_mins=\"$cpu_mins $p=$old\" && \
+             echo \"cpu: policy$p's lowest clock is $(cat $f/scaling_min_freq) kHz while the VM runs (it was $old; its top is $top)\"\n\
+             done\n"
+        ),
+        "cpu_restore\n".to_string(),
+    )
+}
+
+/// How the VM's session treats the phone: the GPU's and the CPUs' floors (gpu_floor_script, cpu_floor_script) and whether One
+/// UI's framework is stopped for the VM's life (takeover_script).
+pub struct Tuning {
+    pub gpu_floor_mhz: u32,
+    pub cpu_floor_percent: u32,
+    pub takeover: bool,
+    /// With --pin: vCPU i on core pin_first + i, the cores below it the host's (crosvm's device threads, surfaceflinger)
+    pub pin_first: u32,
+    /// The thermal log (thermal_log_script)
+    pub thermal_log: bool,
+    /// With the sound card: crosvm's AAudio backend in its own process under this uid (crosvm's uid=), or None: in crosvm's
+    pub audio_uid: Option<u32>,
+}
+
+impl Tuning {
+    pub const DEFAULT: Tuning =
+        Tuning { gpu_floor_mhz: GPU_FLOOR_MHZ, cpu_floor_percent: CPU_FLOOR_PERCENT, takeover: false, pin_first: 0, thermal_log: false,
+                 audio_uid: None };
+}
+
+/// ui.sh for a takeover: hugepool's cycle helpers (hugepool::ui_functions: the stop loop, the watchdog feeder, the failsafe,
+/// start_ui and its last resort), with this folder's names. boot.sh sources it for start_ui and runs it again with a word for
+/// its helpers. Their outcome goes to ui-ctl/result: $D/result is the VM's. LIMIT: seconds One UI may be down before the
+/// failsafe starts it whatever the session does.
+pub fn ui_script(limit: u32) -> String {
+    format!(
+        "#!/system/bin/sh\n# vm-boot --takeover: One UI's stop and start, the helpers of hugepool's cycle (crates/oneios-phone/src/hugepool.rs)\n\
+         D={DIR}\nSELF=$D/ui.sh\nCTL=$D/ui-ctl\nP=/sys/module/gh_hugepage_reserve/parameters\nLIMIT={limit}\n{}",
+        crate::hugepool::ui_functions()
+            .replace("$D/result", "$CTL/result")
+            .replace("$D/cycle.log", "$D/ui.log")
+            .replace("oneios-hugepool-failsafe", "oneios-vmboot-failsafe")
+    )
+}
+
+/// The takeover (vm-boot --takeover), after the checks and before crosvm: One UI's framework stopped as hugepool's grow stops
+/// it (ui.sh: the way back armed first, the failsafe at LIMIT and a trap that starts One UI on any exit, the framework kept
+/// down, Samsung's software watchdog fed), its RAM freed, and the CPUs' caps (the profile's or the power saver's
+/// scaling_max_freq; thermal limits are not these) lifted to each cluster's top clock until the end. With One UI down nothing
+/// puts them back, turns the screen off for want of touches or lowers the clocks between them (full3: the profile's 2 GHz
+/// cap came back a minute after it was lifted). Empty without the takeover.
+pub fn takeover_script(takeover: bool, need_pages: u64) -> (String, String) {
+    if !takeover {
+        return (String::new(), String::new());
+    }
+    let stop = format!(
+        "# One UI's framework stopped for the VM's life (vm-boot --takeover): ui.sh, the way back armed first\n\
+         gpu_restore() {{ :; }}; cpu_restore() {{ :; }}; caps_restore() {{ :; }}; wifi_restore() {{ :; }}\n\
+         . $D/ui.sh\n\
+         rm -rf $CTL; mkdir -p $CTL\n\
+         for svc in zygote_secondary perfmond media.tuner zygote_next; do getprop init.svc.$svc > $CTL/base.$svc; done\n\
+         {}\
+         trap 'thp_restore; gpu_restore; cpu_restore; caps_restore; wifi_restore; start_ui \"the session ended\"' EXIT HUP INT TERM\n\
+         sync\necho 3 > /proc/sys/vm/drop_caches\n\
+         echo \"takeover: One UI is down while the VM runs; memory $(mem_line)\"\n\
+         need={need_pages}\n\
+         avail=$(grep '^pool_avail=' $P/refill_stat | cut -d= -f2)\n\
+         if [ \"${{avail:-0}}\" -lt $need ]; then\n  \
+         echo \"pool: $avail pages free, $need wanted: topped up while One UI is down (the module's acquire, as hugepool grow)\"\n  \
+         want=$(grep '^pool_want=' $P/refill_stat | cut -d= -f2); [ \"${{want:-0}}\" -ge $need ] || echo $need > $P/pool_want\n  \
+         echo 3 > $P/acquire; sleep 3\n  \
+         t=0; while [ $t -lt 90 ] && ! grep -q '^acquire_active=0$' $P/refill_stat; do sleep 1; t=$((t + 1)); done\n  \
+         [ $t -lt 90 ] || {{ echo 0 > $P/acquire; sleep 2; }}\n  \
+         avail=$(grep '^pool_avail=' $P/refill_stat | cut -d= -f2)\n  \
+         echo \"pool: $avail pages free after the top-up: $(stat_line)\"\n  \
+         [ \"${{avail:-0}}\" -ge $need ] || {{ end \"refused pool $avail of $need pages after a top-up\"; exit 1; }}\n\
+         fi\n\
+         # Samsung's own limit (its cpufreq_limit driver, /sys/devices/system/cpu/cpufreq_limit): One UI's services ask it for a\n\
+         # virtual top clock that its table turns into each cluster's cap (1958400: 1.96 GHz prime, 2.0 GHz perf, take3), and it\n\
+         # stays when they are gone; -1 is none. Thermal cooling and Qualcomm's own limits (dcvsh) are not this and stay.\n\
+         SL=/sys/devices/system/cpu/cpufreq_limit/cpufreq_max_limit\nsl_old=\n\
+         if [ -w $SL ]; then\n  \
+         sl_old=$(cat $SL)\n  \
+         [ \"$sl_old\" = -1 ] || {{ echo -1 > $SL && echo \"cpu: Samsung's cpufreq_limit max $sl_old lifted (now $(cat $SL)) while One UI is down\"; }}\n\
+         fi\n\
+         CF=/sys/devices/system/cpu/cpufreq\ncaps=\n\
+         caps_restore() {{\n  \
+         [ -z \"$sl_old\" ] || [ \"$sl_old\" = -1 ] || {{ echo \"$sl_old\" > $SL && echo \"cpu: Samsung's cpufreq_limit max is $(cat $SL) again\"; }}\n  \
+         sl_old=\n  [ -n \"$caps\" ] || return 0\n  \
+         for pm in $caps; do echo \"${{pm#*=}}\" > $CF/policy${{pm%%=*}}/scaling_max_freq; done\n  \
+         echo \"cpu: the clusters' caps are back:$caps\"\n  caps=\n}}\n\
+         for p in 0 1 2 3 4 5 6 7; do\n  \
+         f=$CF/policy$p\n  [ -w $f/scaling_max_freq ] && [ -r $f/cpuinfo_max_freq ] || continue\n  \
+         old=$(cat $f/scaling_max_freq); top=$(cat $f/cpuinfo_max_freq)\n  [ \"$old\" = \"$top\" ] && continue\n  \
+         echo $top > $f/scaling_max_freq && caps=\"$caps $p=$old\" && \
+         echo \"cpu: policy$p's cap is lifted to $(cat $f/scaling_max_freq) kHz while One UI is down (it was $old)\"\n\
+         done\n",
+        crate::hugepool::ui_stop()
+    );
+    (stop, "caps_restore\n".to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn boot_script_with(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Option<&Disks>, swipe: bool, pin: bool, t: &Tuning) -> String {
+    let (gpu_floor, gpu_restore) = gpu_floor_script(l, t.gpu_floor_mhz);
+    let (cpu_floor, cpu_restore) = cpu_floor_script(t.cpu_floor_percent);
+    // the pool pages the VM's RAM takes, the shared-RAM VM's allowance outside it aside (check_pool)
+    let need = (u64::from(l.ram).saturating_sub(SMALL_PAGES_MIB_SHARED) + 1) / 2;
+    let (takeover_stop, caps_restore) = takeover_script(t.takeover, need);
+    let thermal_log = thermal_log_script(t.thermal_log);
     let (mem, cpus, swiotlb) = (l.ram, l.cpus, l.swiotlb);
     // Droid-VM's crosvm and its shared-RAM VM, or AVF's and its protected one with the restricted DMA pool
     let (crosvm, protection) = if l.shared {
@@ -213,7 +476,7 @@ pub fn boot_script_with(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Op
         ""
     };
     let affinity = if pin {
-        format!(" --cpu-affinity {}", (0..cpus).map(|i| format!("{i}={i}")).collect::<Vec<_>>().join(":"))
+        format!(" --cpu-affinity {}", (0..cpus).map(|i| format!("{i}={}", i + t.pin_first)).collect::<Vec<_>>().join(":"))
     } else {
         String::new()
     };
@@ -221,6 +484,12 @@ pub fn boot_script_with(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Op
     let mut blocks = String::new();
     let mut pool_check = String::new();
     let (mut bridge_start, mut bridge_end) = (String::new(), String::new());
+    // the Wi-Fi in a takeover (One UI keeps wlan0 otherwise): wifictl tap before crosvm, given back after it
+    let (wifi_start, wifi_end) = if t.takeover && disks.is_some_and(|d| d.wifi) {
+        (WIFI_START.replace("{tap}", WIFI_TAP), "wifi_restore\n".to_string())
+    } else {
+        (String::new(), String::new())
+    };
     let (mut touch_find, mut escape_start, mut escape_end) = (String::new(), String::new(), String::new());
     if disks.is_some_and(|d| d.input) {
         // The touchscreen by its name (and INPUT_PROP_DIRECT), never a side key's device (rule: the way back to One UI)
@@ -234,7 +503,7 @@ pub fn boot_script_with(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Op
             "case \"$tdev\" in event[0-9]|event[0-9][0-9]) ;; *) tdev= ;; esac\n",
             "case \"$keys\" in *\" $tdev \"*) [ -n \"$tdev\" ] && echo \"touch: $tdev is a side key's device: not given to the VM\"; tdev= ;; esac\n",
             "if [ -n \"$tdev\" ] && [ -c /dev/input/$tdev ]; then\n",
-            "  echo \"touch: /dev/input/$tdev (sec_touchscreen) goes to the VM while it runs; the side keys stay with Android\"\n",
+            "  echo \"touch: /dev/input/$tdev (sec_touchscreen) goes to the VM while it runs\"\n",
             "else\n",
             "  tdev=; echo \"touch: no sec_touchscreen with INPUT_PROP_DIRECT: the VM runs without touch\"\n",
             "fi\n",
@@ -253,7 +522,8 @@ pub fn boot_script_with(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Op
             "fi\n"
         )
         .to_string();
-        // Volume down held 3 s: stop.request (getevent reads pmic_resin's events; Android still gets the key)
+        // Volume down held 10 s: stop.request (getevent reads pmic_resin's events and takes nothing; in a takeover the VM gets
+        // the key too, as its volume down, so a press for the volume must not stop it: 3 s did, 10 s is far past any of those)
         escape_start = concat!(
             "escape=\n",
             "vd=$(dev_of pmic_resin)\n",
@@ -262,12 +532,12 @@ pub fn boot_script_with(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Op
             "      case \"$a $b $c $e\" in\n",
             "        *KEY_VOLUMEDOWN*DOWN*) down=$(cut -d. -f1 /proc/uptime) ;;\n",
             "        *KEY_VOLUMEDOWN*UP*) now=$(cut -d. -f1 /proc/uptime)\n",
-            "          if [ -n \"$down\" ] && [ $((now - down)) -ge 3 ]; then echo \"touch: volume down held $((now - down)) s: the VM stops\"; touch $D/stop.request; fi\n",
+            "          if [ -n \"$down\" ] && [ $((now - down)) -ge 10 ]; then echo \"touch: volume down held $((now - down)) s: the VM stops\"; touch $D/stop.request; fi\n",
             "          down= ;;\n",
             "      esac\n",
             "    done ) &\n",
             "  escape=$!\n",
-            "  echo \"touch: volume down held 3 s stops the VM (the way back without the PC)\"\n",
+            "  echo \"touch: volume down held 10 s stops the VM (the way back without the PC)\"\n",
             "fi\n"
         )
         .to_string();
@@ -301,6 +571,18 @@ pub fn boot_script_with(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Op
             s = f.stride,
             sq = f.seq
         );
+        // The screen through crosvm's own display instead (--gpu-scanout): the helper hands its layer's Surface to the
+        // service crosvm registers, and crosvm draws the VM's frames there; it ends when crosvm's service goes
+        if let Some((w, h, hz)) = d.scanout {
+            bridge_start = format!(
+                "bridge=\nif [ \"$pool\" != bad ] && kill -0 $pid 2>/dev/null; then\n  \
+                 if [ -x $H ]; then\n    \
+                 $H --crosvm-display {CROSVM_DISPLAY} --size {w}x{h} --hz {hz} --wait 120{tk} </dev/null >>$D/display.txt 2>&1 &\n    \
+                 bridge=$!\n    echo \"display: the helper ($bridge) gives crosvm a layer over One UI for the VM's screen: display.txt\"\n  \
+                 else\n    echo \"display: no $H: the VM runs without its screen\"\n  fi\nfi\n",
+                tk = if t.takeover { " --takeover --screen-file $D/screen.off" } else { "" }
+            );
+        }
         // After the VM: the bridge sees crosvm gone and closes its session (the layer goes); a bridge still there after
         // 3 s is asked to end, and after 8 s ended
         bridge_end = "if [ -n \"$bridge\" ]; then\n  \
@@ -310,6 +592,36 @@ pub fn boot_script_with(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Op
             .to_string();
     }
     if let Some(d) = disks {
+        if let Some(g) = &d.gpu {
+            // the GPU: Droid-VM's virglrenderer with drm2kgsl in crosvm's process, guest blobs over the guest's pages
+            // (udmabuf); a small host-visible window, which nothing here uses; drm2kgsl's host arena
+            // With the scanout the virgl renderer runs too (virgl2): the kernel's scanout resources are context-less blobs of
+            // guest memory, which crosvm's virglrenderer refuses (EINVAL, "ComponentError(-22)") unless that renderer is up --
+            // Droid-VM's deploy/SETUP.md says the same of its drm2kgsl route ("virgl2 必須在", else a black screen).
+            let (contexts, display) = match d.scanout {
+                Some((w, h, hz)) => ("virgl2:drm,egl=true,gles=true", format!(",displays=[[mode=windowed[{w},{h}],refresh-rate={hz}]]")),
+                None => ("drm", String::new()),
+            };
+            blocks += &format!(
+                " \\\n  --gpu backend=virglrenderer,context-types={contexts},udmabuf=true,pci-address={},pci-bar-size=0x10000000{display} \\\n  --pre-alloc drm-host-mb={}",
+                g.pci, g.drm_mib
+            );
+            if d.scanout.is_some() {
+                blocks += &format!(" \\\n  --android-display-service name={CROSVM_DISPLAY},screen=gpu-0");
+            }
+        }
+        if d.audio {
+            // the speaker: crosvm's virtio-snd card played through AAudio (the guest's 48 kHz S16 periods, iOS's own volume
+            // applied in the guest), no capture. Its backend in crosvm's process unless --audio-uid: Droid-VM's crosvm says a
+            // stream of uid 0 is silenced while One UI runs; a takeover stops the framework, and the upstream port's root
+            // AAudio helper played in its sessions so
+            blocks += &format!(" \\\n  --virtio-snd backend=aaudio,capture=false{}", t.audio_uid.map(|u| format!(",uid={u}")).unwrap_or_default());
+        }
+        if d.wifi && t.takeover {
+            // the Wi-Fi: crosvm's virtio-net card on the tap wifictl made, with wlan0's address (WIFI_START); none when
+            // wifictl did not take wlan0
+            blocks += &format!(" \\\n  ${{wifi_mac:+--net tap-name={WIFI_TAP},mac=$wifi_mac}}");
+        }
         for (size, value) in &d.blocks {
             blocks += &format!(" \\\n  --block {value}");
             let path = value.strip_prefix("path=").and_then(|v| v.split(',').next()).unwrap_or("");
@@ -332,17 +644,31 @@ pub fn boot_script_with(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Op
         );
         // The pool's node, as crosvm names it (aarch64/src/fdt.rs: the address in lowercase hex, no 0x); a shared-RAM
         // VM has none, and its tree's shim_handoff node says crosvm made that kind
+        // (read once the file is whole: its size is the header's totalsize; a check of a file crosvm was still writing found no
+        // shim_handoff node and stopped a good 4 GiB VM, full1)
         pool_check = if l.shared {
-            "t=0\nwhile [ $t -lt 100 ] && [ ! -s $D/fdt.dtb ] && kill -0 $pid 2>/dev/null; do sleep 0.1 2>/dev/null || sleep 1; t=$((t + 1)); done\n\
+            "fdt_whole() { set -- $(od -An -tu1 -j4 -N4 $D/fdt.dtb 2>/dev/null); [ $# = 4 ] && [ $(( ($1 << 24) | ($2 << 16) | ($3 << 8) | $4 )) = \"$(wc -c < $D/fdt.dtb | tr -d ' ')\" ]; }\nt=0\nwhile [ $t -lt 100 ] && ! fdt_whole && kill -0 $pid 2>/dev/null; do sleep 0.1 2>/dev/null || sleep 1; t=$((t + 1)); done\n\
              sleep 0.1 2>/dev/null\n\
              if kill -0 $pid 2>/dev/null; then\n  \
              if grep -q -F shim_handoff@ $D/fdt.dtb; then echo \"pool: crosvm's shared-RAM VM (its tree has the shim's handoff page): the disks' windows are plain RAM\"; \
              else echo \"pool: crosvm's tree has no shim_handoff node: not the shared-RAM VM, stopped before the kernel's disks start\"; pool=bad; touch $D/stop.request; fi\n\
-             fi\n"
-                .to_string()
+             {drm}fi\n"
+                .replace(
+                    "{drm}",
+                    &d.gpu
+                        .as_ref()
+                        .map(|g| {
+                            format!(
+                                "  if [ \"$pool\" != bad ]; then if grep -q -F drm2kgsl_host@{x:x} $D/fdt.dtb; then echo \"gpu: drm2kgsl's host arena is at 0x{x:x}, as the Image's drm-host-pool\"; \
+                                 else echo \"gpu: crosvm's tree has no drm2kgsl_host@{x:x}: stopped before the kernel's GPU starts\"; pool=bad; touch $D/stop.request; fi; fi\n",
+                                x = g.drm_host
+                            )
+                        })
+                        .unwrap_or_default(),
+                )
         } else {
             format!(
-            "t=0\nwhile [ $t -lt 100 ] && [ ! -s $D/fdt.dtb ] && kill -0 $pid 2>/dev/null; do sleep 0.1 2>/dev/null || sleep 1; t=$((t + 1)); done\n\
+            "fdt_whole() {{ set -- $(od -An -tu1 -j4 -N4 $D/fdt.dtb 2>/dev/null); [ $# = 4 ] && [ $(( ($1 << 24) | ($2 << 16) | ($3 << 8) | $4 )) = \"$(wc -c < $D/fdt.dtb | tr -d ' ')\" ]; }}\nt=0\nwhile [ $t -lt 100 ] && ! fdt_whole && kill -0 $pid 2>/dev/null; do sleep 0.1 2>/dev/null || sleep 1; t=$((t + 1)); done\n\
              sleep 0.1 2>/dev/null\n\
              if kill -0 $pid 2>/dev/null; then\n  \
              if grep -q -F restricted_dma_reserved@{pool:x} $D/fdt.dtb; then echo \"pool: crosvm's restricted DMA pool is at 0x{pool:x}, as the disks' windows\"; \
@@ -354,7 +680,21 @@ pub fn boot_script_with(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Op
         if swipe {
             touch_find = touch_find.replace("--socket $D/touch.sock </dev/null", "--socket $D/touch.sock --swipe-at 200 --swipe-every 60 </dev/null");
         }
+        // In a takeover the side keys go to the VM too (read, never grabbed: One UI is down) and a click of power switches the
+        // panel: displayctl touch makes screen.off, the helper switches the panel by it (OneiOSDisplay --screen-file)
+        if t.takeover {
+            touch_find = touch_find
+                .replace("tsock=\nforward=\n", "tsock=\nforward=\nkl=; for k in $keys; do kl=\"${kl:+$kl,}/dev/input/$k\"; done\n")
+                .replace(" </dev/null >>$D/touch.txt 2>&1 &\n", "${kl:+ --keys $kl --screen-file $D/screen.off} </dev/null >>$D/touch.txt 2>&1 &\n");
+        }
     }
+    // crosvm's Android display blits each frame into the helper's Surface on the GPU with the Vulkan driver it is named (it
+    // loads none by itself, and does a CPU copy per frame without one): Droid-VM's Turnip of the package (droidvm::FILES)
+    let crosvm_env = if disks.is_some_and(|d| d.scanout.is_some()) {
+        format!("CROSVM_DISPLAY_VULKAN_LIBRARY={}/libvulkan_freedreno.so ", crate::droidvm::DIR)
+    } else {
+        String::new()
+    };
     format!(
         r#"D={DIR}
 C={crosvm}
@@ -368,9 +708,12 @@ got=$(sha256sum kernel.img | cut -d' ' -f1)
 {share_check}
 tdev=
 tsock=
-{checks}rm -f serial.txt crosvm.log crosvm.sock fdt.dtb dmesg.txt display.txt touch.txt touch.sock stop.request
+{checks}rm -f serial.txt crosvm.log crosvm.sock fdt.dtb dmesg.txt display.txt touch.txt touch.sock stop.request screen.off wifi.txt wifi.mac
 {touch_find}
 ulimit -l unlimited 2>/dev/null || echo "ulimit -l unlimited: refused"
+# crosvm holds a file for every GPU buffer of the guest: at 32768 (the shell's) it ran out after 11 minutes of iOS (full2:
+# 43727 buffers made, "Too many open files" on 580 of them and 243 GPU submissions, then the guest's kernel panicked)
+ulimit -n 1048576 2>/dev/null || ulimit -n $(ulimit -Hn) 2>/dev/null; echo "files: crosvm may hold $(ulimit -n) open files"
 T=/sys/kernel/mm/transparent_hugepage
 thp_done=1
 thp_restore() {{
@@ -394,15 +737,17 @@ if [ {thp} = 1 ]; then
 fi
 grep -E '^(MemAvailable|SwapFree):' /proc/meminfo | tr -s ' ' | sed 's/^/before /'
 echo "start $(date +%s) up $(cut -d' ' -f1 /proc/uptime)"
-pool=
+{takeover_stop}{gpu_floor}{cpu_floor}{wifi_start}pool=
+# crosvm logs at info: at debug its GPU renderer wrote a line per submission and fence (take8: 407 MB in 45 minutes,
+# whose copy at the end broke the adb link and left the session's other files empty)
 set -f
-$C --log-level debug run --disable-sandbox --no-balloon --no-rng --no-usb --hypervisor gunyah \
+{crosvm_env}$C --log-level info run --disable-sandbox --no-balloon --no-rng --no-usb --hypervisor gunyah \
   {protection} --hugepages --mem size={mem} --cpus num-cores={cpus}{affinity} \
   --socket $D/crosvm.sock${{tsock:+ --input multi-touch[path=$tsock,width=4095,height=4095,name=oneios-touch]}} --serial type=file,hardware=serial,num=1,path=$D/serial.txt,console \
   --dump-device-tree-blob $D/fdt.dtb{blocks} $D/kernel.img </dev/null >$D/crosvm.log 2>&1 &
 pid=$!
 set +f
-{pool_check}{bridge_start}{escape_start}t=0
+{pool_check}{bridge_start}{escape_start}{thermal_log}t=0
 while [ $t -lt {seconds} ] && [ ! -e $D/stop.request ] && kill -0 $pid 2>/dev/null; do sleep 1; t=$((t + 1)); done
 how=itself
 if kill -0 $pid 2>/dev/null; then
@@ -412,13 +757,46 @@ fi
 if kill -0 $pid 2>/dev/null; then how=kill; kill -9 $pid; fi
 wait $pid; rc=$?
 thp_restore
-{bridge_end}{escape_end}echo "end $(date +%s) up $(cut -d' ' -f1 /proc/uptime) how $how exit $rc"
+{wifi_end}{gpu_restore}{cpu_restore}{caps_restore}{bridge_end}{escape_end}echo "end $(date +%s) up $(cut -d' ' -f1 /proc/uptime) how $how exit $rc"
 dmesg 2>/dev/null | grep -i -E 'gunyah|folio|gh_|crosvm|scm|memextent' | tail -n 80 > $D/dmesg.txt
 if [ "$pool" = bad ]; then end "refused pool: end how $how exit $rc"; else end "end how $how exit $rc"; fi
 "#,
         thp = if thp { 1 } else { 0 }
     )
 }
+
+/// The tap wifictl makes for crosvm's network card.
+pub const WIFI_TAP: &str = "oneios0";
+
+/// The Wi-Fi's start in boot.sh (an Image of xnuloader-crosvm --wifi, in a takeover): `wifictl tap` takes wlan0 as
+/// xnuhost's bridge does (its state in wifi.state), makes the persistent tap {tap} and writes wlan0's address to
+/// wifi.mac, which crosvm's card gets (`--net tap-name={tap},mac=...`); it carries the frames and the station's messages
+/// until crosvm lets go of the tap, then leaves the network, gives wlan0 back and removes the tap. wifi_restore ends it
+/// (after crosvm, and in the takeover's trap before One UI starts); one that does not end in 15 s is killed and its
+/// wifi.state given back by `wifictl restore`.
+pub const WIFI_START: &str = r#"# the Wi-Fi: wlan0 is iOS's en0 for the session (wifictl tap, runtime/bridges/wifi)
+wifi=; wifi_mac=
+wifi_restore() {
+  [ -n "$wifi" ] || return 0
+  kill -TERM $wifi 2>/dev/null
+  n=0; while [ $n -lt 15 ] && kill -0 $wifi 2>/dev/null; do sleep 1; n=$((n + 1)); done
+  if kill -0 $wifi 2>/dev/null; then kill -9 $wifi 2>/dev/null; $D/wifictl restore $D/wifi.state >>$D/wifi.txt 2>&1; fi
+  echo "wifi: $(grep -E '^tap: [0-9]+ frames' $D/wifi.txt | tail -n 1)"
+  wifi=
+}
+if [ -x $D/wifictl ]; then
+  $D/wifictl tap {tap} $D </dev/null >>$D/wifi.txt 2>&1 &
+  wifi=$!
+  n=0; while [ ! -s $D/wifi.mac ] && [ $n -lt 150 ] && kill -0 $wifi 2>/dev/null; do sleep 0.1; n=$((n + 1)); done
+  wifi_mac=$(cat $D/wifi.mac 2>/dev/null)
+  case "$wifi_mac" in
+    ??:??:??:??:??:??) echo "wifi: wlan0 ($wifi_mac) is iOS's en0 for the session: wifictl tap, crosvm's card on the tap {tap}" ;;
+    *) echo "wifi: off: wifictl did not take wlan0: $(tail -n 3 $D/wifi.txt | tr '\n' ' ')"; wifi_restore; wifi_mac= ;;
+  esac
+else
+  echo "wifi: off: no $D/wifictl"
+fi
+"#;
 
 fn gen_path(dir: &Path, name: &str) -> String {
     dir.join(name).to_string_lossy().into_owned()
@@ -460,6 +838,20 @@ pub struct Options {
     pub pin: bool,
     /// Droid-VM's crosvm package on the PC (scripts/droidvm/fetch-crosvm.sh), pushed for a shared-RAM Image
     pub droidvm: String,
+    /// The GPU's lowest clock while an Image with the GPU runs, MHz (gpu_floor_script; 0: the governor's alone)
+    pub gpu_floor_mhz: u32,
+    /// The CPUs' lowest clocks while the VM runs, percent of each cluster's top (cpu_floor_script; 0: the governor's alone)
+    pub cpu_floor_percent: u32,
+    /// One UI's framework stopped for the VM's life (takeover_script)
+    pub takeover: bool,
+    /// With pin: the first core of the vCPUs (Tuning::pin_first)
+    pub pin_first: u32,
+    /// thermal.txt (Tuning::thermal_log)
+    pub thermal_log: bool,
+    /// The sound card's backend uid (Tuning::audio_uid)
+    pub audio_uid: Option<u32>,
+    /// wifictl for the phone (runtime/bridges: make), pushed for an Image with the Wi-Fi in a takeover
+    pub wifictl: String,
 }
 
 /// `phone vm-boot --stop`: ask the running VM's script to stop it now (crosvm stop through its socket).
@@ -486,7 +878,12 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
         Err(_) => None,
     };
     if let Some(d) = &disks {
-        let pool = RAM_BASE + ((l.ram as u64) << 20) - ((l.swiotlb as u64) << 20);
+        // --gpu: drm2kgsl's host arena at the RAM's top, the pool below it
+        let drm = d.gpu.as_ref().map(|g| g.drm_mib << 20).unwrap_or(0);
+        let pool = RAM_BASE + ((l.ram as u64) << 20) - drm - ((l.swiotlb as u64) << 20);
+        if d.gpu.is_some() != l.gpu || (l.gpu && !l.shared) {
+            bail!("{list} and the Image's label disagree about the GPU (or a GPU without the shared RAM): make both again");
+        }
         if d.swiotlb != l.swiotlb || d.pool != pool {
             bail!("{list} names a pool of {} MiB at 0x{:x}, the Image's label {} MiB at 0x{pool:x}: make both again", d.swiotlb, d.pool, l.swiotlb);
         }
@@ -511,7 +908,11 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
     let available = crate::vmprobe::mem_available_mib(&meminfo).with_context(|| format!("no MemAvailable in \"{}\"", meminfo.trim()))?;
     let pool_mib = crate::hugepool::stat(&meminfo, "pool_avail").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) * 2;
     crate::vmprobe::check_mem(l.ram, available + pool_mib.min(l.ram as u64))?;
-    check_pool(l.ram as u64, pool_mib, l.shared)?;
+    // A takeover tops the pool up itself once One UI is down (takeover_script); beside One UI it must hold the VM already
+    match check_pool(l.ram as u64, pool_mib, l.shared) {
+        Err(e) if o.takeover => println!("vm-boot: {e:#}\nvm-boot: the takeover tops the pool up while One UI is down, and stops if it cannot"),
+        r => r?,
+    }
     if l.shared {
         let dev = adb.root_ok(&format!("[ -c {} ] && echo there || echo absent\n", crate::hostshare::DEV), "gunyah_share")?;
         if !dev.contains("there") {
@@ -542,9 +943,21 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
             ),
             "the bridge's and the helper's owner",
         )?;
+        if disks.as_ref().is_some_and(|d| d.wifi) {
+            if o.takeover {
+                if !Path::new(&o.wifictl).is_file() {
+                    bail!("{} is not there: runtime/build.sh (or make -C runtime/bridges build/android/wifictl), or name it with --wifictl", o.wifictl);
+                }
+                adb.push(&o.wifictl, &format!("{DIR}/wifictl"))?;
+                adb.root_ok(&format!("cd {DIR} && chown root:root wifictl && chmod 755 wifictl\n"), "wifictl's owner")?;
+                println!("vm-boot: the Wi-Fi: wlan0 is iOS's en0 for the session (wifictl tap; the phone's Wi-Fi comes back with One UI)");
+            } else {
+                println!("vm-boot: the Image has the Wi-Fi, but without --takeover One UI keeps wlan0: the VM runs without it");
+            }
+        }
         if disks.as_ref().is_some_and(|d| d.input) {
             println!(
-                "vm-boot: the screen ({}x{}) on a layer over One UI, the touchscreen to the VM while it runs; volume down held 3 s stops it",
+                "vm-boot: the screen ({}x{}) on a layer over One UI, the touchscreen to the VM while it runs; volume down held 10 s stops it; in a takeover the side keys go to iOS too (power: the panel and the lock)",
                 f.width, f.height
             );
         } else {
@@ -553,11 +966,26 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
     }
     fs::create_dir_all(out).with_context(|| format!("cannot make {out}"))?;
     let script = Path::new(out).join("boot.sh");
+    if o.pin && o.pin_first + l.cpus > 8 {
+        bail!("--pin-first {} with {} vCPUs: past the S25's 8 cores", o.pin_first, l.cpus);
+    }
     if o.swipe_test && !disks.as_ref().is_some_and(|d| d.input) {
         bail!("--swipe-test needs an Image with the touch (xnuloader-crosvm --display)");
     }
-    fs::write(&script, boot_script_with(&l, o.seconds, o.thp, &sha, disks.as_ref(), o.swipe_test, o.pin))?;
+    fs::write(&script, boot_script_with(&l, o.seconds, o.thp, &sha, disks.as_ref(), o.swipe_test, o.pin, &Tuning { gpu_floor_mhz: o.gpu_floor_mhz, cpu_floor_percent: o.cpu_floor_percent, takeover: o.takeover, pin_first: o.pin_first, thermal_log: o.thermal_log, audio_uid: o.audio_uid }))?;
     adb.push(script.to_str().context("path")?, &format!("{DIR}/boot.sh"))?;
+    if o.takeover {
+        // One UI's stop and start (ui.sh, sourced by boot.sh): its failsafe gives the session 5 minutes past its seconds
+        let ui = Path::new(out).join("ui.sh");
+        fs::write(&ui, ui_script(o.seconds + 300))?;
+        adb.push(ui.to_str().context("path")?, &format!("{DIR}/ui.sh"))?;
+        adb.root_ok(&format!("chown root:root {DIR}/ui.sh && chmod 755 {DIR}/ui.sh\n"), "ui.sh's owner")?;
+        println!(
+            "vm-boot: takeover: One UI's framework stops while the VM runs and starts again when it ends (volume down 10 s, \
+             --stop, its seconds, or any end of the script); its failsafe starts it after {} s whatever happens",
+            o.seconds + 300
+        );
+    }
     let r = adb.root(&crate::adb::detached_start(&format!("{DIR}/boot.sh")))?;
     if !r.out.contains("started") {
         bail!("the VM's script did not start (status {}): {}", r.status, r.err.trim());
@@ -599,7 +1027,7 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
         }
     };
     println!();
-    for name in ["serial.txt", "crosvm.log", "dmesg.txt", "run.txt", "fdt.dtb", "display.txt", "touch.txt"] {
+    for name in ["serial.txt", "crosvm.log", "dmesg.txt", "run.txt", "fdt.dtb", "display.txt", "touch.txt", "thermal.txt", "wifi.txt"] {
         let path = Path::new(out).join(name);
         let mut child = adb.exec_out(&format!("su -c 'cat {DIR}/{name}'"))?;
         let mut file = fs::File::create(&path)?;
@@ -653,8 +1081,8 @@ mod tests {
 
     #[test]
     fn the_label_gives_the_vm() {
-        assert_eq!(label(&image(b"oneios-crosvm ram-mib=2048 cpus=1")), Some(Label { ram: 2048, cpus: 1, swiotlb: 8, shared: false }));
-        assert_eq!(label(&image(b"oneios-crosvm ram-mib=3072 cpus=2 swiotlb-mib=16")), Some(Label { ram: 3072, cpus: 2, swiotlb: 16, shared: false }));
+        assert_eq!(label(&image(b"oneios-crosvm ram-mib=2048 cpus=1")), Some(Label { ram: 2048, cpus: 1, swiotlb: 8, shared: false, gpu: false }));
+        assert_eq!(label(&image(b"oneios-crosvm ram-mib=3072 cpus=2 swiotlb-mib=16")), Some(Label { ram: 3072, cpus: 2, swiotlb: 16, shared: false, gpu: false }));
         let mut bad = image(b"oneios-crosvm ram-mib=2048 cpus=1");
         bad[0x100] = b'x';
         assert_eq!(label(&bad), None);
@@ -679,7 +1107,7 @@ mod tests {
 
     #[test]
     fn the_boot_stops_before_it_kills_and_writes_back_thp() {
-        let l = Label { ram: 2048, cpus: 1, swiotlb: 8, shared: false };
+        let l = Label { ram: 2048, cpus: 1, swiotlb: 8, shared: false, gpu: false };
         let s = boot_script(&l, 120, true, "ab12", None);
         assert!(s.find("$C stop $D/crosvm.sock").unwrap() < s.find("kill -9 $pid").unwrap());
         assert!(s.contains("--swiotlb 8 --hugepages --mem size=2048 --cpus num-cores=1"));
@@ -695,9 +1123,9 @@ mod tests {
     #[test]
     fn the_disks_are_checked_before_crosvm_and_the_pool_right_after() {
         let d = parse_disks(DISKS).unwrap();
-        let l = Label { ram: 3072, cpus: 1, swiotlb: 8, shared: false };
+        let l = Label { ram: 3072, cpus: 1, swiotlb: 8, shared: false, gpu: false };
         let s = boot_script(&l, 600, true, "ab12", Some(&d));
-        let crosvm = s.find("$C --log-level debug run").unwrap();
+        let crosvm = s.find("$C --log-level info run").unwrap();
         // the sizes, the store and the free space before crosvm; the store made only when missing
         let size = s.find("s=$(stat -c %s /data/local/tmp/oneios/image/os.img 2>/dev/null); [ \"$s\" = 10359930880 ]").unwrap();
         let store = s.find("if [ ! -f /data/local/tmp/oneios-vmboot/data.img ]; then").unwrap();
@@ -736,13 +1164,139 @@ mod tests {
     }
 
     #[test]
+    fn a_scanout_image_shows_its_screen_through_crosvms_own_display() {
+        let d = parse_disks(&format!("{SCREEN}gpu 00:0c.0 8 0x15f800000\nscanout 1080 2340 60\n")).unwrap();
+        assert_eq!(d.scanout, Some((1080, 2340, 60)));
+        let s = boot_script(&Label { ram: 2880, cpus: 1, swiotlb: 32, shared: true, gpu: true }, 900, true, "ab12", Some(&d));
+        assert!(s.contains("--gpu backend=virglrenderer,context-types=virgl2:drm,egl=true,gles=true,udmabuf=true,pci-address=00:0c.0,"));
+        assert!(s.contains("pci-bar-size=0x10000000,displays=[[mode=windowed[1080,2340],refresh-rate=60]] \\\n  --pre-alloc drm-host-mb=8"));
+        assert!(s.contains(" \\\n  --android-display-service name=oneios_disp,screen=gpu-0"));
+        assert!(s.contains("$H --crosvm-display oneios_disp --size 1080x2340 --hz 60 --wait 120 </dev/null >>$D/display.txt 2>&1 &"));
+        assert!(!s.contains("$D/displayctl pool"), "no bridge: crosvm draws the screen");
+        // the GPU's floor while the VM runs, put back after crosvm ends and before the bridge's end
+        assert!(s.contains("if [ \"$f\" -ge 607000000 ] && { [ -z \"$floor\" ] || [ \"$f\" -lt \"$floor\" ]; }; then floor=$f; fi"));
+        let (set, back) = (s.find("echo $floor > $G/min_freq").unwrap(), s.find("thp_restore\ngpu_restore\n").unwrap());
+        assert!(set < s.find("$C --log-level info run").unwrap());
+        assert!(s.find("wait $pid").unwrap() < back);
+        assert!(!boot_script_with(&Label { ram: 2880, cpus: 1, swiotlb: 32, shared: true, gpu: true }, 900, true, "ab12", Some(&d), false, false, &Tuning { gpu_floor_mhz: 0, ..Tuning::DEFAULT })
+            .contains("kgsl-3d0"), "--gpu-floor 0: the governor's alone");
+        // the open files crosvm may hold: a file per GPU buffer
+        assert!(s.find("ulimit -n 1048576").unwrap() < s.find("$C --log-level info run").unwrap());
+        // its frames blitted on the GPU by the package's Turnip
+        assert!(s.contains("set -f\nCROSVM_DISPLAY_VULKAN_LIBRARY=/data/local/tmp/oneios-droidvm/libvulkan_freedreno.so $C --log-level info run "));
+        // the helper starts after the shim's and the arena's checks, and goes with the VM as the bridge did
+        assert!(s.find("drm2kgsl_host@").unwrap() < s.find("--crosvm-display").unwrap());
+        assert!(s.find("--crosvm-display").unwrap() < s.find("kill -TERM $bridge").unwrap());
+        // a scanout needs the GPU and the screen
+        assert!(parse_disks("swiotlb-mib 32\npool 0x132000000\nstore /x 16\nscanout 1080 2340 60\n").is_err());
+        // no sound card without its line
+        assert!(!s.contains("--virtio-snd"));
+    }
+
+    #[test]
+    fn an_image_with_the_wifi_gets_wifictls_tap_in_a_takeover_only() {
+        let d = parse_disks(&format!("{SCREEN}input touch\ngpu 00:0c.0 8 0x15f800000\nscanout 720 1560 120\naudio\nwifi\n")).unwrap();
+        assert!(d.wifi && d.audio);
+        let l = Label { ram: 3584, cpus: 6, swiotlb: 32, shared: true, gpu: true };
+        let s = boot_script_with(&l, 3600, true, "ab12", Some(&d), false, true, &Tuning { takeover: true, ..Tuning::DEFAULT });
+        let start = s.find("$D/wifictl tap oneios0 $D </dev/null >>$D/wifi.txt 2>&1 &").unwrap();
+        // after One UI is down, before crosvm, whose card gets wlan0's address on the tap
+        assert!(s.find("takeover: One UI is down").unwrap() < start && start < s.find("$C --log-level info run").unwrap());
+        assert!(s.contains(" \\\n  ${wifi_mac:+--net tap-name=oneios0,mac=$wifi_mac} \\\n  --block "));
+        // given back after crosvm, and by the trap before One UI starts
+        assert!(s.find("wait $pid; rc=$?\nthp_restore\nwifi_restore\n").unwrap() > start);
+        assert!(s.contains("caps_restore; wifi_restore; start_ui \"the session ended\"' EXIT HUP INT TERM"));
+        assert!(s.contains("wifi_restore() { :; }") && s.find("wifi_restore() { :; }").unwrap() < start);
+        // without a takeover One UI keeps wlan0
+        let plain = boot_script_with(&l, 3600, true, "ab12", Some(&d), false, true, &Tuning::DEFAULT);
+        assert!(!plain.contains("wifictl") && !plain.contains("--net "));
+        assert!(parse_disks(&format!("{SCREEN}wifi on\n")).is_err());
+    }
+
+    #[test]
+    fn an_image_with_the_sound_card_gets_crosvms_aaudio_card() {
+        let d = parse_disks(&format!("{SCREEN}input touch\ngpu 00:0c.0 8 0x15f800000\nscanout 720 1560 120\naudio\n")).unwrap();
+        assert!(d.audio);
+        let l = Label { ram: 2560, cpus: 6, swiotlb: 32, shared: true, gpu: true };
+        let s = boot_script_with(&l, 3600, true, "ab12", Some(&d), false, true, &Tuning { takeover: true, ..Tuning::DEFAULT });
+        assert!(s.contains(" \\\n  --virtio-snd backend=aaudio,capture=false \\\n  --block "), "in crosvm's process, before the disks");
+        let s = boot_script_with(&l, 3600, true, "ab12", Some(&d), false, true, &Tuning { audio_uid: Some(2000), ..Tuning::DEFAULT });
+        assert!(s.contains(" \\\n  --virtio-snd backend=aaudio,capture=false,uid=2000 \\\n"));
+        assert!(parse_disks(&format!("{SCREEN}audio 1\n")).is_err());
+    }
+
+    #[test]
+    fn a_takeover_stops_one_ui_after_the_checks_and_starts_it_on_every_end() {
+        let d = parse_disks(&format!("{SCREEN}input touch\ngpu 00:0c.0 8 0x15f800000\nscanout 1080 2340 120\n")).unwrap();
+        let l = Label { ram: 3584, cpus: 8, swiotlb: 32, shared: true, gpu: true };
+        let t = Tuning { takeover: true, ..Tuning::DEFAULT };
+        let s = boot_script_with(&l, 3600, true, "ab12", Some(&d), false, true, &t);
+        let at = |what: &str| s.find(what).unwrap_or_else(|| panic!("no {what:?}"));
+        // the way back armed (ui.sh's failsafe and the trap) before the stop, the stop after every check and the THP's trap
+        assert!(at("[ -c /dev/gunyah_share ] ||") < at(". $D/ui.sh"));
+        assert!(at("trap thp_restore EXIT") < at(". $D/ui.sh"));
+        assert!(at(". $D/ui.sh") < at("bg /system/bin/sh $SELF --failsafe"));
+        assert!(at("bg /system/bin/sh $SELF --failsafe") < at("setprop ctl.stop zygote"));
+        assert!(at("trap 'thp_restore; gpu_restore; cpu_restore; caps_restore; wifi_restore; start_ui \"the session ended\"' EXIT HUP INT TERM")
+            > at("setprop ctl.stop zygote"));
+        // Samsung's cpufreq_limit lifted with One UI down, before the caps and the floors; put back with the caps
+        assert!(at("setprop ctl.stop zygote") < at("echo -1 > $SL"));
+        assert!(at("echo -1 > $SL") < at("echo $top > $f/scaling_max_freq"));
+        assert!(s.contains("echo \"$sl_old\" > $SL") && !s.contains("ctl.restart perf2-hal"));
+        // the caps lifted, then the floors over them, then crosvm
+        assert!(at("echo $top > $f/scaling_max_freq") < at("echo $floor > $f/scaling_min_freq"));
+        // the pool topped up with One UI down when it holds less than the VM's 1776 pages, else left alone
+        assert!(s.contains("need=1776\n") && at("echo 3 > /proc/sys/vm/drop_caches") < at("echo 3 > $P/acquire"));
+        assert!(s.contains("{ end \"refused pool $avail of $need pages after a top-up\"; exit 1; }"));
+        assert!(at("echo $floor > $f/scaling_min_freq") < at("$C --log-level info run"));
+        // the helper places its layer on the panel itself, and the caps come back after crosvm
+        assert!(s.contains("--crosvm-display oneios_disp --size 1080x2340 --hz 120 --wait 120 --takeover --screen-file $D/screen.off </dev/null"));
+        // the side keys to the VM, read and never taken, and the panel switched by a click of power
+        assert!(s.contains("kl=; for k in $keys; do kl=\"${kl:+$kl,}/dev/input/$k\"; done\n"));
+        assert!(s.contains("--socket $D/touch.sock${kl:+ --keys $kl --screen-file $D/screen.off} </dev/null >>$D/touch.txt 2>&1 &\n"));
+        assert!(at("wait $pid") < at("thp_restore\ngpu_restore\ncpu_restore\ncaps_restore\n"));
+        // the thermal log once crosvm runs, beside its other files
+        let logged = boot_script_with(&l, 3600, true, "ab12", Some(&d), false, true, &Tuning { thermal_log: true, ..Tuning::DEFAULT });
+        assert!(logged.find("$C --log-level info run").unwrap() < logged.find("# the thermal log").unwrap());
+        assert!(logged.contains(") > $D/thermal.txt 2>&1 &\n") && !s.contains("thermal.txt"));
+        // without --takeover nothing of it
+        let plain = boot_script_with(&l, 3600, true, "ab12", Some(&d), false, true, &Tuning::DEFAULT);
+        assert!(!plain.contains("ui.sh") && !plain.contains("ctl.stop") && !plain.contains("--takeover"));
+        // ui.sh: hugepool's helpers with this folder's names, its results its own
+        let u = ui_script(3900);
+        if let Ok(dir) = std::env::var("ONEIOS_DUMP_DIR") {
+            std::fs::write(format!("{dir}/takeover-boot.sh"), &s).unwrap();
+            std::fs::write(format!("{dir}/takeover-ui.sh"), &u).unwrap();
+        }
+        assert!(u.contains("D=/data/local/tmp/oneios-vmboot\nSELF=$D/ui.sh\nCTL=$D/ui-ctl\n") && u.contains("LIMIT=3900\n"));
+        assert!(u.contains("start_ui() {") && u.contains("--failsafe)") && !u.contains("$D/result") && u.contains("oneios-vmboot-failsafe"));
+    }
+
+    #[test]
+    fn a_gpu_image_gets_crosvms_virtio_gpu_and_drm2kgsls_arena() {
+        assert_eq!(label(&image(b"oneios-crosvm ram-mib=3584 cpus=8 swiotlb-mib=32 shared-ram=1 gpu=1")).map(|l| l.gpu), Some(true));
+        let d = parse_disks(&format!("{SCREEN}gpu 00:0c.0 8 0x15f800000\n")).unwrap();
+        assert_eq!(d.gpu, Some(Gpu { pci: "00:0c.0".into(), drm_mib: 8, drm_host: 0x15f800000 }));
+        let s = boot_script(&Label { ram: 2880, cpus: 1, swiotlb: 32, shared: true, gpu: true }, 900, true, "ab12", Some(&d));
+        assert!(s.contains(" \\\n  --gpu backend=virglrenderer,context-types=drm,udmabuf=true,pci-address=00:0c.0,pci-bar-size=0x10000000 \\\n  --pre-alloc drm-host-mb=8"));
+        assert!(s.contains("grep -q -F drm2kgsl_host@15f800000 $D/fdt.dtb"));
+        // the arena's check after the shim's, both before the bridge
+        assert!(s.find("shim_handoff@").unwrap() < s.find("drm2kgsl_host@").unwrap());
+        assert!(s.find("drm2kgsl_host@").unwrap() < s.find("TMPDIR=$D $D/displayctl pool").unwrap());
+        assert!(parse_disks(&format!("{SCREEN}gpu 0c.0 8 0x15f800000\n")).is_err());
+        // without the line there is no GPU
+        let plain = boot_script(&Label { ram: 2880, cpus: 1, swiotlb: 32, shared: true, gpu: false }, 900, true, "ab12", Some(&parse_disks(SCREEN).unwrap()));
+        assert!(!plain.contains("--gpu ") && !plain.contains("drm2kgsl_host"));
+    }
+
+    #[test]
     fn a_shared_ram_image_runs_under_droid_vms_crosvm() {
         assert_eq!(
             label(&image(b"oneios-crosvm ram-mib=2048 cpus=8 swiotlb-mib=32 shared-ram=1")),
-            Some(Label { ram: 2048, cpus: 8, swiotlb: 32, shared: true })
+            Some(Label { ram: 2048, cpus: 8, swiotlb: 32, shared: true, gpu: false })
         );
         let d = parse_disks(SCREEN).unwrap();
-        let l = Label { ram: 2880, cpus: 1, swiotlb: 32, shared: true };
+        let l = Label { ram: 2880, cpus: 1, swiotlb: 32, shared: true, gpu: false };
         let s = boot_script(&l, 900, true, "ab12", Some(&d));
         assert!(s.contains("C=/data/local/tmp/oneios-droidvm/crosvm\n"));
         assert!(s.contains("[ -c /dev/gunyah_share ] ||") && s.contains("[ -x $C ] ||"));
@@ -761,7 +1315,7 @@ mod tests {
     #[test]
     fn the_bridge_starts_after_the_pool_check_and_ends_after_the_vm() {
         let d = parse_disks(SCREEN).unwrap();
-        let l = Label { ram: 2880, cpus: 1, swiotlb: 32, shared: false };
+        let l = Label { ram: 2880, cpus: 1, swiotlb: 32, shared: false, gpu: false };
         let s = boot_script(&l, 900, true, "ab12", Some(&d));
         let pool = s.find("grep -q -F restricted_dma_reserved@132000000 $D/fdt.dtb").unwrap();
         let bridge = s.find("TMPDIR=$D $D/displayctl pool --pid $pid").unwrap();
@@ -800,7 +1354,7 @@ mod tests {
     /// The script's touchscreen lookup run by the PC's sh and awk on DEVICES (or a variant): what it leaves in tdev.
     fn touch_lookup(devices: &str) -> String {
         let d = parse_disks(&format!("{SCREEN}input touch\n")).unwrap();
-        let s = boot_script(&Label { ram: 2880, cpus: 1, swiotlb: 32, shared: false }, 900, true, "ab12", Some(&d));
+        let s = boot_script(&Label { ram: 2880, cpus: 1, swiotlb: 32, shared: false, gpu: false }, 900, true, "ab12", Some(&d));
         let (from, to) = (s.find("dev_of() {\n").unwrap(), s.find("if [ -n \"$tdev\" ] && [ -c /dev/input/$tdev ]; then").unwrap());
         let dir = std::env::temp_dir().join(format!("oneios-vmboot-touch-{}-{}", std::process::id(), devices.len()));
         fs::create_dir_all(&dir).unwrap();
@@ -826,10 +1380,10 @@ mod tests {
         assert_eq!(touch_lookup(&shared), "touch: event4 is a side key's device: not given to the VM\ntdev=");
         // the script: the lookup, then the forwarder listening, before crosvm; crosvm's multi-touch device on its socket
         // (no glob expansion of the brackets); the way back after the bridge; both ended after the VM
-        let s = boot_script(&Label { ram: 2880, cpus: 1, swiotlb: 32, shared: false }, 900, true, "ab12", Some(&d));
+        let s = boot_script(&Label { ram: 2880, cpus: 1, swiotlb: 32, shared: false, gpu: false }, 900, true, "ab12", Some(&d));
         let lookup = s.find("tdev=$(dev_of sec_touchscreen 2)").unwrap();
         let forward = s.find("$D/displayctl touch --evdev /dev/input/$tdev --socket $D/touch.sock </dev/null >>$D/touch.txt 2>&1 &").unwrap();
-        let crosvm = s.find("$C --log-level debug run").unwrap();
+        let crosvm = s.find("$C --log-level info run").unwrap();
         assert!(lookup < forward && forward < crosvm);
         assert!(s.contains("--socket $D/crosvm.sock${tsock:+ --input multi-touch[path=$tsock,width=4095,height=4095,name=oneios-touch]} --serial"));
         assert!(s[..crosvm].ends_with("set -f\n") && s[crosvm..].contains("pid=$!\nset +f\n"));
@@ -839,18 +1393,26 @@ mod tests {
         assert!(s.find("wait $pid; rc=$?").unwrap() < ended && s[ended..].contains("kill $forward 2>/dev/null; wait $forward"));
         let escape = s.find("( getevent -l /dev/input/$vd 2>/dev/null").unwrap();
         assert!(s.find("TMPDIR=$D $D/displayctl pool").unwrap() < escape && escape < s.find("while [ $t -lt 900 ]").unwrap());
-        assert!(s.contains("[ $((now - down)) -ge 3 ]; then echo \"touch: volume down held $((now - down)) s: the VM stops\"; touch $D/stop.request"));
+        assert!(s.contains("[ $((now - down)) -ge 10 ]; then echo \"touch: volume down held $((now - down)) s: the VM stops\"; touch $D/stop.request"));
         assert!(s.find("thp_restore\n").unwrap() < s.find("if [ -n \"$escape\" ]; then kill $escape").unwrap());
         assert!(!s.contains("EVIOCGRAB") && !s.contains("--evdev /dev/input/event"));
         // without the input bus: no lookup, and the empty tdev puts nothing on crosvm's line
-        let plain = boot_script(&Label { ram: 2880, cpus: 1, swiotlb: 32, shared: false }, 900, true, "ab12", Some(&parse_disks(SCREEN).unwrap()));
+        let plain = boot_script(&Label { ram: 2880, cpus: 1, swiotlb: 32, shared: false, gpu: false }, 900, true, "ab12", Some(&parse_disks(SCREEN).unwrap()));
         assert!(!plain.contains("dev_of") && !plain.contains("getevent") && plain.contains("tdev=\ntsock=\n"));
         assert!(!plain.contains("displayctl touch"));
         // the test swipes only when asked, on the forwarder's line
-        let swiped = boot_script_with(&Label { ram: 2880, cpus: 1, swiotlb: 32, shared: false }, 900, true, "ab12", Some(&d), true, false);
+        let swiped = boot_script_with(&Label { ram: 2880, cpus: 1, swiotlb: 32, shared: false, gpu: false }, 900, true, "ab12", Some(&d), true, false, &Tuning::DEFAULT);
         // the vCPUs on their cores only when asked
-        let pinned = boot_script_with(&Label { ram: 2048, cpus: 8, swiotlb: 512, shared: false }, 900, true, "ab12", Some(&d), false, true);
+        let pinned = boot_script_with(&Label { ram: 2048, cpus: 8, swiotlb: 512, shared: false, gpu: false }, 900, true, "ab12", Some(&d), false, true, &Tuning::DEFAULT);
+        assert!(!pinned.contains("kgsl"), "no GPU: its clocks are left alone");
+        // the CPUs' floor in every VM, put back after crosvm ends
+        assert!(pinned.contains("want=$((top * 60 / 100)); floor=") && pinned.find("echo $floor > $f/scaling_min_freq").unwrap() < pinned.find("$C --log-level info run").unwrap());
+        assert!(pinned.find("wait $pid").unwrap() < pinned.find("thp_restore\ncpu_restore\n").unwrap());
         assert!(pinned.contains("--cpus num-cores=8 --cpu-affinity 0=0:1=1:2=2:3=3:4=4:5=5:6=6:7=7 \\\n"));
+        // six from core 2: both 4.47 GHz cores the VM's, cores 0 and 1 the host's
+        let six = boot_script_with(&Label { ram: 2048, cpus: 6, swiotlb: 512, shared: false, gpu: false }, 900, true, "ab12", Some(&d), false, true,
+            &Tuning { pin_first: 2, ..Tuning::DEFAULT });
+        assert!(six.contains("--cpus num-cores=6 --cpu-affinity 0=2:1=3:2=4:3=5:4=6:5=7 \\\n"));
         assert!(!s.contains("--cpu-affinity"));
         assert!(swiped.contains("--socket $D/touch.sock --swipe-at 200 --swipe-every 60 </dev/null") && !s.contains("--swipe-at"));
     }
@@ -859,8 +1421,8 @@ mod tests {
     fn the_boot_parses_as_posix_sh() {
         let d = parse_disks(DISKS).unwrap();
         let screen = parse_disks(SCREEN).unwrap();
-        let l = Label { ram: 3072, cpus: 1, swiotlb: 8, shared: false };
-        let l32 = Label { ram: 2880, cpus: 1, swiotlb: 32, shared: false };
+        let l = Label { ram: 3072, cpus: 1, swiotlb: 8, shared: false, gpu: false };
+        let l32 = Label { ram: 2880, cpus: 1, swiotlb: 32, shared: false, gpu: false };
         let touch = parse_disks(&format!("{SCREEN}input touch\n")).unwrap();
         for (n, script) in [boot_script(&l, 600, true, "ab12", Some(&d)), boot_script(&l, 60, false, "ab12", None), boot_script(&l32, 900, true, "ab12", Some(&screen)),
                             boot_script(&l32, 900, true, "ab12", Some(&touch))]

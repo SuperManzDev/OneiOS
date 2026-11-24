@@ -405,6 +405,20 @@ static void test_pool_parts(void)
   CHECK(xhd_touch_event(0, 0, 0, &v) && v.type == 0 && v.code == 0);
   CHECK(!xhd_touch_event(1, 0x8f, 1, &v) && !xhd_touch_event(1, 0x145, 1, &v));     // KEY_WAKEUP, BTN_TOOL_FINGER
   CHECK(!xhd_touch_event(0, 3, 0, &v) && !xhd_touch_event(4, 5, 77, &v) && !xhd_touch_event(5, 0, 1, &v));
+  // The side keys of a takeover: power (116), volume up (115) and down (114) go on as they come, autorepeats and other keys
+  // not; a click of power switches the panel, a hold does not.
+  struct xhd_vinput k[2];
+  double down = 0;
+  int toggle = 0;
+  CHECK(xhd_side_key(1, 115, 1, 10.0, &down, &toggle, k) == 2 && k[0].type == 1 && k[0].code == 115 && k[0].value == 1 &&
+        k[1].type == 0 && k[1].code == 0 && !toggle);
+  CHECK(!xhd_side_key(1, 115, 2, 10.1, &down, &toggle, k) && xhd_side_key(1, 115, 0, 10.2, &down, &toggle, k) == 2 && !k[0].value);
+  CHECK(xhd_side_key(1, 114, 1, 11.0, &down, &toggle, k) == 2 && !toggle && down == 0);
+  CHECK(!xhd_side_key(1, 113, 1, 11.0, &down, &toggle, k) && !xhd_side_key(3, 116, 1, 11.0, &down, &toggle, k));
+  CHECK(xhd_side_key(1, 116, 1, 12.0, &down, &toggle, k) == 2 && down == 12.0 && !toggle);
+  CHECK(xhd_side_key(1, 116, 0, 12.3, &down, &toggle, k) == 2 && toggle == 1 && down == 0 && k[0].code == 116 && !k[0].value);
+  toggle = 0;
+  CHECK(xhd_side_key(1, 116, 1, 20.0, &down, &toggle, k) == 2 && xhd_side_key(1, 116, 0, 23.5, &down, &toggle, k) == 2 && !toggle);
 }
 
 // displayctl with a stand-in for the helper: a shell script that takes the session, and leaves.

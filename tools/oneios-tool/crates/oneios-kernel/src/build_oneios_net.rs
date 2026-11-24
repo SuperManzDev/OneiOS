@@ -10,7 +10,9 @@
 //!                             collection and 25 other roots link it: it cannot be replaced by a copy of ours)
 //!   OneiOSWifiLayout.cpp      IONetworkInterface::setInterfaceSubType's store, with the family's member layout
 //!   DroidVMVirtioNet.c        UniXNU-droidvm's virtio-net transport (external/UniXNU-droidvm/package, f9121cd), staged:
-//!                             its receive filter passes multicast too (IPv6 neighbour discovery, mDNS), compiled as its
+//!                             its receive filter passes multicast too (IPv6 neighbour discovery, mDNS), and the native
+//!                             kernel's PCI transport (NET_TRANSPORT_PCI, compiled only there: crosvm's card on its ECAM
+//!                             bus, xnuloader-crosvm --wifi; the hosted kernel compiles it as before), compiled as its
 //!                             iPadOS 27 board does (Mach universe, -DDROIDVM_DEVICE_DYNAMIC=1)
 //!   bindings                  generated: a stub per original function the objects name, the parents' metaclasses, and
 //!                             the parents' vtables for calls by qualified name (as build_oneios_hid makes them)
@@ -35,7 +37,7 @@ use crate::build_oneios_hid::{self as hid, slots, write_report, Slot};
 use crate::drivers_build::Record;
 use crate::gen::{self, fail, Compile, Ctx, Stubs};
 use crate::macho_object::{Entry, Object};
-use crate::staged::net_transport::NET_TRANSPORT;
+use crate::staged::net_transport::{NET_TRANSPORT, NET_TRANSPORT_PCI};
 use anyhow::{Context, Result};
 use indexmap::IndexMap;
 use oneios_common::pyjson::Value;
@@ -162,6 +164,14 @@ fn includes(out: &Path, source: &Path, record: &Record) -> Result<PathBuf> {
 /// (all-nodes and solicited-node groups) and mDNS; iOS's own stack drops groups it has not joined.
 pub fn staged_text(text: String) -> Result<String> {
     gen::replace_once(text, NET_TRANSPORT, |old| {
+        format!("build-oneios-net: DroidVMVirtioNet.c no longer has exactly one {}", pyrepr(gen::first(old.trim(), 60)))
+    })
+}
+
+/// staged_text's file with the native kernel's PCI transport (staged/net_transport.rs NET_TRANSPORT_PCI: compiled only with
+/// XNU_ONEIOS_NATIVE, so the hosted kernel's object is what staged_text alone makes).
+pub fn staged_pci_text(text: String) -> Result<String> {
+    gen::replace_once(text, NET_TRANSPORT_PCI, |old| {
         format!("build-oneios-net: DroidVMVirtioNet.c no longer has exactly one {}", pyrepr(gen::first(old.trim(), 60)))
     })
 }
@@ -356,7 +366,7 @@ pub fn main() -> Result<()> {
     let with_keyword: Vec<String> = universe.iter().cloned().chain(["-Wno-keyword-macro".to_string()]).collect();
     let subtype = compile_source("iokit", &subtype_source, out.join("OneiOSWifiLayout.o"), &with_keyword)?;
     let staged = out.join("DroidVMVirtioNet.c");
-    gen::write_text(&staged, &staged_text(gen::read_text(&transport_source)?)?)?;
+    gen::write_text(&staged, &staged_pci_text(staged_text(gen::read_text(&transport_source)?)?)?)?;
     let transport = compile_source("mach", &staged, out.join("DroidVMVirtioNet.o"), &["-DDROIDVM_DEVICE_DYNAMIC=1".to_string()])?;
     let mut objects = vec![late.clone(), subtype, transport];
     let sections = gen::capture(&[gen::which("llvm-objdump", "objdump"), "-h".into(), gen::s(&late)], None, None)?.stdout;
@@ -403,4 +413,20 @@ pub fn main() -> Result<()> {
     println!("build-oneios-net: {} ({} objects, {} original functions bound at their 24A446 iPhone18,2 addresses; {})", archive.display(),
              objects.len(), functions.len(), owns.join(", "));
     Ok(())
+}
+
+#[cfg(test)]
+mod pci_tests {
+    use super::*;
+
+    #[test]
+    fn the_transport_takes_the_pci_card_in_the_native_kernel_only() {
+        let made_up: String = NET_TRANSPORT_PCI.iter().map(|(anchor, _)| format!("{anchor}--\n")).collect();
+        let staged = staged_pci_text(made_up.clone()).unwrap();
+        assert!(staged.contains("#if defined(XNU_ONEIOS_NATIVE) && XNU_ONEIOS_NATIVE\n// OneiOS native (staged/net_transport.rs NET_TRANSPORT_PCI)"));
+        assert!(staged.contains(&format!("#else\n{}#endif\n", NET_TRANSPORT_PCI[0].0)));
+        assert!(staged.contains("!memcmp(value, \"oneios,virtio-net-pci\", 22))\n"));
+        assert!(staged.contains("(0x1af4u | 0x1041u << 16)"));
+        assert!(staged_pci_text(made_up.repeat(2)).is_err());
+    }
 }

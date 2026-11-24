@@ -32,7 +32,10 @@ typedef enum {
 // configuration space (crosvm's CAM: 0x100; QEMU's ECAM: 0x1000); node "virtio-pci-N" or "data-store", compatible
 // "oneios,virtio-pci", no "droidvm,intid" (OneiOSHostedDisk polls; the line is the PCI host's, not the board's). An input
 // device on PCI is the bus instead (xnuloader-crosvm --display): node "input-pci", compatible "oneios,virtio-input-pci",
-// base and size bus 0 of the CAM; the kernel finds crosvm's virtio-input functions on it and polls them.
+// base and size bus 0 of the CAM; the kernel finds crosvm's virtio-input functions on it and polls them. The sound card on
+// PCI is a bus too (xnuloader-crosvm --audio): node "virtio-snd", compatible "oneios,virtio-snd-pci", base and size bus 0
+// of Droid-VM's ECAM; the kernel takes the first 1af4:1059 function there and polls it. The network card likewise
+// (xnuloader-crosvm --wifi): node "net", compatible "oneios,virtio-net-pci", its first 1af4:1041 function.
 typedef struct { xl_device_kind kind; uint64_t base, size; bool pci; } xl_device;
 
 typedef struct {
@@ -82,6 +85,10 @@ typedef struct {
   uint32_t    display_width, display_height, display_scale, display_hz;
   const char *text_fixups;                // NUL-separated list for /chosen text-fixups, with its length
   uint32_t    text_fixups_length;
+  // the Metal plug-in's shader priming list (every .metallib of the OS image, a path a line) for /chosen
+  // oneios-prime-list, which the kernel writes beside the plug-in at boot (patch 0080); NULL: no property
+  const char *prime_list;
+  uint32_t    prime_list_length;
   // xnuhost: where a hosted kernel finds the host (0 = not hosted, node omitted)
   uint64_t    host_vector;                // virtual address of struct xh_vector
   uint64_t    host_io_base, host_io_size; // physical range of the trapped MMIO aperture

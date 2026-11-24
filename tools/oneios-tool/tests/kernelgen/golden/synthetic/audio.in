@@ -66,4 +66,11 @@ void DroidVMAudioDevice::engineMain(void *self, wait_result_t) { static_cast<Dro
     droidvm_audio_stage = 3;
 // (before anchor 32)
     droidvm_audio_stage = 4;
+// (before anchor 33)
+uint64_t absolute(uint64_t frames) { uint64_t t; nanoseconds_to_absolutetime(frames * 1000000000ULL / Rate, &t); return t; }
+// (before anchor 34)
+    if (OSArray *a = OSArray::withCapacity(1)) { e->setProperty("controls", a); a->release(); }
+// (before anchor 35)
+    case 2:                                                // SetControlValue: no controls are published
+        return kIOReturnBadArgument;
 // (the end)

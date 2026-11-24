@@ -13,7 +13,9 @@ use std::fs;
 
 /// The package's folder on the phone, and its files.
 pub const DIR: &str = "/data/local/tmp/oneios-droidvm";
-pub const FILES: [&str; 4] = ["crosvm", "libvirglrenderer.so", "libgfxstream_backend.so", "libvncserver.so"];
+/// libvulkan_freedreno.so is Droid-VM's Turnip (Mesa, MIT): the Vulkan driver crosvm's Android display blits the VM's frames
+/// with (`CROSVM_DISPLAY_VULKAN_LIBRARY`, vm-boot with the GPU's scanout); crosvm does not link it.
+pub const FILES: [&str; 5] = ["crosvm", "libvirglrenderer.so", "libgfxstream_backend.so", "libvncserver.so", "libvulkan_freedreno.so"];
 
 /// The package's files in DIR: (name, SHA-256, bytes), in FILES' order.
 pub fn package(dir: &str) -> Result<Vec<(String, String, usize)>> {
@@ -46,7 +48,9 @@ pub fn check_script(files: &[(String, String, usize)]) -> String {
     for (name, sha, _) in files {
         s += &format!("got=$(sha256sum {name} | cut -d' ' -f1); [ \"$got\" = \"{sha}\" ] || {{ echo \"{name}: sha256 $got, not {sha}\"; exit 1; }}\n");
     }
-    s += "chown root:root crosvm *.so && chmod 755 crosvm && chmod 644 *.so && echo package ok\n";
+    // and the folder root's too: root's crosvm loads its libraries and the display's driver from it, which no other user may
+    // swap (adb's push wants it open: `push` opens it first)
+    s += "chown root:root crosvm *.so && chmod 755 crosvm && chmod 644 *.so && chown root:root . && chmod 755 . && echo package ok\n";
     s
 }
 

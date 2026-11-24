@@ -20,6 +20,10 @@
 //     devices' region (the pool's place) is then inside crosvm's longer mapping of the guest's RAM, and that mapping
 //     counts; still only the boot video and the count's page are mapped here.
 //   displayctl touch --evdev /dev/input/eventN --socket PATH [--wait S] [--swipe-at S [--swipe-every S]]
+//                    [--keys /dev/input/eventA,... [--screen-file PATH]]
+//     --keys (vm-boot --takeover: One UI is down): the side keys' devices, read and never grabbed; power, volume up and
+//     volume down go to the VM as they come (xhd_side_key), and a click of power switches the panel (the helper switches it
+//     while PATH is there) and holds the touches back while it is off.
 //     the touch of that VM: the phone's touchscreen to crosvm's multi-touch device (crosvm --input
 //     multi-touch[path=PATH,...] connects to PATH and reads virtio_input_event's from it). AVF's crosvm cannot take the
 //     S25's touchscreen itself: --evdev wants the device's serial name (EVIOCGUNIQ), which sec_touchscreen has none of
@@ -125,7 +129,8 @@ static int usage(void)
   fprintf(stderr, "usage: displayctl test [--seconds N] [--size WxH] [--format bgrx|rgba16f] [--helper PATH] [-- helper options]\n"
                   "       displayctl pool --pid PID --pool-offset N --pool-bytes N --size WxH --stride N --seq-offset N [--fb-offset N] [--vm protected|shared]\n"
                   "                       [--seconds N] [--helper PATH] [-- helper options]\n"
-                  "       displayctl touch --evdev /dev/input/eventN --socket PATH [--wait S] [--swipe-at S [--swipe-every S]]\n");
+                  "       displayctl touch --evdev /dev/input/eventN --socket PATH [--wait S] [--swipe-at S [--swipe-every S]]\n"
+                  "                        [--keys /dev/input/eventA,... [--screen-file PATH]]\n");
   return 2;
 }
 
@@ -639,14 +644,57 @@ static int send_swipe(int client, int xmax, int ymax)
   return send_all(client, lift, sizeof lift);
 }
 
+// The side keys' devices of --keys (a takeover: One UI is down): opened to read, never grabbed (the way back to One UI keeps
+// its keys), each one that has power or a volume key and is no touchscreen. The number opened.
+#define MAX_KEY_DEVICES 4
+static unsigned open_key_devices(const char *list, int *fds)
+{
+  unsigned n = 0;
+  char copy[256];
+  if (!list || strlen(list) >= sizeof copy) return 0;
+  strcpy(copy, list);
+  for (char *save = NULL, *one = strtok_r(copy, ",", &save); one && n < MAX_KEY_DEVICES; one = strtok_r(NULL, ",", &save)) {
+    if (strncmp(one, "/dev/input/event", 16) || strchr(one + 16, '/')) continue;
+    int fd = open(one, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0) { fprintf(stderr, "displayctl touch: %s: %s\n", one, strerror(errno)); continue; }
+    char name[80] = "";
+    unsigned long props[BITS_OF(INPUT_PROP_CNT)] = { 0 }, keys[BITS_OF(KEY_CNT)] = { 0 };
+    ioctl(fd, EVIOCGNAME(sizeof name - 1), name);
+    ioctl(fd, EVIOCGPROP(sizeof props), props);
+    ioctl(fd, EVIOCGBIT(EV_KEY, sizeof keys), keys);
+    if (has_bit(props, INPUT_PROP_DIRECT) || !(has_bit(keys, KEY_POWER) || has_bit(keys, KEY_VOLUMEUP) || has_bit(keys, KEY_VOLUMEDOWN))) {
+      fprintf(stderr, "displayctl touch: %s (\"%s\") has no side key: not read\n", one, name);
+      close(fd);
+      continue;
+    }
+    printf("displayctl touch: %s (\"%s\"): its keys go to the VM too (read, not taken)\n", one, name);
+    fds[n++] = fd;
+  }
+  return n;
+}
+
+// The panel's switch for the display helper (--screen-file): the file is there while the panel is to be off.
+static void screen_file(const char *path, int off)
+{
+  if (!path) return;
+  if (off) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0644);
+    if (fd >= 0) close(fd);
+  } else {
+    unlink(path);
+  }
+}
+
 static int touch_main(int argc, char **argv)
 {
-  const char *evdev = NULL, *path = NULL;
+  const char *evdev = NULL, *path = NULL, *keys_list = NULL, *screen_path = NULL;
   double wait_s = 60, swipe_at = 0, swipe_every = 0;
   for (int i = 2; i < argc; i++) {
     if (i + 1 >= argc) return usage();
     if (!strcmp(argv[i], "--evdev")) evdev = argv[++i];
     else if (!strcmp(argv[i], "--socket")) path = argv[++i];
+    else if (!strcmp(argv[i], "--keys")) keys_list = argv[++i];
+    else if (!strcmp(argv[i], "--screen-file")) screen_path = argv[++i];
     else if (!strcmp(argv[i], "--wait")) wait_s = atof(argv[++i]);
     else if (!strcmp(argv[i], "--swipe-at")) swipe_at = atof(argv[++i]);
     else if (!strcmp(argv[i], "--swipe-every")) swipe_every = atof(argv[++i]);
@@ -716,13 +764,23 @@ static int touch_main(int argc, char **argv)
   struct input_event ev[64];
   while (read(fd, ev, sizeof ev) > 0) {}         // what One UI was shown already: not the VM's
   printf("displayctl touch: crosvm connected: the touchscreen is the VM's\n");
+  // The side keys (--keys): power, volume up and down to the VM as they come; a click of power switches the panel too
+  // (--screen-file, the helper's), and while it is off the touches are not passed on.
+  int key_fd[MAX_KEY_DEVICES];
+  const unsigned nkeys = open_key_devices(keys_list, key_fd);
+  for (unsigned k = 0; k < nkeys; k++) while (read(key_fd[k], ev, sizeof ev) > 0) {}
+  int screen_off = 0;
+  double power_down = 0;
+  unsigned long key_events = 0, switches = 0;
+  screen_file(screen_path, 0);
   fflush(stdout);
   struct xhd_vinput frame[256];
   unsigned n = 0;
   int dropping = 0, gone = 0, lost = 0;
   unsigned long frames = 0, events = 0, overflows = 0, swipes = 0;
   double next_swipe = swipe_at > 0 ? now() + swipe_at : 0;
-  struct pollfd w[2] = { { fd, POLLIN, 0 }, { client, POLLIN, 0 } };
+  struct pollfd w[2 + MAX_KEY_DEVICES] = { { fd, POLLIN, 0 }, { client, POLLIN, 0 } };
+  for (unsigned k = 0; k < nkeys; k++) w[2 + k] = (struct pollfd){ key_fd[k], POLLIN, 0 };
   while (!interrupted && !gone && !lost) {
     if (next_swipe && now() >= next_swipe && !n) {
       if (send_swipe(client, x.maximum, y.maximum)) { gone = 1; break; }
@@ -731,10 +789,44 @@ static int touch_main(int argc, char **argv)
       fflush(stdout);
       next_swipe = swipe_every > 0 ? next_swipe + swipe_every : 0;
     }
-    if (poll(w, 2, 500) < 0) {
+    if (poll(w, 2 + nkeys, 500) < 0) {
       if (errno == EINTR) continue;
       break;
     }
+    for (unsigned k = 0; k < nkeys && !gone; k++) {
+      if (!(w[2 + k].revents & POLLIN)) continue;
+      struct input_event kev[16];
+      ssize_t kr = read(key_fd[k], kev, sizeof kev);
+      for (size_t j = 0; kr > 0 && j < (size_t)kr / sizeof *kev; j++) {
+        struct xhd_vinput out[2];
+        int toggle = 0;
+        const unsigned m = xhd_side_key(kev[j].type, kev[j].code, kev[j].value, now(), &power_down, &toggle, out);
+        if (!m) continue;
+        key_events++;
+        if (send_all(client, out, m * sizeof *out)) { gone = 1; break; }
+        if (toggle) {
+          screen_off = !screen_off;
+          switches++;
+          if (screen_off) {
+            // a finger on the glass when the panel goes off is lifted, so the guest keeps no touch held
+            struct xhd_vinput lift[2 * 10 + 2];
+            unsigned l = 0;
+            for (uint32_t slot = 0; slot < 10; slot++) {
+              lift[l++] = (struct xhd_vinput){ EV_ABS, ABS_MT_SLOT, slot };
+              lift[l++] = (struct xhd_vinput){ EV_ABS, ABS_MT_TRACKING_ID, 0xffffffffu };
+            }
+            lift[l++] = (struct xhd_vinput){ EV_KEY, BTN_TOUCH, 0 };
+            lift[l++] = (struct xhd_vinput){ EV_SYN, SYN_REPORT, 0 };
+            if (send_all(client, lift, l * sizeof *lift)) { gone = 1; break; }
+            n = 0;
+          }
+          screen_file(screen_path, screen_off);
+          printf("displayctl touch: power clicked: the panel %s\n", screen_off ? "off, the touches held back" : "on");
+          fflush(stdout);
+        }
+      }
+    }
+    if (gone) break;
     if (w[1].revents & (POLLIN | POLLHUP | POLLERR)) {
       char sink[256];                            // crosvm's status updates: none a touchscreen needs
       ssize_t r = recv(client, sink, sizeof sink, MSG_DONTWAIT);
@@ -757,8 +849,8 @@ static int touch_main(int argc, char **argv)
       if (!xhd_touch_event(ev[k].type, ev[k].code, ev[k].value, &v)) continue;
       if (n < sizeof frame / sizeof *frame) frame[n++] = v;
       if (v.type == EV_SYN) {
-        if (send_all(client, frame, n * sizeof *frame)) { gone = 1; break; }
-        frames++;
+        if (!screen_off && send_all(client, frame, n * sizeof *frame)) { gone = 1; break; }
+        if (!screen_off) frames++;
         n = 0;
       }
     }
@@ -766,6 +858,9 @@ static int touch_main(int argc, char **argv)
   ioctl(fd, EVIOCGRAB, 0);
   close(fd);
   close(client);
+  for (unsigned k = 0; k < nkeys; k++) close(key_fd[k]);
+  screen_file(screen_path, 0);      // the panel on again for whatever comes after the VM
+  if (nkeys) printf("displayctl touch: %lu side key events to the VM, the panel switched %lu times\n", key_events, switches);
   printf("displayctl touch: %s after %lu frames (%lu events read, %lu overflows, %lu test swipes): the touchscreen is Android's again\n",
          gone ? "crosvm went" : lost ? "the touchscreen went away" : interrupted ? "stopped" : "ended", frames, events, overflows, swipes);
   return 0;

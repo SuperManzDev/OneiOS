@@ -6,7 +6,7 @@
 // stub (interrupts masked, x0 = boot_args, a branch to the entry); the kernel's window (xl_boot_place: its segments, the
 // device tree, boot_args) at its physical base, 32 MiB aligned with the kernel's own base as on the bench.
 //   xnuloader-crosvm KERNEL OUT [--cpus N] [--ram-mib N] [--timebase HZ] [--args TEXT] [--args-add TEXT] [--swiotlb MIB]
-//                    [--image DIR [--phone-image DIR] [--phone-data FILE]] [--shared-ram]
+//                    [--image DIR [--phone-image DIR] [--phone-data FILE]] [--shared-ram [--gpu | --gpu-scanout] [--audio] [--wifi]]
 // --ram-mib is the VM's (crosvm --mem): the window ends below crosvm's FDT and its restricted DMA pool (--swiotlb, 8 MiB
 // by default, 32 with --display, up to 1024; the RAM's last MIB). Writes OUT (the Image), OUT.adt (the device tree the kernel is given:
 // xnuloader-inspect adt FILE) and, with --image, OUT.disks; prints the layout.
@@ -51,6 +51,30 @@
 // wherever it is), and /arm-io/input-pci is device 1's first 2 KiB, where that crosvm puts the multi-touch function
 // (shared1: its interrupt map has the disks at 2 to 6 and the input at 1): the kernel's scan, 2 KiB a step over the
 // node, then finds it as function 0 of its one step, with no change to the kernel.
+// --gpu (with --shared-ram): the GPU, crosvm's virtio-gpu with Droid-VM's virglrenderer and drm2kgsl (`--gpu
+// backend=virglrenderer,context-types=drm,udmabuf=true`, pinned at 00:0c.0) for the kernel's virtio-gpu client and
+// Metal's NativeAdreno (docs/native.md "The GPU in the shared-RAM VM"). /arm-io/virtio-gpu is the function's place in the
+// ECAM ("oneios,virtio-gpu-pci": the transport of staged/gpu.rs TRANSPORT_PCI) with drm-host-pool, drm2kgsl's host arena:
+// `--pre-alloc drm-host-mb=8` takes the RAM's last 8 MiB for it (that crosvm puts its pools after the block that --mem
+// less them makes: its tree's drm2kgsl_host node, which vm-boot checks), so the devices' region and the kernel's window end
+// below it. The label says gpu=1 and OUT.disks has "gpu PCI-ADDRESS DRM-HOST-MIB DRM-HOST-PA".
+// --prime-list FILE: the Metal plug-in's shader priming list (every .metallib of the OS image, one absolute path a line:
+// oneios-tool image apfs-find), carried in /chosen/oneios-prime-list; the kernel writes it beside the plug-in at boot
+// (NativeAdrenoMetal.primelist, patch 0080) and the render server compiles those libraries ahead when the desktop is quiet.
+// --gpu-scanout (with --gpu and --display): the screen through the virtio GPU's scanout instead of the boot video: the kernel
+// starts its scanout client (oneios-virtio-scanout=1, staged/display.rs NATIVE_PROBE), crosvm shows the scanout in an
+// Android Surface it is given (its --android-display-service, the display helper's --crosvm-display), with no copy on
+// either CPU. OUT.disks then has "scanout WIDTH HEIGHT HZ" for crosvm's display.
+// --audio (with --shared-ram): the speaker, crosvm's virtio-snd card (vm-boot: `--virtio-snd backend=aaudio`, AAudio on the
+// phone) for the kernel's audio archive (DroidVMVirtioSnd.c with staged/audio.rs SND_TRANSPORT_PCI under DroidVMAudio.cpp's
+// Speaker and Mic). crosvm places the card itself (its option has no pci-address), so /arm-io/virtio-snd
+// ("oneios,virtio-snd-pci") is all of bus 0 of the ECAM and the kernel takes the first 1af4:1059 function there.
+// OUT.disks then has "audio".
+// --wifi (with --shared-ram): the Wi-Fi, en0 on the phone's radio: crosvm's virtio-net card (vm-boot: `--net tap-name=...`
+// with wlan0's address) for the kernel's network archive (OneiOSWifi.cpp over DroidVMVirtioNet.c with staged/net_transport.rs
+// NET_TRANSPORT_PCI); `wifictl tap` on the phone carries its frames and the station's messages between crosvm's tap and
+// wlan0 (runtime/bridges/wifi, as xnuhost's bridge does). /arm-io/net ("oneios,virtio-net-pci") is all of bus 0 of the
+// ECAM, as the sound card's node. OUT.disks then has "wifi".
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -82,6 +106,9 @@
 #define CAM_DEV_SHIFT  11               // AVF's crosvm's CAM, a device every 2 KiB
 #define ECAM_INPUT_DEV 1u               // --shared-ram: the multi-touch function's device on that ECAM (shared1)
 #define INPUT_STEP    0x800ull          // what the kernel's input scan steps by (staged/hid_transport.rs)
+#define GPU_PCI_DEV   12u               // --gpu: the GPU's device on crosvm's bus 0 (vm-boot pins it: pci-address=00:0c.0)
+#define DRM_HOST_MIB  8ull              // --gpu: drm2kgsl's host arena (crosvm --pre-alloc drm-host-mb), the RAM's last MiB
+#define ECAM_BUS0     (32ull << ECAM_DEV_SHIFT)   // --audio: all of bus 0 of that ECAM (1 MiB): the kernel finds the card there
 #define RTC           0x2000ull         // crosvm's PL030 (rtc@2000 in its tree): RTCDR is the host's seconds since 1970
 #define RTC_SIZE      0x1000ull
 
@@ -108,7 +135,7 @@ static uint8_t *slurp(const char *path, size_t *size)
 static void usage(void)
 {
   fprintf(stderr, "usage: xnuloader-crosvm KERNEL OUT [--cpus N] [--ram-mib N] [--timebase HZ] [--args TEXT] [--args-add TEXT] [--swiotlb MIB]\n"
-                  "                        [--image DIR [--phone-image DIR] [--phone-data FILE] [--display WxH [--scale 2|3] [--hz N]]] [--shared-ram]\n");
+                  "                        [--image DIR [--phone-image DIR] [--phone-data FILE] [--display WxH [--scale 2|3] [--hz N]]] [--shared-ram [--gpu | --gpu-scanout] [--audio] [--wifi]]\n");
   exit(2);
 }
 
@@ -132,9 +159,14 @@ int main(int argc, char **argv)
   unsigned cpus = 1, ram_mib = 2048, swiotlb_mib = 0;
   unsigned display_w = 0, display_h = 0, display_scale = 3, display_hz = 60;
   uint32_t timebase = 19200000;         // the S25's (vm-probe: CNTFRQ_EL0 in the VM)
-  bool shared_ram = false;
+  bool shared_ram = false, gpu = false, gpu_scanout = false, audio = false, wifi = false;
+  const char *prime_list_path = NULL;
   for (int i = 3; i < argc; i++) {
     if (!strcmp(argv[i], "--shared-ram")) { shared_ram = true; continue; }
+    if (!strcmp(argv[i], "--gpu")) { gpu = true; continue; }
+    if (!strcmp(argv[i], "--gpu-scanout")) { gpu = gpu_scanout = true; continue; }
+    if (!strcmp(argv[i], "--audio")) { audio = true; continue; }
+    if (!strcmp(argv[i], "--wifi")) { wifi = true; continue; }
     if (i + 1 >= argc) usage();
     if (!strcmp(argv[i], "--cpus")) cpus = (unsigned)strtoul(argv[++i], NULL, 0);
     else if (!strcmp(argv[i], "--ram-mib")) ram_mib = (unsigned)strtoul(argv[++i], NULL, 0);
@@ -152,9 +184,16 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[i], "--display")) { if (sscanf(argv[++i], "%ux%u", &display_w, &display_h) != 2) usage(); }
     else if (!strcmp(argv[i], "--scale")) display_scale = (unsigned)strtoul(argv[++i], NULL, 0);
     else if (!strcmp(argv[i], "--hz")) display_hz = (unsigned)strtoul(argv[++i], NULL, 0);
+    else if (!strcmp(argv[i], "--prime-list")) prime_list_path = argv[++i];
     else usage();
   }
   if (cpus < 1 || cpus > XL_MAX_CPUS || ram_mib < 512 || ram_mib > 6144) { fprintf(stderr, "xnuloader-crosvm: 1-%d CPUs, 512-6144 MiB\n", XL_MAX_CPUS); return 2; }
+  // the GPU's buffers are the guest's own pages, which only a shared-RAM VM's host reaches
+  if (gpu && !shared_ram) { fprintf(stderr, "xnuloader-crosvm: --gpu needs --shared-ram\n"); return 2; }
+  // the sound card's queues and periods are the guest's own pages too
+  if (audio && !shared_ram) { fprintf(stderr, "xnuloader-crosvm: --audio needs --shared-ram\n"); return 2; }
+  if (wifi && !shared_ram) { fprintf(stderr, "xnuloader-crosvm: --wifi needs --shared-ram\n"); return 2; }
+  if (gpu_scanout && !display_w) { fprintf(stderr, "xnuloader-crosvm: --gpu-scanout needs --display\n"); return 2; }
   if (display_w && (!image_dir || display_w < 320 || display_h < 320 || display_w > 4096 || display_h > 4096 ||
                     (display_scale != 2 && display_scale != 3) || display_hz < 24 || display_hz > 120)) {
     fprintf(stderr, "xnuloader-crosvm: --display 320x320 to 4096x4096 with --image, --scale 2 or 3, --hz 24 to 120\n");
@@ -203,8 +242,11 @@ int main(int argc, char **argv)
 
   const uint64_t phys = RAM_BASE + KERNEL_ALIGN + (k.base & (KERNEL_ALIGN - 1));
   const uint64_t ram_end = RAM_BASE + ((uint64_t)ram_mib << 20);
+  // --gpu: drm2kgsl's host arena at the RAM's top, where that crosvm puts its pools; everything else below it
+  const uint64_t drm_host = gpu ? ram_end - (DRM_HOST_MIB << 20) : 0, block_end = gpu ? drm_host : ram_end;
   // crosvm's restricted DMA pool: the RAM's last MIB (aarch64/src/lib.rs get_swiotlb_addr; Gunyah wants it static).
-  const uint64_t pool = ram_end - ((uint64_t)swiotlb_mib << 20), top_reserve = ((uint64_t)swiotlb_mib << 20) + FDT_RESERVE;
+  const uint64_t pool = block_end - ((uint64_t)swiotlb_mib << 20);
+  const uint64_t top_reserve = (ram_end - block_end) + ((uint64_t)swiotlb_mib << 20) + FDT_RESERVE;
   if (phys + (256ull << 20) + top_reserve > ram_end) { fprintf(stderr, "xnuloader-crosvm: %u MiB leave the kernel less than 256 MiB\n", ram_mib); return 2; }
   // the input window after the disks', 16 KiB aligned (the guest's page)
   const uint64_t input_off = display_w ? (fb_slot + ndisk * DMA_SLICE + 0x3fff) & ~0x3fffull : 0;
@@ -221,6 +263,22 @@ int main(int argc, char **argv)
       fprintf(stderr, "xnuloader-crosvm: boot arguments too long\n");
       return 2;
     }
+  }
+  // --gpu: what xnuhost passes for its GPU (runtime/xnuhost/src/config.c): Turnip asks the kernel whether the virtio GPU is the
+  // board's 3D path (DroidVMVirtioGpu3D.cpp answers DROIDVM_VIRTGPU_PARAM_DEFAULT_3D with vgpu-3d; without it Turnip took the
+  // native Adreno connection, open type 0x4147, which answered kIOReturnBusy, and every Metal device failed: vm-boot gpu2), and the
+  // accelerator of the original Metal discovery (droidvm-gpu-metal)
+  static char with_gpu[4096];
+  if (gpu) {
+    size_t at = (size_t)snprintf(with_gpu, sizeof with_gpu, "%s", args);
+    if (at < sizeof with_gpu && !strstr(args, "vgpu-3d="))
+      at += (size_t)snprintf(with_gpu + at, sizeof with_gpu - at, " vgpu-3d=1");
+    if (at < sizeof with_gpu && !strstr(args, "droidvm-gpu-metal="))
+      at += (size_t)snprintf(with_gpu + at, sizeof with_gpu - at, " droidvm-gpu-metal=1");
+    if (gpu_scanout && at < sizeof with_gpu && !strstr(args, "oneios-virtio-scanout="))
+      at += (size_t)snprintf(with_gpu + at, sizeof with_gpu - at, " oneios-virtio-scanout=1");
+    if (at >= sizeof with_gpu) { fprintf(stderr, "xnuloader-crosvm: boot arguments too long\n"); return 2; }
+    args = with_gpu;
   }
   const uint64_t window = (ram_end - top_reserve - phys) & ~0x1fffffull;
 
@@ -259,10 +317,41 @@ int main(int argc, char **argv)
   for (unsigned i = 0; i < ndisk; i++)
     m.dev[m.ndev++] = (xl_device){ disks[i].writable ? XL_DEV_DATA_STORE : XL_DEV_BLOCK,
                                    PCI_CAM + ((uint64_t)(PCI_FIRST_DEV + i) << (shared_ram ? ECAM_DEV_SHIFT : CAM_DEV_SHIFT)), 0x100, true };
+  if (prime_list_path) {
+    size_t n = 0;
+    uint8_t *text = slurp(prime_list_path, &n);
+    unsigned lines = 0;
+    for (size_t k = 0; k < n; k++) {
+      if (!text[k] || (text[k] < 0x20 && text[k] != '\n')) { fprintf(stderr, "xnuloader-crosvm: --prime-list: not a list of paths\n"); return 2; }
+      lines += text[k] == '\n';
+    }
+    if (!n || n > (256u << 10) || text[0] != '/' || text[n - 1] != '\n') {
+      fprintf(stderr, "xnuloader-crosvm: --prime-list: 1 byte to 256 KiB of absolute paths, a line each\n");
+      return 2;
+    }
+    m.prime_list = (const char *)text;
+    m.prime_list_length = (uint32_t)n;
+    printf("xnuloader-crosvm: the shader priming list, %u libraries, in /chosen/oneios-prime-list\n", lines);
+  }
+  if (gpu) {
+    m.dev[m.ndev++] = (xl_device){ XL_DEV_GPU, PCI_CAM + ((uint64_t)GPU_PCI_DEV << ECAM_DEV_SHIFT), 0x1000, true };
+    m.gpu_pool_base = drm_host;
+    m.gpu_pool_size = DRM_HOST_MIB << 20;
+  }
   // the input bus: all of bus 0 on AVF's CAM; on Droid-VM's ECAM the input's device only, one step of the kernel's scan
   if (display_w)
     m.dev[m.ndev++] = shared_ram ? (xl_device){ XL_DEV_INPUT, PCI_CAM + ((uint64_t)ECAM_INPUT_DEV << ECAM_DEV_SHIFT), INPUT_STEP, true }
                                  : (xl_device){ XL_DEV_INPUT, PCI_CAM, PCI_BUS0, true };
+  // the sound card: the kernel finds it on bus 0, wherever crosvm put it
+  if (audio) {
+    m.dev[m.ndev++] = (xl_device){ XL_DEV_SND, PCI_CAM, ECAM_BUS0, true };
+    printf("xnuloader-crosvm: the sound card: /arm-io/virtio-snd, bus 0 of crosvm's ECAM (vm-boot: --virtio-snd backend=aaudio)\n");
+  }
+  // the network card: the kernel finds it on bus 0 as well
+  if (wifi) {
+    m.dev[m.ndev++] = (xl_device){ XL_DEV_NET, PCI_CAM, ECAM_BUS0, true };
+    printf("xnuloader-crosvm: the Wi-Fi: /arm-io/net, bus 0 of crosvm's ECAM (vm-boot: --net tap-name=, wifictl tap to wlan0)\n");
+  }
   const xh_imageset_file *os = image_dir ? xh_imageset_role(&set, "os") : NULL;
   if (os && *os->volume_uuid) m.root_volume_uuid = os->volume_uuid;
   m.trust_cache = trust.data != NULL;
@@ -331,8 +420,8 @@ int main(int argc, char **argv)
   // At 0x100 a label of the VM this Image is made for, which `oneios-tool phone vm-boot` reads and starts crosvm with:
   // the window was cut for that much RAM, that many vCPUs and that pool
   char label[128];
-  int label_len = snprintf(label, sizeof label, "oneios-crosvm ram-mib=%u cpus=%u swiotlb-mib=%u%s", ram_mib, cpus, swiotlb_mib,
-                           shared_ram ? " shared-ram=1" : "");
+  int label_len = snprintf(label, sizeof label, "oneios-crosvm ram-mib=%u cpus=%u swiotlb-mib=%u%s%s", ram_mib, cpus, swiotlb_mib,
+                           shared_ram ? " shared-ram=1" : "", gpu ? " gpu=1" : "");
   if (label_len < 0 || (size_t)label_len >= sizeof label) return 1;
 
   FILE *f = fopen(out, "wb");
@@ -364,6 +453,10 @@ int main(int argc, char **argv)
       fprintf(d, "fb %llu %llu %u %u %llu %llu\n", (unsigned long long)(fb_pa - pool), (unsigned long long)fb_bytes, display_w, display_h,
               (unsigned long long)fb_stride, (unsigned long long)(fb_pa - pool + seq_off));
     if (display_w) fprintf(d, "input touch\n");
+    if (gpu) fprintf(d, "gpu 00:%02x.0 %llu 0x%llx\n", GPU_PCI_DEV, (unsigned long long)DRM_HOST_MIB, (unsigned long long)drm_host);
+    if (gpu_scanout) fprintf(d, "scanout %u %u %u\n", display_w, display_h, display_hz);
+    if (audio) fprintf(d, "audio\n");
+    if (wifi) fprintf(d, "wifi\n");
     for (unsigned i = 0; i < ndisk; i++) {
       char file[1200];
       if (disks[i].writable) snprintf(file, sizeof file, "%s", phone_data);
@@ -389,6 +482,9 @@ int main(int argc, char **argv)
   if (shared_ram)
     printf("  shared RAM (Droid-VM's crosvm, --protected-vm-pseudo-unprotected): the devices' region, %u MiB of plain RAM, at PA 0x%llx;"
            " PCI on its ECAM (the disks at 0x%llx + device << 15)\n", swiotlb_mib, (unsigned long long)pool, (unsigned long long)PCI_CAM);
+  if (gpu)
+    printf("  GPU: virtio-gpu at 00:%02x.0 (crosvm --gpu virglrenderer, drm2kgsl), drm2kgsl's host arena %llu MiB at PA 0x%llx\n",
+           GPU_PCI_DEV, (unsigned long long)DRM_HOST_MIB, (unsigned long long)drm_host);
   else
     printf("  restricted DMA pool (crosvm --swiotlb %u) at PA 0x%llx\n", swiotlb_mib, (unsigned long long)pool);
   if (display_w)

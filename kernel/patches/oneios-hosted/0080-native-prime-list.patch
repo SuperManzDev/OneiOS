@@ -1,0 +1,51 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -9538,6 +9538,39 @@
+ 	int error = native_gpu_addon_write(path, (const uint8_t *)text, length, 0644, vfs_context_current());
+ 	printf("oneios-gpu-list: %s \"%s\": %s (%d)\n", path, list, error < 0 ? "unchanged" : error ? "not written" : "written", error);
+ }
++/*
++ * OneiOS (0080): the Metal plug-in's shader priming list, NativeAdrenoMetal.primelist beside its bundle: every .metallib
++ * of the OS image, one absolute path a line, which the render server compiles ahead into the plug-in's cache on the Data
++ * volume while the desktop is quiet (NativeMetal PrimeShaders.h). The render server's sandbox refuses to list most
++ * folders, so without the list the plug-in finds a few libraries and the rest compile cold, when an app first draws
++ * with them. The loader carries the list in /chosen/oneios-prime-list (xnuloader-crosvm --prime-list, made with
++ * oneios-tool image apfs-find); it is written at every boot that has it, as 0039's client list is. One line:
++ *   oneios-gpu-prime: /private/var/oneios/addons/Extensions/NativeAdrenoMetal.primelist 320 libraries: written (0)
++ */
++static void
++oneios_gpu_prime_file(const char *folder)
++{
++	DTEntry chosen;
++	void const *value = NULL;
++	unsigned int size = 0;
++	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
++	    SecureDTGetProperty(chosen, "oneios-prime-list", &value, &size) != kSuccess || !value || size < 2) {
++		return;
++	}
++	const char *text = (const char *)value;
++	uint64_t length = size;
++	while (length && text[length - 1] == 0) {
++		length--;
++	}
++	unsigned libraries = 0;
++	for (uint64_t i = 0; i < length; i++) {
++		libraries += text[i] == '\n';
++	}
++	char path[128];
++	snprintf(path, sizeof(path), "%s/NativeAdrenoMetal.primelist", folder);
++	int error = native_gpu_addon_write(path, (const uint8_t *)text, length, 0644, vfs_context_current());
++	printf("oneios-gpu-prime: %s %u libraries: %s (%d)\n", path, libraries, error < 0 ? "unchanged" : error ? "not written" : "written", error);
++}
+ #endif
+ #if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ /*
+@@ -9667,6 +9700,7 @@
+ 	static const char seed_source[] = "/private/var/oneios/addons/Extensions";
+ 	const int from_addon = native_gpu_addon_files > 0;
+ 	oneios_gpu_clients_file(from_addon ? extensions_source : seed_source);     /* 0039 */
++	oneios_gpu_prime_file(from_addon ? extensions_source : seed_source);       /* 0080 */
+ 	native_gpu_addon_mount(p, scratch, 0x400, from_addon ? extensions_source : seed_source,
+ 	    from_addon ? sizeof(extensions_source) : sizeof(seed_source), extensions_point, sizeof(extensions_point),
+ 	    "/System/Library/Extensions/AGXMetalG18P.bundle",

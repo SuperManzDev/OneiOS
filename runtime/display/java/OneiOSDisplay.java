@@ -37,7 +37,7 @@ public final class OneiOSDisplay {
     }
 
     private static int usage() {
-        log("usage: oneios-display (--session DIR | --socket PATH) [--takeover] [--wait SECONDS] [--logical WxH]"
+        log("usage: oneios-display (--session DIR | --socket PATH | --crosvm-display NAME --size WxH) [--takeover] [--wait SECONDS] [--logical WxH]"
             + " [--hz N] [--format bgra|rgbx] [--dataspace auto|unknown|srgb|p3|scrgb|scrgb-linear] [--no-projection]");
         return 2;
     }
@@ -59,7 +59,187 @@ public final class OneiOSDisplay {
         return 0;
     }
 
+    // ---- crosvm's own display (--crosvm-display NAME) ----------------------------------------------
+    // Droid-VM's crosvm shows a VM's virtio-gpu scanout in an Android Surface it is given through the service it registers
+    // as NAME (crosvm --android-display-service NAME: android.crosvm.ICrosvmAndroidDisplayService of Droid-VM's
+    // Virtualization fork, libs/android_display_backend; setSurface(inout Surface, boolean forCursor) is its first
+    // transaction, removeSurface(boolean forCursor) its third). This makes the layer and its buffer queue's Surface and
+    // hands that over: crosvm then blits each frame the guest flushes into it on the GPU, and nothing is copied here. It ends
+    // when crosvm's binder dies (the VM ended) or on SIGTERM; the layer goes with it (docs/native.md "The GPU in the
+    // shared-RAM VM").
+    private static final String CROSVM_DISPLAY = "android.crosvm.ICrosvmAndroidDisplayService";
+    private static final int SET_SURFACE = 1, REMOVE_SURFACE = 3, GET_DISPLAY_CONFIG = 6;
+    // The layer, its buffer queue and its Surface stay reachable for the process's life: crosvm draws through the queue,
+    // which a collected BLASTBufferQueue would take away (its cleaner destroys the native queue).
+    private static Object[] sCrosvmDisplay;
+
+    // The panel's power (--screen-file, a takeover's: displayctl touch makes the file when power is clicked and removes it at
+    // the next click): POWER_MODE_OFF (0) while it is there, POWER_MODE_NORMAL (2) otherwise, and normal again at the end.
+    private static Object sPanelToken;
+    private static volatile boolean sPanelOff;
+
+    private static boolean setPanel(boolean on) {
+        if (sPanelToken == null) return false;
+        try {
+            SC.getMethod("setDisplayPowerMode", Class.forName("android.os.IBinder"), int.class).invoke(null, sPanelToken, on ? 2 : 0);
+            return true;
+        } catch (Throwable refused) {
+            log("the panel's power could not be set (" + refused + ")");
+            return false;
+        }
+    }
+
+    private static int crosvmDisplay(String name, int width, int height, int hz, int waitSeconds, boolean takeover, String screenFile)
+        throws Exception {
+        SC = Class.forName("android.view.SurfaceControl");
+        TX = Class.forName("android.view.SurfaceControl$Transaction");
+        Class<?> parcelClass = Class.forName("android.os.Parcel"), binderClass = Class.forName("android.os.IBinder");
+        Method check = Class.forName("android.os.ServiceManager").getMethod("checkService", String.class);
+        Object binder = null;
+        for (int tries = 0; tries < waitSeconds * 10 && binder == null; tries++) {
+            binder = check.invoke(null, name);
+            if (binder == null) Thread.sleep(100);
+        }
+        if (binder == null) { log("crosvm registered no " + name + " in " + waitSeconds + " s: no screen"); return 3; }
+        log("crosvm's display service " + name + " is there");
+        Object transaction = TX.getConstructor().newInstance();
+        // --takeover (One UI's framework down, vm-boot --takeover): the panel in its native mode and the projection set here, as the
+        // hosted session's takeover does; beside One UI the display is the framework's
+        int[] panel = panel(transaction, takeover, takeover, null);
+        if (hz <= 0) hz = panel[2];
+        // the frame fitted to the panel, centred (the guest's frame is normally the panel's own size)
+        float scale = Math.min(panel[0] / (float) width, panel[1] / (float) height);
+        int shownW = Math.round(width * scale), shownH = Math.round(height * scale);
+        int x = (panel[0] - shownW) / 2, y = (panel[1] - shownH) / 2;
+        Object layer = layer("OneiOS display (crosvm)");
+        Object queue = queue("OneiOS display (crosvm)", layer, width, height, RGBX_8888);
+        Object surface = queue.getClass().getMethod("createSurface").invoke(queue);
+        sCrosvmDisplay = new Object[]{layer, queue, surface};
+        final Object service = binder, s = surface, l = layer;
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            if (sPanelOff) setPanel(true);
+            try { transact(service, REMOVE_SURFACE, null); } catch (Throwable ignored) { }
+            try {
+                Object t = TX.getConstructor().newInstance();
+                if (!tx(t, "remove", new Class<?>[]{SC}, l)) tx(t, "hide", new Class<?>[]{SC}, l);
+                tx(t, "apply", new Class<?>[]{});
+            } catch (Throwable ignored) { }
+            quiet(s, "release");
+            System.err.println("oneios-display: crosvm's layer removed");
+        }));
+        Class<?>[] f4 = {SC, float.class, float.class, float.class, float.class};
+        if (shownW != width || shownH != height) {
+            if (!tx(transaction, "setMatrix", f4, layer, scale, 0f, 0f, scale)
+                && !tx(transaction, "setScale", new Class<?>[]{SC, float.class, float.class}, layer, scale, scale))
+                log("the layer could not be scaled: the frame shows at its own size");
+        }
+        tx(transaction, "setPosition", new Class<?>[]{SC, float.class, float.class}, layer, (float) x, (float) y);
+        tx(transaction, "setOpaque", new Class<?>[]{SC, boolean.class}, layer, true);
+        if (!tx(transaction, "setFrameRate", new Class<?>[]{SC, float.class, int.class}, layer, (float) hz, 0))
+            log("no frame rate vote: surfaceflinger keeps its own refresh rate");
+        place(transaction, layer, TOP);
+        tx(transaction, "apply", new Class<?>[]{});
+        log("layer up: the guest's " + width + "x" + height + " at " + x + "," + y + " " + shownW + "x" + shownH + " on the panel's "
+            + panel[0] + "x" + panel[1] + ", " + hz + " Hz");
+        // setSurface(inout Surface surface, boolean forCursor = false)
+        Object data = parcelClass.getMethod("obtain").invoke(null);
+        Object reply = parcelClass.getMethod("obtain").invoke(null);
+        parcelClass.getMethod("writeInterfaceToken", String.class).invoke(data, CROSVM_DISPLAY);
+        parcelClass.getMethod("writeInt", int.class).invoke(data, 1);
+        surface.getClass().getMethod("writeToParcel", parcelClass, int.class).invoke(surface, data, 0);
+        parcelClass.getMethod("writeInt", int.class).invoke(data, 0);
+        boolean sent;
+        try {
+            sent = (Boolean) binderClass.getMethod("transact", int.class, parcelClass, parcelClass, int.class)
+                .invoke(binder, SET_SURFACE, data, reply, 0);
+            if (sent) parcelClass.getMethod("readException").invoke(reply);
+        } catch (java.lang.reflect.InvocationTargetException refused) {
+            // The surface is an inout argument: crosvm keeps the window it was given (setNativeSurface), so its stub then
+            // has no window to write back and the reply fails with BAD_VALUE, which Java throws as IllegalArgumentException
+            // (AOSP's Terminal app sees the same and goes on). The call itself was made: the window is crosvm's.
+            if (!(refused.getCause() instanceof IllegalArgumentException)) throw refused;
+            log("setSurface's reply could not carry the Surface back (crosvm keeps it): taken");
+            sent = true;
+        }
+        parcelClass.getMethod("recycle").invoke(data);
+        parcelClass.getMethod("recycle").invoke(reply);
+        if (!sent) { log("crosvm did not take the Surface (setSurface's transaction failed)"); return 4; }
+        int[] scanout = displayConfig(binder);
+        log("the Surface is crosvm's: it draws the VM's screen there (its scanout " + scanout[0] + "x" + scanout[1] + ")");
+        Method alive = binderClass.getMethod("isBinderAlive");
+        if (screenFile != null) {
+            try { sPanelToken = display()[1]; } catch (Throwable unavailable) { log("no display token: the panel stays on (" + unavailable + ")"); }
+        }
+        java.io.File switchFile = screenFile != null ? new java.io.File(screenFile) : null;
+        while ((Boolean) alive.invoke(binder)) {
+            if (switchFile != null) {
+                boolean off = switchFile.exists();
+                if (off != sPanelOff && setPanel(!off)) {
+                    sPanelOff = off;
+                    log(off ? "the panel is off (power clicked)" : "the panel is on");
+                }
+            }
+            Thread.sleep(switchFile != null ? 50 : 500);
+        }
+        if (sPanelOff && setPanel(true)) { sPanelOff = false; log("the panel is on again"); }
+        log("crosvm's display service is gone: the VM ended");
+        return 0;
+    }
+
+    /** getDisplayConfig (the service's sixth transaction, of Droid-VM's fork): the guest's scanout width and height. */
+    private static int[] displayConfig(Object binder) {
+        try {
+            Class<?> parcelClass = Class.forName("android.os.Parcel");
+            Object data = parcelClass.getMethod("obtain").invoke(null), reply = parcelClass.getMethod("obtain").invoke(null);
+            parcelClass.getMethod("writeInterfaceToken", String.class).invoke(data, CROSVM_DISPLAY);
+            Class.forName("android.os.IBinder").getMethod("transact", int.class, parcelClass, parcelClass, int.class)
+                .invoke(binder, GET_DISPLAY_CONFIG, data, reply, 0);
+            parcelClass.getMethod("readException").invoke(reply);
+            Method readInt = parcelClass.getMethod("readInt");
+            int[] out = {0, 0};
+            if ((Integer) readInt.invoke(reply) != 0) {          // non-null, then the parcelable's size, then its fields
+                readInt.invoke(reply);
+                out[0] = (Integer) readInt.invoke(reply);
+                out[1] = (Integer) readInt.invoke(reply);
+            }
+            parcelClass.getMethod("recycle").invoke(data);
+            parcelClass.getMethod("recycle").invoke(reply);
+            return out;
+        } catch (Throwable unknown) {
+            return new int[]{-1, -1};
+        }
+    }
+
+    /** One of the service's transactions that takes only forCursor = false (removeSurface). */
+    private static void transact(Object binder, int code, Object unused) throws Exception {
+        Class<?> parcelClass = Class.forName("android.os.Parcel");
+        Object data = parcelClass.getMethod("obtain").invoke(null), reply = parcelClass.getMethod("obtain").invoke(null);
+        parcelClass.getMethod("writeInterfaceToken", String.class).invoke(data, CROSVM_DISPLAY);
+        parcelClass.getMethod("writeInt", int.class).invoke(data, 0);
+        Class.forName("android.os.IBinder").getMethod("transact", int.class, parcelClass, parcelClass, int.class).invoke(binder, code, data, reply, 0);
+        parcelClass.getMethod("recycle").invoke(data);
+        parcelClass.getMethod("recycle").invoke(reply);
+    }
+
     private static int run(String[] args) throws Exception {
+        // --crosvm-display NAME --size WxH [--hz N] [--wait SECONDS] [--takeover] [--screen-file PATH]: crosvm's own display
+        // (above); no socket, no frame copy
+        for (int i = 0; i + 1 < args.length; i++) {
+            if (!args[i].equals("--crosvm-display")) continue;
+            String name = args[i + 1];
+            int width = 0, height = 0, hz = 0, waitSeconds = 60;
+            String screenFile = null;
+            boolean takeover = false;
+            for (String a : args) if (a.equals("--takeover")) takeover = true;
+            for (int j = 0; j + 1 < args.length; j++) {
+                if (args[j].equals("--size")) { String[] p = args[j + 1].split("x"); width = Integer.parseInt(p[0]); height = Integer.parseInt(p[1]); }
+                else if (args[j].equals("--hz")) hz = Integer.parseInt(args[j + 1]);
+                else if (args[j].equals("--wait")) waitSeconds = Integer.parseInt(args[j + 1]);
+                else if (args[j].equals("--screen-file")) screenFile = args[j + 1];
+            }
+            if (width <= 0 || height <= 0) return usage();
+            return crosvmDisplay(name, width, height, hz, waitSeconds, takeover, screenFile);
+        }
         String socket = null, lib = null, ready = null;
         int wait = 30, hz = 0, format = BGRA_8888, dataspace = -1;
         boolean takeover = false, projection = true;

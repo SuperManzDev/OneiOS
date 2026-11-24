@@ -11,6 +11,14 @@
 //                                    leaves and gives wlan0 back. It takes the Wi-Fi from One UI while it runs: One
 //                                    UI joins its network again by itself after it. Not during a session.
 //   wifictl restore FILE             wlan0's settings back from a session's wifi.state (after a killed xnuhost)
+//   wifictl tap TAP [DIR]            the guest's en0 through crosvm's virtio-net card (`phone vm-boot`, an Image of
+//                                    xnuloader-crosvm --wifi): takes wlan0 as a session does (its state in DIR/wifi.state,
+//                                    default /data/local/tmp), makes TAP a persistent tap and writes the address the guest
+//                                    must have (wlan0's) to DIR/wifi.mac for crosvm's --net tap-name=TAP,mac=..., then
+//                                    carries frames between TAP and the bridge as xnuhost's virtio-net does: the guest's
+//                                    frames and the station's messages to br_wlan_send, the bridge's frames for the guest
+//                                    out of TAP into crosvm. It ends on SIGTERM or SIGINT, or when crosvm lets go of TAP
+//                                    (its carrier goes down); then it leaves the network, gives wlan0 back and removes TAP.
 // Each ends with "ok" or "failed".
 #define _GNU_SOURCE
 #include "bridges/bridges.h"
@@ -21,6 +29,19 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <arpa/inet.h>
+#include <linux/if_ether.h>
+#include <linux/if_packet.h>
+#include <linux/if_tun.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#ifndef PACKET_IGNORE_OUTGOING
+#define PACKET_IGNORE_OUTGOING 23
+#endif
 
 static void say(int level, const char *line) { printf("  %s%s\n", level == 0 ? "error: " : "", line); }
 
@@ -216,15 +237,163 @@ out:
   return rc;
 }
 
+// ---- tap: crosvm's card ---------------------------------------------------------------------------
+static volatile sig_atomic_t tap_stop;
+static int tap_socket = -1, tap_index;
+static unsigned long long tap_to_guest, tap_to_guest_failed, tap_from_guest, tap_from_guest_refused;
+
+static void tap_signal(int sig) { (void)sig; tap_stop = 1; }
+
+// A frame of the bridge's for the guest (its threads): out of TAP, so crosvm reads it into the card's receive queue.
+static void tap_rx(void *ctx, const uint8_t *frame, size_t length)
+{
+  (void)ctx;
+  struct sockaddr_ll to = { .sll_family = AF_PACKET, .sll_ifindex = tap_index, .sll_halen = 6 };
+  if (length >= 6) memcpy(to.sll_addr, frame, 6);
+  if (tap_socket >= 0 && sendto(tap_socket, frame, length, 0, (struct sockaddr *)&to, sizeof to) == (ssize_t)length)
+    __atomic_fetch_add(&tap_to_guest, 1, __ATOMIC_RELAXED);
+  else
+    __atomic_fetch_add(&tap_to_guest_failed, 1, __ATOMIC_RELAXED);
+}
+
+// TAP as a persistent tap (persist 1), or removed (persist 0). The fd is closed at once: crosvm attaches by the name.
+static int tap_persist(const char *name, int persist)
+{
+  int fd = open("/dev/net/tun", O_RDWR | O_CLOEXEC);
+  if (fd < 0) return -errno;
+  struct ifreq r;
+  memset(&r, 0, sizeof r);
+  r.ifr_flags = IFF_TAP | IFF_NO_PI;
+  snprintf(r.ifr_name, sizeof r.ifr_name, "%s", name);
+  int rc = ioctl(fd, TUNSETIFF, &r) || ioctl(fd, TUNSETPERSIST, persist) ? -errno : 0;
+  close(fd);
+  return rc;
+}
+
+static int tap_flags_up(const char *name)
+{
+  int s = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+  if (s < 0) return -errno;
+  struct ifreq r;
+  memset(&r, 0, sizeof r);
+  snprintf(r.ifr_name, sizeof r.ifr_name, "%s", name);
+  int rc = ioctl(s, SIOCGIFFLAGS, &r);
+  if (!rc && !(r.ifr_flags & IFF_UP)) { r.ifr_flags |= IFF_UP; rc = ioctl(s, SIOCSIFFLAGS, &r); }
+  rc = rc ? -errno : 0;
+  close(s);
+  return rc;
+}
+
+// /sys/class/net/TAP/carrier: 1 while crosvm holds the tap, 0 before and after; -1 when unreadable.
+static int tap_carrier(const char *name)
+{
+  char path[96], c = 0;
+  snprintf(path, sizeof path, "/sys/class/net/%s/carrier", name);
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0) return -1;
+  ssize_t n = read(fd, &c, 1);
+  close(fd);
+  return n == 1 ? c == '1' : -1;
+}
+
+static int tap(int argc, char **argv)
+{
+  const char *name = argv[2], *dir = argc > 3 ? argv[3] : "/data/local/tmp";
+  if (!*name || strlen(name) >= IFNAMSIZ || strchr(name, '/')) { printf("a tap name of 1 to %d bytes\n", IFNAMSIZ - 1); return 1; }
+  struct sigaction sa;
+  memset(&sa, 0, sizeof sa);
+  sa.sa_handler = tap_signal;                                // no SA_RESTART: poll and recvfrom end with EINTR
+  sigaction(SIGTERM, &sa, NULL);
+  sigaction(SIGINT, &sa, NULL);
+  signal(SIGPIPE, SIG_IGN);
+  uint8_t mac[6];
+  br_net_open_fn open_fn = br_wlan_prepare("wlan0", dir, mac);
+  if (!open_fn) return 1;                                    // wlan0 untouched (the bridge said why)
+  int rc = 1;
+  br_net *wlan = NULL;
+  char path[256], text[64];
+  bool made = false;
+  int r = tap_persist(name, 1);
+  if (r) { printf("tap: %s not made: %s\n", name, strerror(-r)); goto out; }
+  made = true;
+  snprintf(path, sizeof path, "/proc/sys/net/ipv6/conf/%s/disable_ipv6", name);    // the host's own stack stays off it
+  int v6 = open(path, O_WRONLY | O_CLOEXEC);
+  if (v6 >= 0) { (void)!write(v6, "1", 1); close(v6); }
+  if ((r = tap_flags_up(name))) { printf("tap: %s not up: %s\n", name, strerror(-r)); goto out; }
+  tap_index = (int)if_nametoindex(name);
+  tap_socket = socket(AF_PACKET, SOCK_RAW | SOCK_CLOEXEC, htons(ETH_P_ALL));
+  struct sockaddr_ll at = { .sll_family = AF_PACKET, .sll_protocol = htons(ETH_P_ALL), .sll_ifindex = tap_index };
+  int one = 1;
+  if (!tap_index || tap_socket < 0 || bind(tap_socket, (struct sockaddr *)&at, sizeof at)) {
+    printf("tap: AF_PACKET on %s: %s\n", name, strerror(errno));
+    goto out;
+  }
+  (void)setsockopt(tap_socket, SOL_PACKET, PACKET_IGNORE_OUTGOING, &one, sizeof one);   // what goes out to crosvm
+  if (!(wlan = open_fn(NULL, tap_rx, NULL))) goto out;
+  // the address last: vm-boot starts crosvm when it reads it
+  snprintf(text, sizeof text, "%02x:%02x:%02x:%02x:%02x:%02x\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  snprintf(path, sizeof path, "%s/wifi.mac", dir);
+  int mf = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+  if (mf < 0 || write(mf, text, strlen(text)) != (ssize_t)strlen(text)) { printf("tap: %s: %s\n", path, strerror(errno)); if (mf >= 0) close(mf); goto out; }
+  close(mf);
+  printf("tap: %s is crosvm's card, the guest's address %.17s (wlan0's); frames carried until crosvm lets go of it\n", name, text);
+  bool held = false;
+  unsigned long long said = ~0ull;
+  struct timespec last;
+  clock_gettime(CLOCK_MONOTONIC, &last);
+  uint8_t frame[2048];
+  while (!tap_stop) {
+    struct pollfd p = { tap_socket, POLLIN, 0 };
+    int n = poll(&p, 1, 500);
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (now.tv_sec - last.tv_sec >= 30) {                     // a line every 30 s while frames move
+      last = now;
+      const unsigned long long moved = tap_from_guest + __atomic_load_n(&tap_to_guest, __ATOMIC_RELAXED);
+      if (moved != said) {
+        said = moved;
+        printf("tap: %llu frames to the guest (%llu not sent), %llu from it (%llu refused by the bridge)\n",
+               __atomic_load_n(&tap_to_guest, __ATOMIC_RELAXED), __atomic_load_n(&tap_to_guest_failed, __ATOMIC_RELAXED),
+               tap_from_guest, tap_from_guest_refused);
+      }
+    }
+    const int carrier = tap_carrier(name);
+    if (carrier == 1) held = true;
+    else if (held) { printf("tap: crosvm let go of %s\n", name); break; }
+    if (n < 0) { if (errno == EINTR) continue; printf("tap: poll: %s\n", strerror(errno)); break; }
+    if (n == 0 || !(p.revents & POLLIN)) continue;
+    struct sockaddr_ll from;
+    socklen_t fl = sizeof from;
+    ssize_t len = recvfrom(tap_socket, frame, sizeof frame, MSG_DONTWAIT, (struct sockaddr *)&from, &fl);
+    if (len < 0) { if (errno == EAGAIN || errno == EINTR || errno == ENETDOWN) continue; printf("tap: recvfrom: %s\n", strerror(errno)); break; }
+    if (from.sll_pkttype == PACKET_OUTGOING) continue;
+    if (len < 14 || len > (ssize_t)BR_WIFI_FRAME) { tap_from_guest_refused++; continue; }
+    if (br_wlan_send(wlan, frame, (size_t)len) == 0) tap_from_guest++; else tap_from_guest_refused++;
+  }
+  rc = 0;
+out:
+  br_wlan_close();                                           // the network left, the supplicant and wlan0 given back
+  if (tap_socket >= 0) close(tap_socket);
+  tap_socket = -1;
+  snprintf(path, sizeof path, "%s/wifi.mac", dir);
+  unlink(path);
+  if (made && (r = tap_persist(name, 0))) printf("tap: %s not removed: %s\n", name, strerror(-r));
+  printf("tap: %llu frames to the guest (%llu not sent), %llu from it (%llu refused by the bridge)\n",
+         __atomic_load_n(&tap_to_guest, __ATOMIC_RELAXED), __atomic_load_n(&tap_to_guest_failed, __ATOMIC_RELAXED),
+         tap_from_guest, tap_from_guest_refused);
+  return rc;
+}
+
 int main(int argc, char **argv)
 {
   int rc = 2;
   setvbuf(stdout, NULL, _IOLBF, 0);
   br_log_sink = say;
-  if (argc < 2) { fprintf(stderr, "usage: wifictl status [IFACE] | scan [SECONDS [IFACE]] | join SSID [PASSPHRASE [SECONDS]] | restore FILE\n"); return 2; }
+  if (argc < 2) { fprintf(stderr, "usage: wifictl status [IFACE] | scan [SECONDS [IFACE]] | join SSID [PASSPHRASE [SECONDS]] | restore FILE | tap TAP [DIR]\n"); return 2; }
   if (!strcmp(argv[1], "status")) rc = status(argc, argv);
   else if (!strcmp(argv[1], "scan")) rc = scan(argc, argv);
   else if (!strcmp(argv[1], "join") && argc > 2) rc = join(argc, argv);
+  else if (!strcmp(argv[1], "tap") && argc > 2) rc = tap(argc, argv);
   else if (!strcmp(argv[1], "restore") && argc > 2) { rc = br_wlan_restore(argv[2]); if (rc == -ENOENT) { printf("nothing to give back (no %s)\n", argv[2]); rc = 0; } else rc = rc ? 1 : 0; }
   printf("%s\n", rc == 0 ? "ok" : rc == 2 ? "unknown command" : "failed");
   return rc;

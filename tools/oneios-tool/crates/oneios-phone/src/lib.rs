@@ -19,6 +19,8 @@ pub mod phone;
 pub mod pull;
 pub mod session;
 pub mod sparse;
+pub mod udmabuf;
+pub mod haltpoll;
 pub mod vmboot;
 pub mod vmprobe;
 
@@ -130,6 +132,18 @@ pub enum Command {
         #[command(subcommand)]
         command: HostshareCommand,
     },
+    /// Droid-VM's udmabuf module (scripts/hugepage/build-udmabuf.sh): large GPU buffers from a fragmented phone (kvmalloc in
+    /// place of the built-in's kmalloc_array): status, load, unload
+    Udmabuf {
+        #[command(subcommand)]
+        command: UdmabufCommand,
+    },
+    /// Droid-VM's gunyah_halt_poll module (their prebuilt of DroidVM-Prebuilt-Root f7c6ce8, SHA-256 pinned): a vCPU waits a moment for its wakeup
+    /// before its thread sleeps, so a completion skips the host's interrupt and scheduler round trip: status, load, unload
+    Haltpoll {
+        #[command(subcommand)]
+        command: HaltpollCommand,
+    },
     /// Droid-VM's own crosvm (scripts/droidvm/fetch-crosvm.sh) pushed to the phone with its libraries, each checked by
     /// SHA-256 there, then the lines of its `crosvm run --help` that match REGEX
     DroidvmCrosvm {
@@ -168,9 +182,36 @@ pub enum Command {
         /// vCPU N on the phone's core N (crosvm --cpu-affinity)
         #[arg(long)]
         pin: bool,
-        /// Droid-VM's crosvm package (scripts/droidvm/fetch-crosvm.sh), for an Image of xnuloader-crosvm --shared-ram
-        #[arg(long, value_name = "DIR", default_value = "/mnt/tkg-build/oneios/dl/droidvm-prebuilt/82c59c2")]
+        /// Droid-VM's crosvm package (scripts/droidvm/fetch-crosvm.sh), for an Image of xnuloader-crosvm --shared-ram: their
+        /// hackintosh line's by default, whose crosvm takes the kernel's scanout (`fetch-crosvm.sh DIR hackintosh`)
+        #[arg(long, value_name = "DIR", default_value = "/mnt/tkg-build/oneios/dl/droidvm-prebuilt/f7c6ce8")]
         droidvm: String,
+        /// The GPU's lowest clock while an Image with the GPU runs (MHz; the level at or above it), put back at the end;
+        /// 0 leaves the clocks to the governor
+        #[arg(long, value_name = "MHZ", default_value_t = vmboot::GPU_FLOOR_MHZ)]
+        gpu_floor: u32,
+        /// The CPUs' lowest clocks while the VM runs, percent of each cluster's top clock (Android's cap stays), put back at the
+        /// end; 0 leaves the clocks to the governor
+        #[arg(long, value_name = "PERCENT", default_value_t = vmboot::CPU_FLOOR_PERCENT)]
+        cpu_floor: u32,
+        /// One UI's framework stopped while the VM runs (as hugepool grow stops it: Samsung's watchdog fed, the way back armed
+        /// first) and started again when the VM ends, however it ends; the CPUs' caps lifted meanwhile
+        #[arg(long)]
+        takeover: bool,
+        /// With --pin: vCPU i on core N+i, the cores below N left to the host (crosvm's device threads, surfaceflinger)
+        #[arg(long, value_name = "N", default_value_t = 0)]
+        pin_first: u32,
+        /// thermal.txt: once a second the CPU clusters', the GPU's, the board's and the battery's temperatures, the clocks and
+        /// the GPU's load, while the VM runs (read only)
+        #[arg(long)]
+        thermal_log: bool,
+        /// With an Image that has the sound card (xnuloader-crosvm --audio): crosvm's AAudio backend in its own process under
+        /// this uid (crosvm's uid=; Droid-VM's crosvm: a stream of uid 0 is silenced while One UI runs). Default: in crosvm's
+        #[arg(long, value_name = "UID")]
+        audio_uid: Option<u32>,
+        /// The Wi-Fi's bridge for the phone, for an Image made with --wifi, used in a takeover (runtime/bridges: make)
+        #[arg(long, value_name = "FILE", default_value = "runtime/bridges/build/android/wifictl")]
+        wifictl: String,
     },
     /// One run of runtime/vmprobe's payload as a protected VM under Gunyah with AVF's crosvm: 1 vCPU, no device but
     /// the serial port; it powers off by itself, else crosvm stop after SECONDS. Refused during a session
@@ -237,6 +278,9 @@ pub enum Command {
     /// as holes; a copy that stopped goes on where it stopped (OUT.part, OUT.part.progress); no session may be open
     PullData {
         out: String,
+        /// vm-boot's store (/data/local/tmp/oneios-vmboot/data.img: iOS in the VM) in place of the hosted session's
+        #[arg(long)]
+        vm: bool,
         /// A chunk's size in MiB: one adb stream each (default 256; a copy that goes on keeps the size it began with)
         #[arg(long, value_name = "MIB")]
         chunk: Option<u64>,
@@ -331,6 +375,40 @@ pub enum HugepoolCommand {
         seconds: u32,
     },
     /// rmmod, when no VM holds pool pages and no acquire runs
+    Unload,
+}
+
+#[derive(clap::Subcommand)]
+pub enum HaltpollCommand {
+    /// Its parameters and kernel lines (read only)
+    Status,
+    /// The .ko checked against Droid-VM's prebuilt, pushed and checked again, a sync, then insmod
+    Load {
+        /// The module (DroidVM-Prebuilt-Root f7c6ce8)
+        #[arg(long, value_name = "FILE", default_value = "/mnt/tkg-build/oneios/dl/halt-poll/gunyah-halt-poll-gki-6.6.ko")]
+        ko: String,
+        /// Where load.txt goes
+        #[arg(long, value_name = "DIR", default_value = "phone-haltpoll")]
+        out: String,
+    },
+    /// rmmod (refused by the kernel while a VM runs)
+    Unload,
+}
+
+#[derive(clap::Subcommand)]
+pub enum UdmabufCommand {
+    /// Its mode, limits and counts, the built-in's limits, its kernel lines (read only)
+    Status,
+    /// The built-in's symbols checked in /proc/kallsyms, the .ko pushed and checked, a sync, then insmod; it says its mode
+    Load {
+        /// The module (scripts/hugepage/build-udmabuf.sh)
+        #[arg(long, value_name = "FILE", default_value = "/mnt/tkg-build/oneios/hugepage/out/udmabuf-android15-6.6.ko")]
+        ko: String,
+        /// Where load.txt goes
+        #[arg(long, value_name = "DIR", default_value = "phone-udmabuf")]
+        out: String,
+    },
+    /// rmmod (refused by the kernel while a buffer of the module's lives)
     Unload,
 }
 
@@ -468,8 +546,18 @@ pub fn main(cli: Cli) -> i32 {
             HostshareCommand::Unload => hostshare::unload(&adb),
         }),
         Command::DroidvmCrosvm { dir, grep } => Adb::connect(serial).and_then(|adb| droidvm::crosvm(&adb, &dir, &grep)),
-        Command::VmBoot { image, seconds, thp, out, stop, bridge, swipe_test, pin, droidvm } => Adb::connect(serial).and_then(|adb| {
-            if stop { vmboot::stop(&adb) } else { vmboot::vm_boot(&adb, &image, &out, &vmboot::Options { seconds, thp, bridge, swipe_test, pin, droidvm }) }
+        Command::Udmabuf { command } => Adb::connect(serial).and_then(|adb| match command {
+            UdmabufCommand::Status => udmabuf::status(&adb),
+            UdmabufCommand::Load { ko, out } => udmabuf::load(&adb, &ko, &out),
+            UdmabufCommand::Unload => udmabuf::unload(&adb),
+        }),
+        Command::Haltpoll { command } => Adb::connect(serial).and_then(|adb| match command {
+            HaltpollCommand::Status => haltpoll::status(&adb),
+            HaltpollCommand::Load { ko, out } => haltpoll::load(&adb, &ko, &out),
+            HaltpollCommand::Unload => haltpoll::unload(&adb),
+        }),
+        Command::VmBoot { image, seconds, thp, out, stop, bridge, swipe_test, pin, droidvm, gpu_floor, cpu_floor, takeover, pin_first, thermal_log, audio_uid, wifictl } => Adb::connect(serial).and_then(|adb| {
+            if stop { vmboot::stop(&adb) } else { vmboot::vm_boot(&adb, &image, &out, &vmboot::Options { seconds, thp, bridge, swipe_test, pin, droidvm, gpu_floor_mhz: gpu_floor, cpu_floor_percent: cpu_floor, takeover, pin_first, thermal_log, audio_uid, wifictl }) }
         }),
         Command::VmProbe { payload, mem, timeout, out, thp, droidvm, shared_ram, thp_shmem } => Adb::connect(serial).and_then(|adb| {
             let crosvm = match droidvm.as_deref() {
@@ -491,10 +579,11 @@ pub fn main(cli: Cli) -> i32 {
             phone::image_check(&adb).map(|n| println!("image: manifest.json and the {n} files it lists agree"))
         }),
         Command::Manifest { dir, out, stage } => Adb::connect(serial).and_then(|adb| phone::manifest_cmd(&adb, &dir, out.as_deref(), stage)),
-        Command::PullData { out, chunk, retries, backoff, stall, verify, restart, ioslog } => Adb::connect(serial).and_then(|adb| {
+        Command::PullData { out, vm, chunk, retries, backoff, stall, verify, restart, ioslog } => Adb::connect(serial).and_then(|adb| {
             // Ctrl-C ends the chunk that is being copied and says how to go on; the chunks done stay
             log::catch_stop();
-            pull::pull_data(&adb, &out, &pull::Options { chunk, retries, backoff, stall, verify, restart, ioslog })
+            let image = vm.then(|| format!("{}/data.img", vmboot::DIR));
+            pull::pull_data(&adb, &out, &pull::Options { chunk, retries, backoff, stall, verify, restart, ioslog, image })
         }),
     };
     match result {

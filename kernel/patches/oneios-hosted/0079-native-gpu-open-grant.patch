@@ -1,0 +1,39 @@
+diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
+--- a/iokit/Kernel/IOUserClient.cpp
++++ b/iokit/Kernel/IOUserClient.cpp
+@@ -4789,7 +4789,7 @@
+ 	return client && 0 == strcmp(client->getMetaClass()->getClassName(), "AGXDeviceUserClient");
+ }
+ 
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ /*
+  * OneiOS hosted (0031), a boot's record of who opens the GPU: one line per open of an AGX service, with the type and
+  * the answer (at most 400 lines, always on: the question "did this process even ask?" must not need a rebuild):
+@@ -4973,7 +4973,7 @@
+ 	/* Once the native GPU driver's user client stands where Apple's does in the class chain (DroidVMGpu.cpp, through
+ 	 * OSMetaClassAdoptSuperclass), the sandbox decides who opens it, as for Apple's (droidvm-gpu-sandbox-first.patch): its
+ 	 * grant then stands in for the message filter below alone, whose rules name the original user client's methods. */
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 	/*
+ 	 * OneiOS hosted (0033): the grant decides for the processes it names, whether the class chains were adopted or not.
+ 	 * With both adopted (droidvm_gpu_sandbox_decides) the iPhone's own profiles still refused iconservicesagent every open
+@@ -4985,7 +4985,7 @@
+ 	if (!(native_sandbox_grant(service) && !droidvm_gpu_sandbox_decides)
+ #endif
+ 	    && mac_iokit_check_open_service(kauth_cred_get(), service, connect_type) != 0) {
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 		hosted_gpu_open_note(service, connect_type, kIOReturnNotPermitted, NULL);
+ #endif
+ 		return kIOReturnNotPermitted;
+@@ -5195,7 +5195,7 @@
+ 		}
+ 	}while (false);
+ 
+-#if XNU_HOSTED
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
+ 	hosted_gpu_open_note(service, connect_type, res, client);
+ #endif
+ 

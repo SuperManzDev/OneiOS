@@ -183,6 +183,7 @@ static void test_machine(void)
   p = xl_adt_get(chosen, "nvram-proxy-data");
   CHECK(p && p->length == 8192 && p->value[0] == 0x70 && !memcmp(p->value + 4, "nvram", 5));
   CHECK(xl_adt_get(chosen, "random-seed")->length == 256);
+  CHECK(xl_adt_get(chosen, "oneios-prime-list") == NULL);   // only when the loader is given one
   p = xl_adt_get(chosen, "root-matching");
   CHECK(p && strstr((const char *)p->value, "<string>0A1B2C3D-0000-4000-8000-00000000ABCD</string>"));
   // what ArmCpu reads
@@ -246,12 +247,16 @@ static void test_machine(void)
   xl_adt_set_u32(product, "artwork-device-subtype", 2868);
   m.identity = donor;
   // the display: the mode, the UI scale and the refresh rate (the scale in /chosen and in /product too)
+  static const char prime[] = "/System/Library/a.metallib\n/Applications/B.app/default.metallib\n";
+  m.prime_list = prime; m.prime_list_length = sizeof prime - 1;
   m.display_width = 1440; m.display_height = 3120; m.display_scale = 2; m.display_hz = 120;
   t = xl_machine_tree(&m, &err);
   CHECK(t != NULL);
   if (t) {
     const xl_adt_node *ch = xl_adt_find(t, "chosen"), *host = xl_adt_find(t, "chosen/xnuhost");
     uint32_t word = 0;
+    p = xl_adt_get(ch, "oneios-prime-list");   // the shader priming list as given, without a NUL
+    CHECK(p && p->length == sizeof prime - 1 && !memcmp(p->value, prime, sizeof prime - 1));
     p = xl_adt_get(ch, "display-scale");
     CHECK(p && p->length == 4 && (memcpy(&word, p->value, 4), word) == 2);
     p = xl_adt_get(ch, "display-rotation");
@@ -358,7 +363,58 @@ static void test_machine(void)
     CHECK(bus && !xl_adt_get(bus, "droidvm,intid") && !xl_adt_find(pt, "arm-io/input-0"));
     xl_adt_free(pt);
   }
-  machine_default(&m); m.dev[4].pci = true;     // a GPU on PCI: neither a disk nor the input bus
+  // the GPU on PCI (xnuloader-crosvm --gpu): its function's configuration space in crosvm's ECAM as reg, the drm2kgsl
+  // host pool beside it, no board line (the driver polls)
+  machine_default(&m);
+  m.dev[4] = (xl_device){ XL_DEV_GPU, 0x10000 + (12 << 15), 0x1000, true };
+  m.gpu_pool_base = 0x15f800000ull; m.gpu_pool_size = 8 << 20;
+  pt = xl_machine_tree(&m, &err);
+  CHECK(pt != NULL);
+  if (pt) {
+    const xl_adt_node *gpu = xl_adt_find(pt, "arm-io/virtio-gpu");
+    p = gpu ? xl_adt_get(gpu, "compatible") : NULL;
+    CHECK(p && p->length == 22 && !memcmp(p->value, "oneios,virtio-gpu-pci", 22));
+    p = gpu ? xl_adt_get(gpu, "reg") : NULL;
+    if (p && p->length == 16) memcpy(r, p->value, 16);
+    CHECK(p && p->length == 16 && r[0] == 0x10000 + (12 << 15) - 0x1000 && r[1] == 0x1000);
+    p = gpu ? xl_adt_get(gpu, "drm-host-pool") : NULL;
+    uint64_t gp[2] = { 0, 0 };
+    if (p && p->length == 16) memcpy(gp, p->value, 16);
+    CHECK(gp[0] == 0x15f800000ull && gp[1] == 8 << 20);
+    CHECK(gpu && !xl_adt_get(gpu, "droidvm,intid"));
+    xl_adt_free(pt);
+  }
+  // the sound card on PCI (xnuloader-crosvm --audio): all of bus 0 of crosvm's ECAM as reg, no board line (the driver polls)
+  machine_default(&m);
+  m.dev[4] = (xl_device){ XL_DEV_SND, 0x10000, 0x100000, true };
+  pt = xl_machine_tree(&m, &err);
+  CHECK(pt != NULL);
+  if (pt) {
+    const xl_adt_node *snd = xl_adt_find(pt, "arm-io/virtio-snd");
+    p = snd ? xl_adt_get(snd, "compatible") : NULL;
+    CHECK(p && p->length == 22 && !memcmp(p->value, "oneios,virtio-snd-pci", 22));
+    p = snd ? xl_adt_get(snd, "reg") : NULL;
+    if (p && p->length == 16) memcpy(r, p->value, 16);
+    CHECK(p && p->length == 16 && r[0] == 0x10000 - 0x1000 && r[1] == 0x100000);
+    CHECK(snd && !xl_adt_get(snd, "droidvm,intid"));
+    xl_adt_free(pt);
+  }
+  // the network card on PCI (xnuloader-crosvm --wifi): all of bus 0 of crosvm's ECAM as reg, no board line (the driver polls)
+  machine_default(&m);
+  m.dev[4] = (xl_device){ XL_DEV_NET, 0x10000, 0x100000, true };
+  pt = xl_machine_tree(&m, &err);
+  CHECK(pt != NULL);
+  if (pt) {
+    const xl_adt_node *net = xl_adt_find(pt, "arm-io/net");
+    p = net ? xl_adt_get(net, "compatible") : NULL;
+    CHECK(p && p->length == 22 && !memcmp(p->value, "oneios,virtio-net-pci", 22));
+    p = net ? xl_adt_get(net, "reg") : NULL;
+    if (p && p->length == 16) memcpy(r, p->value, 16);
+    CHECK(p && p->length == 16 && r[0] == 0x10000 - 0x1000 && r[1] == 0x100000);
+    CHECK(net && !xl_adt_get(net, "droidvm,intid"));
+    xl_adt_free(pt);
+  }
+  machine_default(&m); m.dev[4] = (xl_device){ XL_DEV_BRIDGE, 0x10000 + (7 << 11), 0x100, true };   // the bridge: not on PCI
   CHECK(xl_machine_tree(&m, &err) == NULL);
 }
 

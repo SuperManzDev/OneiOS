@@ -130,4 +130,13 @@ int xhd_frame_seq(const uint8_t *page, uint64_t *count);
 // contact size), passed as they are; 0 for the rest (the touchscreen's other keys and switches, EV_MSC, SYN_DROPPED).
 struct xhd_vinput { uint16_t type, code; uint32_t value; };
 int xhd_touch_event(uint16_t type, uint16_t code, int32_t value, struct xhd_vinput *out);
+// The side keys of a takeover (displayctl touch --keys: One UI is down, so the phone's keys are the VM's to read, never to
+// grab): each press and release of power, volume up and volume down goes to the guest as it comes, an EV_KEY and a
+// SYN_REPORT (its virtio-input driver hands them to iOS's HID buttons: lock and wake, the volume); the autorepeat of a held
+// key is not sent (iOS repeats a held volume key itself). A click of power (released within XHD_POWER_CLICK_S of its press)
+// also asks for the panel to be switched (*toggle = 1). *power_down: when power went down (0: up), kept by the caller.
+// Returns the events written to out, 0 for anything else.
+#define XHD_POWER_CLICK_S 2.0
+unsigned xhd_side_key(uint16_t type, uint16_t code, int32_t value, double now, double *power_down, int *toggle,
+                      struct xhd_vinput out[2]);
 #endif
