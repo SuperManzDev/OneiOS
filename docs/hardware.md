@@ -1498,8 +1498,8 @@ backlight drivers see that as a brightness of 0 and then a brightness above 0, o
   vibrator HAL `android.hardware.vibrator.IVibrator/default` (`on(ms)`, then `setAmplitude(level / 255)` when its
   capabilities have amplitude control, `off()`; `br_haptic_open_as`).
 - **The native path's VM (2026-11-25)**: crosvm's VM has no "oneios,bridge" device, so until then no request of iOS
-  reached the motor there (`ONEIOS HAPTIC: off: no bridge device`, `Actuator=0`; the phone's kernel log had no
-  `cs40l26_playback_effect` line in a whole session). The channel now goes over crosvm's second serial port to
+  reached the motor there (`ONEIOS HAPTIC: off: no bridge device`, `Actuator=0`, `0 requests to the motor`; iOS's haptic
+  server played sound only). The channel now goes over crosvm's second serial port to
   `bridgectl serve` on the phone, which opens this same backend (`br_haptic_open_as`); `vm-boot --no-haptics` leaves the
   haptic channel out. `docs/native.md`, "The bridge, the remembered Wi-Fi network and the power key in the crosvm VM".
   [U] Not run on the phone yet; on the S25 the sine upload itself is unproven (`docs/SM8750_PORT.md` 2).

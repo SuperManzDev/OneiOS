@@ -680,14 +680,23 @@ under xnuhost (`docs/hardware.md` 5): iOS's haptics then go to the motor instead
 (`setClientPlayerBehavior: Muting haptics ... AudioOnly` in take12's log). [U] That path has never run on the S25
 (`docs/SM8750_PORT.md` 2: the S26's motor refused the sine upload); `bridge.txt` says what the motor did
 (`haptics: effect N played on ...` or `failed on ...`).
+That changes iOS's whole haptic route, not only the motor: under xnuhost the same node once stopped the power key from
+locking until the stand-in button haptics service and the built-in buttons were on (`docs/hardware.md` 5, "The power
+key"), so it relies on `oneios-button-haptics=1 oneios-hid-buttons-builtin=1` staying in the Image's boot arguments
+(they are in take9 to take12's). If anything regresses, `vm-boot --no-haptics` keeps the battery and leaves iOS without
+an actuator as before (`oneios-actuator=0` in the boot arguments does the same in the kernel). The motor's own part can
+be tried before a session, without iOS: `bridgectl haptic-pattern` on the phone (it vibrates: the owner's to run) sends
+several effects in a row through this same backend, which is the "once, then never" question for the S25's motor.
 
 **2. "It vibrated once at the first ringtone preview, then never."** Nothing of iOS can have reached the motor in
 those sessions: the drivers were off (above), `ONEIOS HAPTIC: counters: ... 0 requests to the motor | vibrator service
-0 requests`, and the phone's kernel log, which names every effect of the motor's driver (`cs40l26_upload_effect`,
-`cs40l26_playback_effect`), has **no line in take12's 18 minutes** (read on 2026-11-25 with `oneios-tool phone dmesg
---grep 'cs40l26_playback_effect|cs40l26_upload_effect'`: its last effect was One UI's, 4 h before the session). [U]
-what the owner felt once (the speaker at full scale, or One UI's own effect at the takeover's start or end; the
-kernel log of take9 and take10 was already gone). The fix is 1.
+0 requests`, and iOS's own haptic server played sound only (`start: client ID ... audio: 1 haptic: 0`, `Muting haptics
+on client ... AudioOnly` in take12's log). [U] what the owner felt once (the speaker at full scale, or an effect of
+Android's own). The phone's kernel log names every effect of the motor's driver (`cs40l26_upload_effect`,
+`cs40l26_playback_effect`), but it holds only a few minutes and its clock stops while the phone sleeps (after take12
+it read 48524 s at an uptime of 69031 s), so it no longer had the sessions when it was read: nothing is known from it.
+(A first reading of it, "no effect in take12's 18 minutes", was wrong for that reason; this branch's third commit
+message still says it.) The fix is 1.
 
 **3. Wi-Fi forgot the network: iOS's join never ended, so iOS never saved it.** iOS's log of take12: wifid started with
 `Fetched 0 known networks from the plist` and `WiFiSecurityCopyPassword ... Error result -25300` (no such keychain
@@ -736,7 +745,7 @@ What the next session shows:
 | Fault | Read (no write) | Says it is fixed |
 |---|---|---|
 | battery | `serial.txt`; `bridge.txt` | `ONEIOS BRIDGE: the serial transport: an ns16550 at 0x2f8`, `ONEIOS BRIDGE: on: host protocol 1, channels 0x23`, `ONEIOS BATTERY: on: IOPMPowerSource published at N%`; `bridge: battery: iOS asks: N%, on power` |
-| haptics | `serial.txt`; `bridge.txt`; `oneios-tool phone dmesg --grep 'cs40l26_playback_effect'` | `Actuator=1`, `ONEIOS HAPTIC: play N: ...`; `haptics: effect N played on /dev/input/event6`; the motor driver's lines at the same seconds |
+| haptics | `serial.txt`; `bridge.txt`; during the session, `oneios-tool phone dmesg --grep 'cs40l26_playback_effect'` (the kernel log keeps only minutes) | `Actuator=1`, `ONEIOS HAPTIC: play N: ...`; `haptics: effect N played on /dev/input/event6`; the motor driver's lines right after a tap |
 | Wi-Fi | `serial.txt`; the second session's `wifi.txt` | `ONEIOS WIFI: event 9 for en0, 540 bytes -> 0`; in the next session a `join:` without a touch of Settings (iOS's log: `Fetched 1 known networks from the plist`) |
 | power key | `serial.txt`; iOS's log (`oneios-tool ioslog show data.img --boot last --proc backboardd --grep 'Event latency.*type:3'`) | `oneios-hid: buttons: LockKeyDelay 0 ms published in the event service's HIDEventServiceProperties`; no `Event latency` line of about 150000000 on a power key-down |
 
