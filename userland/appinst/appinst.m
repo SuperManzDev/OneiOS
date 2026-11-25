@@ -53,6 +53,23 @@ static void rm_rf(const char *path) {
   (void)run(argv);
 }
 
+// Recursively chown a tree. The data container must belong to mobile (uid/gid 501) or the app cannot write it.
+static void chown_r(const char *path, uid_t uid, gid_t gid) {
+  lchown(path, uid, gid);
+  DIR *d = opendir(path);
+  if (!d) return;
+  struct dirent *e;
+  while ((e = readdir(d))) {
+    if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+    char child[PATH_MAX];
+    snprintf(child, sizeof child, "%s/%s", path, e->d_name);
+    struct stat st;
+    if (lstat(child, &st) == 0 && S_ISDIR(st.st_mode)) chown_r(child, uid, gid);
+    else lchown(child, uid, gid);
+  }
+  closedir(d);
+}
+
 // ---- find Payload/<X>.app under a directory ----
 static NSString *find_dot_app(NSString *root) {
   NSString *payload = [root stringByAppendingPathComponent:@"Payload"];
@@ -197,6 +214,7 @@ int appinst_install(const char *ipa_path) {
     NSString *data_dir = [@(APPINST_DATA_ROOT) stringByAppendingPathComponent:data_uuid];
     for (NSString *sub in @[@"Documents", @"Library", @"Library/Caches", @"Library/Preferences", @"tmp", @"SystemData"])
       mkdirs([data_dir stringByAppendingPathComponent:sub].fileSystemRepresentation, 0755);
+    chown_r(data_dir.fileSystemRepresentation, 501, 501);   // mobile owns its data container
 
     // 7) pending marker for phase 2 (registration after the restart makes the CDHashes valid).
     mkdirs(APPINST_PENDING, 0755);

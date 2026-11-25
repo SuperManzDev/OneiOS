@@ -95,6 +95,9 @@ separate arm64e dependency, placed beside the helpers like `dropbear` (`userland
    this guest a trust-cached binary should read as anchor-trusted and skip it, but if installd still refuses, the
    fallbacks are (a) the installd/MobileInstallation SPI path (entitlements already granted) or (b) a small
    installd relaxation in the project's existing style (as with the App cryptex and SystemOS volumes). Verify
-   whether the icon appears on first `finalize` or needs a respring.
+   whether the icon appears on first `finalize` or needs a respring. Also check the data container: appinst
+   pre-creates one (owned by mobile, uid 501); if LaunchServices/installd instead assigns its own container UUID
+   at registration, the pre-created one is orphaned — then either pass the container path in the registration
+   dictionary or let installd create it and drop the pre-creation.
 5. **Entitlements of installed apps** carry over from the original signature; capabilities that need Apple
    services (push, associated domains) won't function — expected for an ad-hoc install.
