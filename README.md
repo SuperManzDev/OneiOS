@@ -1,192 +1,189 @@
 # YumikoHayamato's obsessed build
 
-*The Galaxy S25 Ultra build of **OneiOS** — iOS 27 (Darwin 25) running on the phone's own silicon, from a live Android session.*
+*The Galaxy S25 Ultra build of **OneiOS** — iOS 27 (Darwin 25) running on the phone's own silicon, from a live Android session, with no bootloader unlock and no flashing.*
 
-**Current development target: Samsung Galaxy S26 Ultra (SM-S948B / m3q / SM8850).** OneiOS
-is an experimental effort to run iOS 27 alongside One UI on a rooted Samsung phone, using
-[OneOS](https://github.com/akshaynexus/OneOS)'s Android-side session model: the image lives in a
-folder and One UI's Linux kernel keeps running. **An iOS switch on the S26 Ultra is not yet
-supported or approved:** device-specific return/recovery gates have not been validated.
+OneiOS runs a source-built Apple kernel (**XNU 12377**, from Droid-VM's UniXNU fork) and Apple's unmodified
+iPhone18,2 iOS 27.0.1 (`24A446`) user space on a rooted Samsung Galaxy, next to One UI, using
+[OneOS](https://github.com/akshaynexus/OneOS)'s session model: One UI's Linux kernel keeps running, the image lives
+in a folder, and the switch and the way back stay OneOS-shaped. Apple's binaries come from the owner's own IPSW
+download and are never redistributed here.
 
-The **Galaxy S24 Ultra (SM-S928 / e3q / SM8650)** is the historical guest-boot and
-switch/return baseline. Its results are not proof that the S26 Ultra can boot iOS or safely
-return to One UI.
+This branch (`s25-ultra-sm8750`) is the **Galaxy S25 Ultra (SM-S938B, SM8750 "sun", Adreno 830)** build. It descends
+from the S24 Ultra (SM8650) guest-boot baseline and the S26 Ultra (SM8850) branch, but every result below was
+measured on the owner's S25 Ultra (the `pa3q` sessions in [docs/SM8750_PORT.md](docs/SM8750_PORT.md)).
 
-OneOS's guests are Android systems that run unchanged on One UI's Linux kernel. iOS's userland needs
-Apple's kernel (XNU), so OneiOS runs a source-built XNU **as a process on One UI's kernel**
-(`runtime/xnuhost`): iOS's processes are Linux processes whose system calls and faults go to it. The
-image, the switch and the return stay OneOS-shaped. How it fits together: [docs/architecture.md](docs/architecture.md).
-How to build and test it: [docs/building.md](docs/building.md).
+> **Honesty up front.** Root on this phone is a **temporary KernelSU LKM loaded through an exploit on a *locked*
+> bootloader**; it is gone after any reboot. iOS runs **entirely from RAM** and writes nothing to UFS. There is no
+> Secure Enclave, no passcode, no Face ID — the key store is software and is **not a security boundary**. Sessions
+> are owner-driven, reversible tests, not a daily driver you install. Nothing here is flashed.
 
-## Highlights — iOS 27 on the Galaxy S25 Ultra (2026-11-24)
+---
 
-The active work runs **full iOS 27 (Darwin 25) on a rooted Galaxy S25 Ultra (SM8750, Adreno 830)**,
-started from a live One UI session — **no bootloader unlock, no flashing, no data wipe.** iOS runs from
-RAM and writes nothing to UFS. Two paths run on the phone today.
+## Two ways it runs
 
-**Hosted path** — XNU as a process on One UI's kernel (the daily driver):
+OneiOS drives iOS on the S25 Ultra through **two independent paths**. Both run the same Apple user space; they differ
+in how XNU gets onto the CPU.
 
-- **Real Metal on the Adreno 830**: NativeAdrenoMetal → Turnip/freedreno (Vulkan) → drm2kgsl, drawing on
-  iOS's own buffers. **A locked 120 fps at 1080×2340** (1202 flushes in 10 s), GPU 0.7–5.4 ms/frame —
-  with only light stutter, and that stutter is the *one missing piece*: there is **no iOS-tuned CPU/GPU
-  frequency orchestrator yet**, so it rides Android's governor, which isn't calibrated for iOS's
-  workload. Once that lands, the stutter goes.
-- Full boot to SpringBoard with the owner's finger: apps, Spotlight, Control Center.
-- Wi-Fi, haptics, thermal-aware CPU/GPU clocking, 6.4 GiB locked for the guest.
+### 1. Hosted path — XNU as a Linux process (`runtime/xnuhost`)
 
-**Native path** — XNU alone in a Gunyah shared-RAM VM via crosvm (iOS on the bare cores):
+iOS cannot run on Linux's system calls, so OneiOS runs **XNU as an ordinary Linux process**. Every iOS process is a
+Linux process whose system calls and faults are trapped (seccomp) and handed to that XNU in another thread. No
+hypervisor, no emulation — iOS code runs **natively** on the ARM64 cores, PAC and all.
 
-- **8 vCPUs, 3.5 GiB**, full boot to SpringBoard.
+```
+ One UI's Linux kernel (unchanged, KernelSU root)            Samsung vendor half keeps running
+ ├─ surfaceflinger + composer HAL ◄── oneios-display (a full-screen layer with iOS's frames)
+ ├─ /dev/kgsl-3d0, /dev/udmabuf   ◄── xnuhost's virtio-gpu 3D (drm2kgsl → KGSL → Adreno 830)
+ ├─ audioserver, vibrator evdev, backlight sysfs, ALS, MediaCodec ◄── bridges in xnuhost
+ ├─ wlan0 + the vendor's wpa_supplicant (AIDL) ◄── the Wi-Fi bridge: iOS's en0, no NAT
+ └─ xnuhost  (one Linux process; its own mount namespace and cgroup)
+     ├─ one host thread per vCPU; GICv3, timer, PSCI and EL1 system registers emulated
+     ├─ virtio devices: block (the image set), input (evdev), GPU, sound, net, camera, bridge channel
+     ├─ XNU 12377 + Apple's iPhone18,2 kexts, prelinked into one kernel.kc
+     └─ iOS tasks = Linux processes from one factory (one PAC key set); a stub traps svc and faults
+         └─ launchd → daemons → backboardd → SpringBoard  (iOS 27.0.1, Apple's binaries unchanged)
+```
+
+### 2. Native path — XNU alone in a Gunyah VM (`docs/native.md`)
+
+The S25's own hypervisor (**Qualcomm Gunyah**) runs protected VMs for Android (AVF/crosvm). The native path puts
+**XNU alone at EL1 in such a VM**, on the bare cores, with its own page tables, while One UI stays up. Droid-VM's
+`gh_hugepage_reserve` grows a shared-RAM pool (with One UI's framework briefly stopped, ~37 s, no phone reboot) so
+the VM gets gigabytes of real memory; the VM's RAM is shared with Android, so GPU work goes to Android's KGSL on
+iOS's own buffers. This is the owner's answer to the hosted path's trap overhead and heat.
+
+---
+
+## What runs today on the Galaxy S25 Ultra
+
+**Hosted path** (sessions 1–7, 2026-11-19, `logs/pa3q-s*`):
+
+- **Full boot to SpringBoard** with the owner's finger: Home Screen, apps, Spotlight, Control Center. launchd →
+  60 boot tasks → backboardd → SpringBoard, first content frame ~24 s in.
+- **Real Metal on the Adreno 830**: NativeAdrenoMetal → Turnip/freedreno (Vulkan) → drm2kgsl, on iOS's own buffers.
+  **A locked 120 fps at 1080×2340** (up to 1202 scanout flushes in 10 s), GPU 0.7–5.4 ms/frame.
+  - The **one missing piece** is a frequency orchestrator: there is **no iOS-tuned CPU/GPU governor yet**, so it
+    rides Android's governor, which isn't calibrated for iOS. That's the source of the light stutter — not a low
+    frame rate. Under sustained load the SoC also hits the thermal trap (session 7: case 46 °C → iOS's "too hot"
+    state → ~10 fps), which is exactly why the owner opened the native path.
+- Wi-Fi, haptics, thermal-aware clocking, multi-touch and the three side keys, **6.4 GiB locked** for the guest
+  (iOS's RAM is never swapped).
+
+**Native path** (Gunyah shared-RAM VM via crosvm, through 2026-11-24):
+
+- **8 vCPUs, 3.5 GiB**, full boot to SpringBoard (steps 1–9 in `docs/native.md`: disks over virtio-PCI, the boot
+  video, the lock screen on the panel, touch, the owner's finger, the real clock, the shared GPU pool).
 - **GPU scanout** shown in the Android display through a Turnip blit, **120 Hz**.
 - **Audio**: virtio-snd over PCI → AAudio, speaker with the volume keys.
 - **Wi-Fi for real**: iOS joins a WPA2 network through the phone's own radio and gets a DHCP lease.
-- **Input**: multi-touch, the on-screen keyboard, and the hardware side keys (power switches the panel,
-  volume to iOS, long-press to exit).
+- **Input**: multi-touch, the on-screen keyboard (the dictation loop that pinned a core is fixed), and the hardware
+  side keys — power switches the panel, volume goes to iOS, a long press exits.
 - **Takeover mode**: One UI's framework is paused while iOS runs, and restored on exit.
+- **In progress:** the GPU *device* inside the VM (drm2kgsl + virtio-gpu over crosvm's PCI) so the guest renders in
+  the VM instead of on the CPU; today the shared pool and scanout are proven, the in-VM renderer is next.
 
-Per-session results and the raw numbers: [docs/SM8750_PORT.md](docs/SM8750_PORT.md) and
-[docs/native.md](docs/native.md).
+Per-session logs and raw numbers: [docs/SM8750_PORT.md](docs/SM8750_PORT.md) (hosted) and
+[docs/native.md](docs/native.md) (the Gunyah VM).
 
-## Status
+---
 
-### Galaxy S26 Ultra — current target (2026-11-18)
+## The phone (measured on the owner's S25 Ultra, read-only)
 
-- **Local build:** `scripts/ci-local.sh all 0.0.0-ci` passed at commit
-  `015b065b8899ed93197e095c984f11ee09f7152a`; host encoder regression passed
-  69/69 checks and the ARM64 runtime package passed ELF and SHA-256 checks. This is not a
-  guest boot test.
-- **On-device diagnostics under One UI:** SM-S948B/m3q/SM8850 identity was confirmed;
-  HEVC and H.264 MediaCodec keyframe/EOS tests passed through the production encoder
-  helper; a standalone HEAVY_CLICK was physically felt. Host GPU probes, input
-  inventory and display diagnostic results are documented in
-  [the SM8850 validation report](docs/SM8850_PORT.md).
-- **Passive safety audits (2026-11-18):** preflight reported 71 PASS, 1 WARN, 0 FAIL,
-  24 BLOCKED; follow-up reported 3 PASS, 1 WARN, 0 FAIL, 5 BLOCKED. The stage was
-  not initialized and no `kernel.kc` was found in the checked local output.
-  Recovery/USB continuity/volume-chord and physical switch/return remain unverified.
-  The stopped `hwservicemanager` is a warning to investigate, not a reason to start it
-  automatically.
-- **Fail-closed:** the companion [OneOS SM8850 branch](https://github.com/YMGPwcca/OneOS/tree/feat/oneios-sm8850-m3q)
-  offers S26 Ultra diagnostics but does not permit its OneiOS switch. Do not bypass the
-  phone/model gate or interpret a passing host CI as switch approval. No firmware is
-  flashed by the intended model, but a failed recovery could still require a reboot.
+- **SM-S938B** (`pa3qxeea`), SM8750 board `sun`, One UI 9.0 on Android 17, kernel `6.6.127-android15-8`, **4 KiB
+  pages** (no 16 KiB granule on Oryon — iOS's 16 K code signatures are re-derived once per first boot).
+- **CPU:** Qualcomm Oryon, 6 E-cores 0.38–3.53 GHz + 2 P-cores 1.02–4.47 GHz; PAC + BTI. Mapped to 6 E + 2 P vCPUs.
+- **GPU:** Adreno 830 (`Adreno830v2`), KGSL, GMEM 12 MiB, 160–832 MHz; the guest's Turnip knows the a8xx gen1 chip.
+- **RAM:** 11.4 GB (largest block 9 GiB in one piece); **display** `nt37801` AMOLED, **command-mode** 1440×3120 at
+  120/80/60/48/30/24/10 Hz.
+- **Hypervisor:** Gunyah with AVF (`/dev/gunyah`, protected VMs only), plus Samsung's `CONFIG_UH`/`RKP`/`KDP`
+  protections and a locked bootloader (no kexec, no `fastboot boot`).
 
-The OneOS fork's upstream changes through `akshaynexus/OneOS` `oneios`
-`bdf3db05` have been integrated into
-[the SM8850 OneOS branch](https://github.com/YMGPwcca/OneOS/pull/3)
-at `270230df`. The `app/` submodule now pins `590b4a6`, which fixes
-Tribalfs Maven registry routing and excludes these dependencies from JitPack. A classic GitHub
-PAT with `read:packages` is required to download the pinned SESL9 dependencies.
-The S26 Ultra switch remains fail-closed at the model, UI/job and root-script
-boundaries. **The integrated APK has not yet passed a fresh local CachyOS
-Gradle build/test run and must not be installed for an S26U switch**; host
-CI PASS from before the sync does not validate the newly merged app code.
+Full inventory — CPU, GPU, input, thermal, battery, the live FDT, the partitions to back up before any native
+test — is in [docs/SM8750_PORT.md](docs/SM8750_PORT.md) §0b.
 
-### Galaxy S24 Ultra — historical guest-boot record (2026-11-11 to 2026-11-12)
+---
 
-**Experimental. On the phone (S24 Ultra, 2026-11-11) the boot reaches launchd, backboardd and SpringBoard, and backboardd's first frames are on the panel: the Apple boot logo at 1440x3120. Whether it goes on to SpringBoard's own screen is not yet seen.**
+## On-device `.ipa` installer (`appinst`, in review)
 
-Touch on the phone: in that session the DriverKit event driver was waited for, so the touch screen and the buttons
-reached backboardd only 233 s after they started (then 447 events, 11 contacts). The kernel now gives both to
-Apple's kernel event driver at once (`kernel/patches/oneios-hosted/hid/README.md`, "Which event driver"); built,
-not yet run on the phone. Whether a swipe up unlocks is not known.
+[PR #1](https://github.com/YumikoHayamato/OneiOS/pull/1) adds a TrollStore-style **on-device installer**: download an
+already-decrypted `.ipa` in Safari, open a small local page, tap Install, and after a guest-VM restart the icon
+appears on SpringBoard — no PC, no 7-day certificate.
 
-Second phone session (2026-11-11, with the Metal plug-in mounted): touch attached at once, the battery was
-published, backboardd opened the AGX device user client, and the kernel then died in a data abort: a wrong pair in
-the collection (`IOMemoryDescriptor::setOwnership` bound to `CreateMapping`, `kernel/prelink/README.md`). Corrected;
-the collection builds; not yet run on the phone.
+Because the S25 runs in **SPTM/TXM** mode (the Trusted Execution Monitor is the signing authority; a binary runs only
+if its CDHash is in a trust cache, and AMFI is never patched), the installer leans on the fact that **the owner trust
+cache is a sidecar xnuhost injects at guest boot**: it re-signs the app ad-hoc at 4 KiB pages, adds its CDHashes to
+the owner module, and a guest-VM restart makes TXM trust it. It **only accepts an already-decrypted `.ipa`** — there
+is no FairPlay decryption or DRM-stripping anywhere in it; an encrypted slice is detected and refused. Design:
+[userland/appinst/README.md](userland/appinst/README.md) and `docs/appinst.md`.
 
-Later sessions (2026-11-11): with the corrected collection and the Metal plug-in's grant the phone reaches the
-lock screen and, after unlock, the Home Screen, composited on the GPU at 40 to 60 frames a second; touch works.
-The Home Screen had no apps and SpringBoard died once on unlock (an assertion about a missing process identity):
-the removable system apps were never shown in `/Applications`. Hosted `0035` shows them, `0037` keeps them
-registered after the first boot of a Data store, `0036` drops icons drawn blank by earlier boots; built, not yet run.
+---
 
-First Mac builds on the phone (2026-11-12): the Mac `kernel.kc` panics in the first 2 s, in both builds tried
-(507 stubs pointing past the collection with XnuPrelink `b74ed7c`; then an original kernel function left on the
-stub, called by Sandbox; `kernel/prelink/README.md`, "On the phone"; agent prelink audits it). The Mac runtime
-0.1.7-dev with the Linux `kernel.kc` of 2026-11-11 boots to `session/ready` in about 80 s and to the lock screen;
-the Linux runtime 0.1.6 does the same, and the owner unlocked it to the Home Screen (empty: that kernel has no
-0035-0037). In both, the screen drew far fewer frames than on 2026-11-11 (0-20 per 10 s; cause not known) and the
-Volume Up + Volume Down chord did not return; five returns by `session/return.request` or after a panic all came back
-to One UI in place. Numbers per area: `docs/hardware.md` 0.1; the test cycle: `docs/building.md` section 6.
+## Build and run
 
-The Mac `kernel.kc` with the known-good pairs (2026-11-12, agent prelink; `kernel/prelink/README.md`, "Known-good
-pairs" and "On the phone (2026-11-12, prelink)"): kernel and collection from origin/main `924a0d9` (series through
-0039), runtime 0.1.8-dev. Boot frame at +102 s, then about 11 minutes of lsd registering the staged apps (the first
-boot of 0035/0037 on this Data store) while SpringBoard waited for the LaunchServices database; then the lock screen,
-the owner's swipe unlocked it, and the Home Screen showed the apps (their icons do not draw right yet). No panic and
-no call to the panic stub in 23 minutes. This set is the phone's baseline now.
-
-On the PC (xnuhost under `qemu-aarch64`, 8 vCPUs, the real iOS 27.0.1 `24A446` image set, `kernel.kc` with the
-iPhone18,2 kexts), the boot gets through:
-
-- corecrypto's POST, AppleImage4, AMFI, Seatbelt, the trust caches, IOKit matching, `bsd_init`;
-- the root mount from the image set (verified by xnuhost), swap, pid 1;
-- the Data volume's first start: `newfs_apfs` (the first user process), the dyld shared cache's 4K code signatures
-  (5.8 GiB hashed once per boot, about 3 minutes under qemu), the cache mapped and slid, the volume mounted, the
-  seed unpacked and verified by the kernel;
-- **launchd**: all of its early boot tasks ("Early boot complete. Continuing system boot."), then its services:
-  123 spawned and about 190 processes in 16 minutes, with **`backboardd` and `SpringBoard` running to the end of
-  the run** (series 0001-0025, 2026-11-11; the run was stopped by its time limit, no kernel panic). The only
-  service that died was `chronod` (abort in QuartzCore's `query_displays`).
-
-**SpringBoard finishes launching**: 15 minutes into a PC boot its main thread is in `UIApplicationMain`'s run loop
-(`SBSystemAppMain` -> `UIApplicationMain` -> `GSEventRunModal`) and stays there (sampled every 5 minutes for half
-an hour with `oneios-ubt`); backboardd sits in its run loops with CoreAnimation's render server and IOMFB server
-threads up.
-
-Not reached: a frame of iOS's on the display, `session/ready`. The guest has an IOMobileFramebuffer since `0020`
-(`kernel/patches/oneios-hosted/display/`: it starts, backboardd opens it), and `display.sock` shows one flat colour
-about twice a second. On the PC the guest has no 3D GPU (`oneios-gpu: the host offers no 3D`, so no Metal
-accelerator); whether that is why backboardd composites nothing is the likely reason, not a proven one: the phone,
-with KGSL, is where it shows. Touch and the side keys are
-in (`kernel/patches/oneios-hosted/hid/`): a Digitizer / Touch Screen service and a buttons service that backboardd
-opens and gets events from, fed from xnuhost's input device (scripted touches on the PC; with no frame, nothing
-to see react).
-The processes that died with "Text page corruption detected", dyld assertions or a lost Linux thread no longer do
-(`0025` and xnuhost's task layer: 14 minutes past early boot with 129 processes and none of those). The key store is in since `0022`: an AppleKeyStore
-service in software (no passcode, class keys from a constant, key wrap by AES; **not a security boundary**), with
-which launchd's keybag task ends in `DONE MKB_INIT` instead of "FATAL KEYBAG ERROR: failed to load system bag";
-securityd wraps and unwraps its keys through it. A host with one kind of CPU (or one vCPU) used to assert in the
-scheduler at launchd's first `workq_open`; `0016` fixes that (booted with eight CPUs of one kind). Detail: [kernel/patches/oneios-hosted/README.md](kernel/patches/oneios-hosted/README.md)
-and the board, [docs/agents.md](docs/agents.md).
-
-Built and tested on the PC, not yet on the phone: xnuhost and its loader, the GPU path (drm2kgsl on KGSL), the
-display helper, the hardware bridges (CPU, network, Bluetooth, haptics, audio, brightness and the light sensor,
-camera), the image pipeline, the runtime package and releases, and the OneOS fork's iOS 27 card, session scripts and
-Hardware checks, and the iOS user-space cross toolchain with the Metal plug-in built for the iPhone's shared cache
-(not loaded by any boot yet). Not done: the camera's iOS-side capture device, auto-brightness past Apple's light
-sensor service (it attaches to our HID device; no reading has gone through it). Never: passcode, Face ID, Wallet, calls, SMS.
-
-## Layout
+- How the parts fit together: [docs/architecture.md](docs/architecture.md)
+- How to build and test it end to end: [docs/building.md](docs/building.md)
+- Each part in depth: [docs/booter.md](docs/booter.md) (xnuhost + loader),
+  [kernel/prelink/README.md](kernel/prelink/README.md) (`kernel.kc`), [docs/gpu.md](docs/gpu.md),
+  [docs/userland.md](docs/userland.md), [docs/hardware.md](docs/hardware.md), [docs/native.md](docs/native.md).
 
 ```
-docs/architecture.md  how the parts fit; docs/building.md  how to build and test; docs/*.md  each part in detail
-profiles/             the pinned IPSW profile (iPhone18,2 iOS 27.0.1 24A446)
-scripts/fetch/        fetch only the needed IPSW members from Apple's CDN (never from here)
-scripts/image/        build the image set (MysticGSI-style manifest, SHA-256, .tar.zst)
-userland/             iOS 27 root and Data tweaks (the image hook), guest helpers, the camera plug-in
-kernel/               XNU 12377 (UniXNU / Droid-VM fork) built on Linux; oneios-hosted/ patches; prelink/ (kernel.kc)
-runtime/              xnuhost and its loader, the display helper, the hardware bridges, the runtime package
-drivers/              iOS-side drivers for the bridges (CPU, network, Bluetooth, haptics, audio, brightness, camera)
-oneos/                the contract with the OneOS fork (akshaynexus/OneOS, branch oneios)
+docs/            architecture, building, and one file per part
+profiles/        the pinned IPSW profile (iPhone18,2 iOS 27.0.1 24A446)
+scripts/fetch/   fetch only the needed IPSW members from Apple's CDN (never from here)
+scripts/image/   build the image set (SHA-256, .tar.zst)
+userland/        iOS 27 root and Data tweaks, guest helpers, appinst, the camera/Metal plug-ins
+kernel/          XNU 12377 (UniXNU / Droid-VM fork) on Linux; oneios-hosted/ patches; prelink/ (kernel.kc)
+runtime/         xnuhost + its loader, oneios-display, the hardware bridges, the runtime package
+drivers/         iOS-side drivers for the bridges (CPU, network, Bluetooth, haptics, audio, brightness, camera)
+oneos/           the contract with the OneOS fork (akshaynexus/OneOS, branch oneios)
+tools/           oneios-tool (Rust): image, prelink, phone, app, cycle, log, sym, …
 ```
 
-## Rules
+## A session, step by step
+
+1. **Stage** (One UI running): the runtime package and the image set are verified against their manifests and staged
+   as root under `/data/local/tmp/oneios/`.
+2. **Arm the way back:** a watcher, the Volume Up + Volume Down readers and a wakelock start *before* anything stops.
+3. **Stop One UI's framework** (zygote, system_server). The Linux kernel, vendor HALs, surfaceflinger and the
+   composer keep running.
+4. **Start xnuhost** (or the Gunyah VM) in its own mount namespace and cgroup, then `oneios-display`.
+5. **Boot:** XNU mounts the verified OS volume, formats the Data volume and unpacks the seed on first start, mounts
+   the cryptexes, starts launchd; backboardd draws on the framebuffer; at its first non-black frame xnuhost writes
+   `session/ready`.
+6. **Return:** Volume Up + Volume Down for 3 s, a request from inside iOS, xnuhost exiting, or no `ready` in time —
+   any of them ends the session, restarts the composer and zygote, and restores One UI **in place**. Power + Volume
+   Down (Samsung's forced restart) is the backstop below all software.
+
+## What it is not
+
+- **Not an emulator:** no instruction translation (that's the vphone app's QEMU path).
+- **Not a secure store:** no Secure Enclave, no passcode, no lock. The key store is software with derivable keys
+  (`kernel/patches/oneios-hosted/keystore/README.md`); the Data store is only as private as One UI keeps the file.
+- **Not Apple's kernel binary:** XNU is built from Apple's open source; only Apple's kexts and user space are
+  Apple's, taken from the owner's own IPSW and never redistributed.
+- **Never:** passcode, Face ID, Wallet, calls or SMS.
+
+## Lineage and history
+
+The Galaxy S24 Ultra (SM8650) is the original guest-boot baseline: on it the hosted path first reached the lock
+screen and, after unlock, an empty Home Screen composited on the GPU at 40–60 fps (2026-11-11/12). The S26 Ultra
+(SM8850) branch carried that forward; the `s25-ultra-sm8750` branch starts from it because the S25 is closer to the
+S26 than to the S24. The earlier S24/S26 records and the full on-PC (QEMU) boot results live in
+[docs/hardware.md](docs/hardware.md) and the per-device port notes.
+
+## Rules (for contributors)
 
 - **No Apple files in git or in releases.** IPSWs, cryptexes, kernelcaches, kexts, `kernel.kc` and every image built
-  from them stay in `out/` and `inputs/` (git-ignored). Scripts fetch them from Apple and build them on the owner's
-  machine. Releases carry only this project's own code (scripts, runtime binaries, the OneOS patches); the kernel is
-  built locally (it links Apple's corecrypto).
-- Long jobs run in tmux: `scripts/bg.sh NAME COMMAND...`.
-- Every change updates the docs that describe it: [CLAUDE.md](CLAUDE.md).
+  from them stay in `out/`/`inputs/` (git-ignored); releases carry only this project's own code. See
+  [CLAUDE.md](CLAUDE.md) for the full working agreement (fix don't only probe; iOS RAM never swapped; the way back
+  must always work; docs updated in the same commit).
+- Long jobs run in tmux via `scripts/bg.sh NAME COMMAND…`.
 
 ## Credits
 
-[OneOS](https://github.com/fahadalijaved/OneOS) (fahadalijaved) and
-[OneLineage](https://github.com/WeWaffles/OneLineage) (WeWaffles): the container hot-switch.
-[MysticGSI](https://github.com/MysticGSI/mysticgsi): the image build model.
-[UniXNU](https://github.com/UniXNU/UniXNU) and [Droid-VM](https://github.com/Droid-VM): XNU on non-Apple
-ARM64, drm2kgsl, the guest drivers. [iOSPlus10](https://github.com/akshaynexus/iOSPlus10): XNU and iOS userland on
-Qualcomm phones, haptics and brightness. [Darling](https://github.com/darlinghq/darling): Mach and XNU on Linux.
+[OneOS](https://github.com/akshaynexus/OneOS) / [OneLineage](https://github.com/WeWaffles/OneLineage): the Android
+container hot-switch. [MysticGSI](https://github.com/MysticGSI/mysticgsi): the image-build model.
+[UniXNU](https://github.com/UniXNU/UniXNU) and [Droid-VM](https://github.com/Droid-VM): XNU on non-Apple ARM64,
+drm2kgsl, the guest drivers, `gh_hugepage_reserve`. [iOSPlus10](https://github.com/akshaynexus/iOSPlus10): XNU and
+iOS user space on Qualcomm phones, haptics and brightness. [ios-dodge](https://github.com/palazik): the S25's live
+hardware map. [Darling](https://github.com/darlinghq/darling): Mach and XNU on Linux.
