@@ -1,6 +1,6 @@
 # YumikoHayamato's obsessed build
 
-*The Galaxy S25 Ultra build of **OneiOS** — iOS 27 (Darwin 25) running on the phone's own silicon, from a live Android session, with no bootloader unlock and no flashing.*
+*The Galaxy S25 Ultra build of **OneiOS** — iOS 27 (Darwin 26) running on the phone's own silicon, from a live Android session, with no bootloader unlock and no flashing.*
 
 OneiOS runs a source-built Apple kernel (**XNU 12377**, from Droid-VM's UniXNU fork) and Apple's unmodified
 iPhone18,2 iOS 27.0.1 (`24A446`) user space on a rooted Samsung Galaxy, next to One UI, using
