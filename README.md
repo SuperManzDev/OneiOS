@@ -16,6 +16,33 @@ Apple's kernel (XNU), so OneiOS runs a source-built XNU **as a process on One UI
 image, the switch and the return stay OneOS-shaped. How it fits together: [docs/architecture.md](docs/architecture.md).
 How to build and test it: [docs/building.md](docs/building.md).
 
+## Highlights — iOS 27 on the Galaxy S25 Ultra (2026-11-24)
+
+The active work runs **full iOS 27 (Darwin 25) on a rooted Galaxy S25 Ultra (SM8750, Adreno 830)**,
+started from a live One UI session — **no bootloader unlock, no flashing, no data wipe.** iOS runs from
+RAM and writes nothing to UFS. Two paths run on the phone today.
+
+**Hosted path** — XNU as a process on One UI's kernel (the daily driver):
+
+- **Real Metal on the Adreno 830**: NativeAdrenoMetal → Turnip/freedreno (Vulkan) → drm2kgsl, drawing on
+  iOS's own buffers. **Up to 120 fps at 1080×2340** (1202 flushes in 10 s), GPU 0.7–5.4 ms/frame;
+  30–40 fps steady in real use.
+- Full boot to SpringBoard with the owner's finger: apps, Spotlight, Control Center.
+- Wi-Fi, haptics, thermal-aware CPU/GPU clocking, 6.4 GiB locked for the guest.
+
+**Native path** — XNU alone in a Gunyah shared-RAM VM via crosvm (iOS on the bare cores):
+
+- **8 vCPUs, 3.5 GiB**, full boot to SpringBoard.
+- **GPU scanout** shown in the Android display through a Turnip blit, **120 Hz**.
+- **Audio**: virtio-snd over PCI → AAudio, speaker with the volume keys.
+- **Wi-Fi for real**: iOS joins a WPA2 network through the phone's own radio and gets a DHCP lease.
+- **Input**: multi-touch, the on-screen keyboard, and the hardware side keys (power switches the panel,
+  volume to iOS, long-press to exit).
+- **Takeover mode**: One UI's framework is paused while iOS runs, and restored on exit.
+
+Per-session results and the raw numbers: [docs/SM8750_PORT.md](docs/SM8750_PORT.md) and
+[docs/native.md](docs/native.md).
+
 ## Status
 
 ### Galaxy S26 Ultra — current target (2026-11-18)
