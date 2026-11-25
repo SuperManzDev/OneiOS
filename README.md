@@ -1,4 +1,6 @@
-# OneiOS
+# YumikoHayamato's obsessed build
+
+*The Galaxy S25 Ultra build of **OneiOS** — iOS 27 (Darwin 25) running on the phone's own silicon, from a live Android session.*
 
 **Current development target: Samsung Galaxy S26 Ultra (SM-S948B / m3q / SM8850).** OneiOS
 is an experimental effort to run iOS 27 alongside One UI on a rooted Samsung phone, using
@@ -25,8 +27,10 @@ RAM and writes nothing to UFS. Two paths run on the phone today.
 **Hosted path** — XNU as a process on One UI's kernel (the daily driver):
 
 - **Real Metal on the Adreno 830**: NativeAdrenoMetal → Turnip/freedreno (Vulkan) → drm2kgsl, drawing on
-  iOS's own buffers. **Up to 120 fps at 1080×2340** (1202 flushes in 10 s), GPU 0.7–5.4 ms/frame;
-  30–40 fps steady in real use.
+  iOS's own buffers. **A locked 120 fps at 1080×2340** (1202 flushes in 10 s), GPU 0.7–5.4 ms/frame —
+  with only light stutter, and that stutter is the *one missing piece*: there is **no iOS-tuned CPU/GPU
+  frequency orchestrator yet**, so it rides Android's governor, which isn't calibrated for iOS's
+  workload. Once that lands, the stutter goes.
 - Full boot to SpringBoard with the owner's finger: apps, Spotlight, Control Center.
 - Wi-Fi, haptics, thermal-aware CPU/GPU clocking, 6.4 GiB locked for the guest.
 
