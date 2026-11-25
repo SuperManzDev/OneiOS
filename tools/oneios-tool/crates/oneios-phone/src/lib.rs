@@ -186,12 +186,12 @@ pub enum Command {
         /// hackintosh line's by default, whose crosvm takes the kernel's scanout (`fetch-crosvm.sh DIR hackintosh`)
         #[arg(long, value_name = "DIR", default_value = "/mnt/tkg-build/oneios/dl/droidvm-prebuilt/f7c6ce8")]
         droidvm: String,
-        /// The GPU's lowest clock while an Image with the GPU runs (MHz; the level at or above it), put back at the end;
-        /// 0 leaves the clocks to the governor
+        /// The GPU's lowest clock while an Image with the GPU runs (MHz; the level at or above it), put back at the end.
+        /// Default 0: the governor scales freely (saves power; the stutter was the panel, not the clock). Try `607` to A/B.
         #[arg(long, value_name = "MHZ", default_value_t = vmboot::GPU_FLOOR_MHZ)]
         gpu_floor: u32,
-        /// The CPUs' lowest clocks while the VM runs, percent of each cluster's top clock (Android's cap stays), put back at the
-        /// end; 0 leaves the clocks to the governor
+        /// The CPUs' lowest clocks while the VM runs, percent of each cluster's top clock (Android's cap stays), put back at
+        /// the end. Default 0: the governor scales freely (saves power). Try `60` to A/B.
         #[arg(long, value_name = "PERCENT", default_value_t = vmboot::CPU_FLOOR_PERCENT)]
         cpu_floor: u32,
         /// One UI's framework stopped while the VM runs (as hugepool grow stops it: Samsung's watchdog fed, the way back armed

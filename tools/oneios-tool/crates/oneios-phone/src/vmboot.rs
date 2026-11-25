@@ -249,10 +249,13 @@ pub fn parse_disks(text: &str) -> Result<Disks> {
 }
 
 /// The run on the phone (detached; its own log is `run.txt`).
-/// The GPU's lowest clock while an Image with the GPU runs, by default (`vm-boot --gpu-floor`, MHz): the phone's Adreno
-/// idles at 160-222 MHz and its governor (msm-adreno-tz) takes some frames to raise it, so a swipe's first frames were
-/// drawn at the idle clock. 607 MHz is one of the S25 GPU's 15 clocks (160 to 1200 MHz).
-pub const GPU_FLOOR_MHZ: u32 = 607;
+/// The GPU's lowest clock while an Image with the GPU runs, MHz, as the `vm-boot --gpu-floor` default. **0 = off** (the
+/// governor, msm-adreno-tz, scales freely). Off by default since the 120 Hz stutter was traced to the panel held at
+/// 60 Hz (`native-frame-latency`), not the GPU clock: the frame-time histogram was the same at a pinned 607 MHz as at
+/// the idle 160-222 MHz, because the GPU is only ~1-30% busy and frames are bound by the submit->fence round trip, not
+/// the clock. Pinning 607 MHz the whole session only burned power. A session that wants to A/B a pinned floor passes
+/// `--gpu-floor 607` (607 MHz is one of the S25 GPU's 15 clocks, 160 to 1200 MHz).
+pub const GPU_FLOOR_MHZ: u32 = 0;
 
 pub fn boot_script(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Option<&Disks>) -> String {
     boot_script_with(l, seconds, thp, sha, disks, false, false, &Tuning::DEFAULT)
@@ -327,12 +330,13 @@ pub fn thermal_log_script(on: bool) -> String {
     .to_string()
 }
 
-/// The CPUs' floor for the VM's life, by default (`vm-boot --cpu-floor`, percent of each cluster's top clock now): the
-/// vCPUs' cores idled at 0.5-1 GHz and the governor (WALT) took frames to raise them when the VM woke, and Android's touch
-/// boost never comes (the touchscreen is the VM's), so a swipe from idle stuttered (full2). The hosted session's switch
-/// pinned the floors at the top, which heated the phone into its thermal caps; 60% of the top (2.25 GHz perf, 2.84 GHz prime
-/// once Samsung's limit is lifted) keeps the ramp short and the heat lower.
-pub const CPU_FLOOR_PERCENT: u32 = 60;
+/// The CPUs' floor for the VM's life, percent of each cluster's top clock, as the `vm-boot --cpu-floor` default.
+/// **0 = off** (the governor, WALT, scales freely). Off by default alongside the GPU floor: the stutter was the panel
+/// (above), not slow clocks, and pinning each cluster at 60% of its top the whole session held the cores high and warm
+/// with no measured frame-time win. A session that wants to A/B a pinned floor passes `--cpu-floor 60` (about 2.25 GHz
+/// perf, 2.84 GHz prime once Samsung's cap is lifted). The wake-ramp latency this once guarded against belongs to the
+/// idle governor / haltpoll, not to holding every core high the whole run.
+pub const CPU_FLOOR_PERCENT: u32 = 0;
 
 /// The CPUs' floor for the VM's life (`floor_percent` > 0): each cpufreq policy's lowest clock becomes the lowest of its
 /// clocks at or above that share of its top one now (scaling_max_freq: a cap Android set stays), put back at the end.
@@ -1173,11 +1177,14 @@ mod tests {
         assert!(s.contains(" \\\n  --android-display-service name=oneios_disp,screen=gpu-0"));
         assert!(s.contains("$H --crosvm-display oneios_disp --size 1080x2340 --hz 60 --wait 120 </dev/null >>$D/display.txt 2>&1 &"));
         assert!(!s.contains("$D/displayctl pool"), "no bridge: crosvm draws the screen");
-        // the GPU's floor while the VM runs, put back after crosvm ends and before the bridge's end
-        assert!(s.contains("if [ \"$f\" -ge 607000000 ] && { [ -z \"$floor\" ] || [ \"$f\" -lt \"$floor\" ]; }; then floor=$f; fi"));
-        let (set, back) = (s.find("echo $floor > $G/min_freq").unwrap(), s.find("thp_restore\ngpu_restore\n").unwrap());
-        assert!(set < s.find("$C --log-level info run").unwrap());
-        assert!(s.find("wait $pid").unwrap() < back);
+        // the GPU's floor is off by default now: the governor scales (power); DEFAULT does not touch kgsl
+        assert!(!s.contains("kgsl-3d0"), "default --gpu-floor 0: the governor's alone");
+        // opted in with --gpu-floor 607: set while the VM runs, put back after crosvm ends and before the bridge's end
+        let gf = boot_script_with(&Label { ram: 2880, cpus: 1, swiotlb: 32, shared: true, gpu: true }, 900, true, "ab12", Some(&d), false, false, &Tuning { gpu_floor_mhz: 607, ..Tuning::DEFAULT });
+        assert!(gf.contains("if [ \"$f\" -ge 607000000 ] && { [ -z \"$floor\" ] || [ \"$f\" -lt \"$floor\" ]; }; then floor=$f; fi"));
+        let (set, back) = (gf.find("echo $floor > $G/min_freq").unwrap(), gf.find("thp_restore\ngpu_restore\n").unwrap());
+        assert!(set < gf.find("$C --log-level info run").unwrap());
+        assert!(gf.find("wait $pid").unwrap() < back);
         assert!(!boot_script_with(&Label { ram: 2880, cpus: 1, swiotlb: 32, shared: true, gpu: true }, 900, true, "ab12", Some(&d), false, false, &Tuning { gpu_floor_mhz: 0, ..Tuning::DEFAULT })
             .contains("kgsl-3d0"), "--gpu-floor 0: the governor's alone");
         // the open files crosvm may hold: a file per GPU buffer
@@ -1229,7 +1236,8 @@ mod tests {
     fn a_takeover_stops_one_ui_after_the_checks_and_starts_it_on_every_end() {
         let d = parse_disks(&format!("{SCREEN}input touch\ngpu 00:0c.0 8 0x15f800000\nscanout 1080 2340 120\n")).unwrap();
         let l = Label { ram: 3584, cpus: 8, swiotlb: 32, shared: true, gpu: true };
-        let t = Tuning { takeover: true, ..Tuning::DEFAULT };
+        // floors opted in here so the ordering below is exercised; off by default (asserted at the end)
+        let t = Tuning { takeover: true, gpu_floor_mhz: 607, cpu_floor_percent: 60, ..Tuning::DEFAULT };
         let s = boot_script_with(&l, 3600, true, "ab12", Some(&d), false, true, &t);
         let at = |what: &str| s.find(what).unwrap_or_else(|| panic!("no {what:?}"));
         // the way back armed (ui.sh's failsafe and the trap) before the stop, the stop after every check and the THP's trap
@@ -1255,6 +1263,9 @@ mod tests {
         assert!(s.contains("kl=; for k in $keys; do kl=\"${kl:+$kl,}/dev/input/$k\"; done\n"));
         assert!(s.contains("--socket $D/touch.sock${kl:+ --keys $kl --screen-file $D/screen.off} </dev/null >>$D/touch.txt 2>&1 &\n"));
         assert!(at("wait $pid") < at("thp_restore\ngpu_restore\ncpu_restore\ncaps_restore\n"));
+        // the same takeover with the default tuning: floors off, the governor scales (the power default)
+        let d_off = boot_script_with(&l, 3600, true, "ab12", Some(&d), false, true, &Tuning { takeover: true, ..Tuning::DEFAULT });
+        assert!(!d_off.contains("scaling_min_freq") && !d_off.contains("kgsl-3d0/devfreq"), "floors off by default even in a takeover");
         // the thermal log once crosvm runs, beside its other files
         let logged = boot_script_with(&l, 3600, true, "ab12", Some(&d), false, true, &Tuning { thermal_log: true, ..Tuning::DEFAULT });
         assert!(logged.find("$C --log-level info run").unwrap() < logged.find("# the thermal log").unwrap());
@@ -1270,6 +1281,20 @@ mod tests {
         }
         assert!(u.contains("D=/data/local/tmp/oneios-vmboot\nSELF=$D/ui.sh\nCTL=$D/ui-ctl\n") && u.contains("LIMIT=3900\n"));
         assert!(u.contains("start_ui() {") && u.contains("--failsafe)") && !u.contains("$D/result") && u.contains("oneios-vmboot-failsafe"));
+    }
+
+    #[test]
+    fn the_clock_floors_are_off_by_default_and_opt_in_with_the_flags() {
+        // The power default (2026-11-25): no floor, the governor scales. The stutter the floors chased was the panel
+        // held at 60 Hz (native-frame-latency), not the clocks, so pinning the GPU at 607 MHz and the cores at 60% of
+        // top the whole session only burned power. The flags still pin a floor for an A/B.
+        assert_eq!((GPU_FLOOR_MHZ, CPU_FLOOR_PERCENT), (0, 0), "the shipped defaults are off");
+        let d = parse_disks(&format!("{SCREEN}gpu 00:0c.0 8 0x15f800000\nscanout 1080 2340 120\n")).unwrap();
+        let l = Label { ram: 2880, cpus: 6, swiotlb: 32, shared: true, gpu: true };
+        let def = boot_script_with(&l, 900, true, "ab12", Some(&d), false, true, &Tuning::DEFAULT);
+        assert!(!def.contains("kgsl-3d0/devfreq") && !def.contains("scaling_min_freq"), "default: the governor's clocks alone");
+        let floored = boot_script_with(&l, 900, true, "ab12", Some(&d), false, true, &Tuning { gpu_floor_mhz: 607, cpu_floor_percent: 60, ..Tuning::DEFAULT });
+        assert!(floored.contains("echo $floor > $G/min_freq") && floored.contains("echo $floor > $f/scaling_min_freq"), "opted in: both floors set");
     }
 
     #[test]
@@ -1405,9 +1430,12 @@ mod tests {
         // the vCPUs on their cores only when asked
         let pinned = boot_script_with(&Label { ram: 2048, cpus: 8, swiotlb: 512, shared: false, gpu: false }, 900, true, "ab12", Some(&d), false, true, &Tuning::DEFAULT);
         assert!(!pinned.contains("kgsl"), "no GPU: its clocks are left alone");
-        // the CPUs' floor in every VM, put back after crosvm ends
-        assert!(pinned.contains("want=$((top * 60 / 100)); floor=") && pinned.find("echo $floor > $f/scaling_min_freq").unwrap() < pinned.find("$C --log-level info run").unwrap());
-        assert!(pinned.find("wait $pid").unwrap() < pinned.find("thp_restore\ncpu_restore\n").unwrap());
+        // the CPUs' floor is off by default: the governor scales (power)
+        assert!(!pinned.contains("scaling_min_freq"), "default --cpu-floor 0: the governor's alone");
+        // opted in with --cpu-floor 60: the floor is set and put back after crosvm ends
+        let pinned_floor = boot_script_with(&Label { ram: 2048, cpus: 8, swiotlb: 512, shared: false, gpu: false }, 900, true, "ab12", Some(&d), false, true, &Tuning { cpu_floor_percent: 60, ..Tuning::DEFAULT });
+        assert!(pinned_floor.contains("want=$((top * 60 / 100)); floor=") && pinned_floor.find("echo $floor > $f/scaling_min_freq").unwrap() < pinned_floor.find("$C --log-level info run").unwrap());
+        assert!(pinned_floor.find("wait $pid").unwrap() < pinned_floor.find("thp_restore\ncpu_restore\n").unwrap());
         assert!(pinned.contains("--cpus num-cores=8 --cpu-affinity 0=0:1=1:2=2:3=3:4=4:5=5:6=6:7=7 \\\n"));
         // six from core 2: both 4.47 GHz cores the VM's, cores 0 and 1 the host's
         let six = boot_script_with(&Label { ram: 2048, cpus: 6, swiotlb: 512, shared: false, gpu: false }, 900, true, "ab12", Some(&d), false, true,

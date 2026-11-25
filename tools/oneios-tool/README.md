@@ -1658,14 +1658,20 @@ DIR (`phone-vmboot`), prints the run's disk, store and pool lines and crosvm's l
 - The pool: a VM above 480 MiB is refused when more than 384 MiB of its RAM would lie outside gh_hugepage_reserve's free
   pages (`check_pool`: Gunyah's heap maps no more than about 470 MiB of 4 KiB pages; boot 4b's first start ended 48 s in
   with the pool at 198 pages). `phone hugepool acquire` refills the pool beside One UI.
+- The clocks: `--gpu-floor MHZ` and `--cpu-floor PERCENT` both default to 0 (off) — the governor scales the GPU and the
+  CPU clusters freely while the VM runs, the low-power default. They once pinned the GPU at 607 MHz and each cluster at
+  60% of its top for the whole session to hide a swipe's first-frame stutter, but that stutter was the panel held at
+  60 Hz (`native-frame-latency`), not the clocks: take12 (floors on) kept the perf cluster at ~3 GHz and never idled,
+  ~8 °C hotter than take10 (governor), whose perf cluster sat at 1.37 GHz and idled 84% of the time for the same GPU
+  work. Pass `--gpu-floor 607` / `--cpu-floor 60` to pin a floor for an A/B; a takeover still lifts Samsung's cap meanwhile.
 
-9 unit tests (`vmboot::tests`: the pool's share of the RAM (`check_pool`); the label with and without the pool; the disks list's refusals; stop before kill, the
+16 unit tests (`vmboot::tests`: the pool's share of the RAM (`check_pool`); the label with and without the pool; the disks list's refusals; stop before kill, the
 stop request, THP written back; the disks' checks before crosvm and the pool check right after it; the `fb` line in the
 pool and its refusals; the bridge after the pool check and before the main wait, ended after the VM, absent without a
 screen; the touchscreen's lookup run by the PC's `sh` and `awk` on the S25's device list (`event8`) and its refusals
 (not direct, missing, on a side key's device), the forwarder listening before crosvm and crosvm's multi-touch device on
 its socket with glob expansion off, both ended after the VM, the test swipes only with `--swipe-test`, the volume-down reader after the bridge
-and ended after the VM; the scripts parse under `bash --posix -n`, `sh -n` and `dash -n`). Boot 1 on the S25 (2026-11-23, 2 GiB, 1 vCPU, 90 s, no disk): the
+and ended after the VM; the clock floors off by default and opted in with `--gpu-floor`/`--cpu-floor`; the scripts parse under `bash --posix -n`, `sh -n` and `dash -n`). Boot 1 on the S25 (2026-11-23, 2 GiB, 1 vCPU, 90 s, no disk): the
 kernel's whole start up to the root device's wait, `crosvm stop` at 90 s, One UI on (`docs/native.md` "The native
 kernel in crosvm").
 
