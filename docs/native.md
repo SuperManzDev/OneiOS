@@ -670,6 +670,65 @@ published, which was wrong.
   (`displayctl pool --vm shared`: the memfd's offset is the address less 0x80000000). The CPU still draws every
   frame: about 13 frames a second, backboardd at 111 % of a core. Next: the GPU.
 
+### The frame rate in the shared-RAM VM (2026-11-25)
+The owner's report of take12 (`logs/pa3q-vmboot/take12`: 2560 MiB, 6 vCPUs, 720x1560 at 2x, the GPU's scanout, the
+GPU held at 607 MHz and the big cores at 2.84 GHz or more): it looks like 50 frames a second on a 120 Hz panel.
+What the logs and the code say, and what was changed.
+
+- **The guest draws about 100 frames a second, and one scanout per frame.** `oneios-gpu-report`'s "frames" are the
+  render server's fenced submissions; against the display's own `frame N scanned out` lines they are one each
+  (take10: 16,581 frames for the 16,384 scanouts from 16,385 to 32,769; take12: 11,192 for 8,192). A swipe's 10 s:
+  `frames +1011 mean 6655 us`, 741 under 8 ms, 252 at 8 to 16, 18 longer. So crosvm is handed about 100 frames a
+  second; the loss is after it.
+- **The cause: the panel ran at 60 Hz.** `oneios-display --takeover` set surfaceflinger's mode specs only when the
+  panel was not in its native size; the S25 at WQHD+ already is, so the specs stayed as One UI left them when its
+  framework was stopped. With power saving on (`settings get global low_power` 1 on 2026-11-25; Samsung's
+  cpufreq_limit of 1689600 in take12's run.txt is the same power saver) that is `displayManagerPolicy={defaultModeId=2,
+  ... primaryRanges={physical=[10.00 Hz, 60.00 Hz] ...} appRequestRanges={physical=[10.00 Hz, 60.00 Hz] ...}}`
+  (`dumpsys SurfaceFlinger` after the return; every entry of its mode specs history, 16:06 to 16:25, is 10-60 or
+  60-60, mode 2, and surfaceflinger is not restarted by vm-boot's takeover or return: one process, up 19 h). The
+  layer's `setFrameRate(120)` cannot leave the app request range, so surfaceflinger latched at most 60 of the
+  guest's 100 frames, unevenly (the guest's tick is its own 120 Hz timer). The helper's line said `active
+  1440x3120 (up to 120 Hz)` and `120 Hz`: the highest rate among the modes of that size and the vote, not the rate
+  the panel was in. **Not read during the session**: the active mode while the VM ran (the session had ended); the
+  policy is from the dump after it. take10 (the day before, cpufreq_limit 1958400: another profile) has no such dump.
+- **The fix** (runtime/display, `OneiOSDisplay.java`): in a takeover the helper sets the specs whenever the panel's
+  size, its rate, or surfaceflinger's policy is below the native mode's, holds the rate (range 120 to 120: no
+  framework tells surfaceflinger of a touch, and its 250 ms idle timer would lower the rate between gestures),
+  gives One UI's specs back when it leaves, logs the active mode's own rate and the policy, and in the crosvm mode
+  looks at the panel's rate every 5 s (runtime/display/README.md "The panel"). Tested on the PC: `make -C
+  runtime/display test` (173 + 20 checks: the choice with the S25's mode list and take12's policy), the dex built.
+  **Not run on the phone.** The lines that prove it there, in `display.txt`: `panel modes: active 1440x3120 at 60 Hz
+  (mode 2; ...); surfaceflinger's policy: default mode 2, the panel at 10 to 60 Hz`, then `asked surfaceflinger for
+  the native mode (id 0) held at 120 Hz`, `the panel is in its native mode 1440x3120 at 120 Hz (mode 0)`, `the panel
+  runs at 120 Hz ...`, at the end `the panel's rate over the session: 120 Hz 100 %` and `surfaceflinger's policy is
+  One UI's again: default mode 2, the panel at 10 to 60 Hz`; and during the session `dumpsys SurfaceFlinger | grep -E
+  "activeMode|renderRate|displayManagerPolicy"` (read only). A test with no new code: power saving off and motion
+  smoothness adaptive before the session, which should leave a policy that reaches 120 Hz.
+- **Second, not changed: the guest's virtio-gpu has no interrupt on crosvm's PCI.** `virtio-gpu: PCI function at
+  0x6f000, notifications x4, polled (no interrupt)` and `interrupt 0 (0)`: the loader gives a PCI function no
+  `droidvm,intid` (runtime/loader `machine.c`), so every wait for a command or a fence (the render server's, and the
+  display's wait for a frame's GPU work before its flush) is the transport's watch looking at the used ring with
+  sleeps of 100 us (`DroidVMVirtioGpu.cpp` `pause()`), each a timer wake-up of an idle vCPU through Gunyah. The
+  hosted path sleeps on the device's interrupt after 300 us. Its share of the 6.6 ms mean frame is not measured (the
+  native kernel prints none of the transport's counters: `droidvm_virtio_gpu_waits`, `_legs`); the GPU's own work is
+  about 2.5 to 3 ms of it (kgsl's busy 22 to 30 % at about 100 frames a second and 607 MHz; it was 1 % only on a
+  still screen). The road: the function's INTx line from crosvm's interrupt map in the loader, `droidvm,intid` on
+  the node, the transport as it is (it acknowledges by reading the ISR); a line that never fires costs every wait
+  its 20 ms guard, and neither QEMU's bench (MMIO transports) nor this PC can show Gunyah delivering it, so it is a
+  phone test of its own, with the transport's counters printed.
+- **Looked at and set aside.** The GPU's clock (607 MHz against the day before's 160 to 222 MHz: the same frame
+  times). crosvm's side of a fence: no timer, its worker waits on the fences' descriptors (crosvm
+  `devices/src/virtio/gpu/mod.rs`); its Android display blits asynchronously by default
+  (`CROSVM_ANDROID_DISPLAY_ASYNC_BLIT`, read from the binary: default on) and answers the guest's fenced flush when
+  the blit has read the frame. Its threads: `v_gpu` waited 4.44 s for a core over 239,424 turns (19 us each) and
+  runs on any core (affinity 0-7; `--pin` moves only the vCPUs), so no fight for cores 0 and 1 (`/proc` of crosvm,
+  read as take12 was ending). `CROSVM_GPU_RT_PRIO` (a realtime `v_gpu`) is not used: no realtime threads. The vCPUs'
+  wake-up: gunyah_halt_poll is loaded (`phone haltpoll status`: halt_poll_ns 200000). The shader priming list: one
+  library in take10 and take12 alike (`oneios-gpu-prime: ... 1 libraries`), so not a difference between the two
+  days; a shader compiled at first use runs before its submission, so it is a gap between frames, not one of the
+  report's frames over 32 ms (222 in take12, 1006 in take10; 81 of take12's 222 fall in a 10 s with a GPU open or a new context).
+
 ## Next
 1. The Gunyah VM fits iOS with gh_hugepage_reserve ("Verdict, revised"). Its road to an iOS guest, each step a
    test on the phone: the native kernel booted by crosvm with its console on the 8250 at `0x3f8` (done: "The native

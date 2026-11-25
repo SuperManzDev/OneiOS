@@ -118,6 +118,7 @@ public final class OneiOSDisplay {
         final Object service = binder, s = surface, l = layer;
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             if (sPanelOff) setPanel(true);
+            restoreSpecs();
             try { transact(service, REMOVE_SURFACE, null); } catch (Throwable ignored) { }
             try {
                 Object t = TX.getConstructor().newInstance();
@@ -171,7 +172,26 @@ public final class OneiOSDisplay {
             try { sPanelToken = display()[1]; } catch (Throwable unavailable) { log("no display token: the panel stays on (" + unavailable + ")"); }
         }
         java.io.File switchFile = screenFile != null ? new java.io.File(screenFile) : null;
+        // The panel's own rate, looked at every 5 s (one call to surfaceflinger): a line when it changes, and the session's
+        // share of each rate at the end. The guest paces its frames by --hz whatever the panel does.
+        Object[] watched = null;
+        try { watched = display(); } catch (Throwable unavailable) { log("the panel's rate is not watched (" + unavailable + ")"); }
+        java.util.TreeMap<Integer, Integer> rateSeen = new java.util.TreeMap<>();
+        int rateNow = -1, rateLines = 0;
+        long rateAt = 0;
         while ((Boolean) alive.invoke(binder)) {
+            if (watched != null && !sPanelOff && System.nanoTime() - rateAt >= 5_000_000_000L) {
+                rateAt = System.nanoTime();
+                try {
+                    int[] m = mode((Long) watched[0], watched[1]);
+                    rateSeen.merge(m[7], 1, Integer::sum);
+                    if (m[7] != rateNow) {
+                        rateNow = m[7];
+                        if (rateLines++ < 200) log("the panel runs at " + m[7] + " Hz (mode " + m[8] + ", " + m[0] + "x" + m[1] + "); the guest draws for " + hz + " Hz"
+                            + (m[7] < hz ? ": at most " + m[7] + " of its frames a second are shown" : ""));
+                    }
+                } catch (Throwable unreadable) { /* the next look */ }
+            }
             if (switchFile != null) {
                 boolean off = switchFile.exists();
                 if (off != sPanelOff && setPanel(!off)) {
@@ -182,8 +202,21 @@ public final class OneiOSDisplay {
             Thread.sleep(switchFile != null ? 50 : 500);
         }
         if (sPanelOff && setPanel(true)) { sPanelOff = false; log("the panel is on again"); }
+        log("the panel's rate over the session: " + rateShares(rateSeen));
         log("crosvm's display service is gone: the VM ended");
         return 0;
+    }
+
+    /** "120 Hz 98 %, 60 Hz 2 %" from the looks at the panel's rate (rate -> looks), highest rate first. */
+    static String rateShares(java.util.SortedMap<Integer, Integer> seen) {
+        long all = 0;
+        for (int n : seen.values()) all += n;
+        if (all == 0) return "not read";
+        StringBuilder out = new StringBuilder();
+        java.util.ArrayList<Integer> rates = new java.util.ArrayList<>(seen.keySet());
+        for (int i = rates.size() - 1; i >= 0; i--)
+            out.append(out.length() > 0 ? ", " : "").append(rates.get(i)).append(" Hz ").append(Math.round(seen.get(rates.get(i)) * 100.0 / all)).append(" %");
+        return out.append(" (").append(all).append(" looks, 5 s apart)").toString();
     }
 
     /** getDisplayConfig (the service's sixth transaction, of Droid-VM's fork): the guest's scanout width and height. */
@@ -343,6 +376,7 @@ public final class OneiOSDisplay {
             for (Object s : new Object[]{surface, backSurface}) if (s != null) quiet(s, "release");
             for (Object q : new Object[]{queue, backQueue}) if (q != null) quiet(q, "destroy");
             nClose(handle);
+            restoreSpecs();
         }
         log("layer removed");
         return result < 0 ? 4 : 0;
@@ -411,19 +445,23 @@ public final class OneiOSDisplay {
             Object[] display = display();
             token = display[1];
             mode = mode((Long) display[0], token);
-            log("panel modes: active " + mode[0] + "x" + mode[1] + " (up to " + mode[2] + " Hz), native " + mode[3] + "x" + mode[4]
-                + " at " + mode[5] + " Hz");
-            if (takeover && (mode[0] != mode[3] || mode[1] != mode[4])) {
+            float[] policy = policy(token);
+            log("panel modes: active " + mode[0] + "x" + mode[1] + " at " + mode[7] + " Hz (mode " + mode[8] + "; up to " + mode[2]
+                + " Hz at that size), native " + mode[3] + "x" + mode[4] + " at " + mode[5] + " Hz; surfaceflinger's policy: " + policyText(policy));
+            if (takeover && wantsSpecs(mode, policy)) {
                 if (nativeMode(token, mode[6], mode[5])) {
                     // the switch happens at a vsync of surfaceflinger's: wait for it to be the active mode
                     for (int tries = 0; tries < 20; tries++) {
                         Thread.sleep(50);
                         mode = mode((Long) display[0], token);
-                        if (mode[0] == mode[3] && mode[1] == mode[4]) break;
+                        if (mode[0] == mode[3] && mode[1] == mode[4] && mode[7] >= mode[5]) break;
                     }
                 }
-                if (mode[0] == mode[3] && mode[1] == mode[4]) log("the panel is in its native mode " + mode[0] + "x" + mode[1]);
+                if (mode[0] == mode[3] && mode[1] == mode[4]) log("the panel is in its native mode " + mode[0] + "x" + mode[1] + " at " + mode[7]
+                    + " Hz (mode " + mode[8] + "); surfaceflinger's policy: " + policyText(policy(token)));
                 else log("the panel stays at " + mode[0] + "x" + mode[1] + ": the guest's frame is scaled to it");
+                if (mode[7] < mode[5]) log("the panel shows " + mode[7] + " frames a second, not the " + mode[5]
+                    + " the guest is told: surfaceflinger did not take the rate");
             }
         } catch (Throwable unavailable) {
             log("the display's modes are not readable (" + unavailable + ")");
@@ -468,6 +506,11 @@ public final class OneiOSDisplay {
             Class<?> binder = Class.forName("android.os.IBinder");
             Object specs = SC.getMethod("getDesiredDisplayModeSpecs", binder).invoke(null, token);
             if (specs == null) throw new IllegalStateException("no desired mode specs");
+            // a second copy, untouched, for the way back (restoreSpecs): only the first set of a run is One UI's
+            if (sSpecsBefore == null) {
+                sSpecsBefore = SC.getMethod("getDesiredDisplayModeSpecs", binder).invoke(null, token);
+                sSpecsToken = token;
+            }
             specs.getClass().getField("defaultMode").setInt(specs, id);
             try { specs.getClass().getField("allowGroupSwitching").setBoolean(specs, true); } catch (NoSuchFieldException older) { /* Android 11 */ }
             for (String name : new String[]{"primaryRanges", "appRequestRanges"}) {
@@ -475,24 +518,81 @@ public final class OneiOSDisplay {
                     Object ranges = specs.getClass().getField(name).get(specs);
                     for (String part : new String[]{"physical", "render"}) {
                         Object range = ranges.getClass().getField(part).get(ranges);
-                        range.getClass().getField("min").setFloat(range, 0f);
+                        range.getClass().getField("min").setFloat(range, (float) hz);
                         range.getClass().getField("max").setFloat(range, (float) hz);
                     }
                 } catch (NoSuchFieldException older) {
                     // Android 13 and earlier: four floats on the specs themselves
                     String prefix = name.equals("primaryRanges") ? "primaryRefreshRate" : "appRequestRefreshRate";
-                    specs.getClass().getField(prefix + "Min").setFloat(specs, 0f);
+                    specs.getClass().getField(prefix + "Min").setFloat(specs, (float) hz);
                     specs.getClass().getField(prefix + "Max").setFloat(specs, (float) hz);
                 }
             }
             Object set = SC.getMethod("setDesiredDisplayModeSpecs", binder, specs.getClass()).invoke(null, token, specs);
             if (set instanceof Boolean && !((Boolean) set)) throw new IllegalStateException("surfaceflinger refused the mode specs");
-            log("asked surfaceflinger for the native mode (id " + id + ", up to " + hz + " Hz)");
+            log("asked surfaceflinger for the native mode (id " + id + ") held at " + hz + " Hz");
             return true;
         } catch (Throwable refused) {
             log("the native mode could not be asked for (" + refused + ")");
             return false;
         }
+    }
+
+    private static Object sSpecsBefore, sSpecsToken;
+
+    /** The desired mode specs as they were before nativeMode() changed them (One UI's last), given back to surfaceflinger. */
+    private static void restoreSpecs() {
+        Object specs = sSpecsBefore, token = sSpecsToken;
+        if (specs == null) return;
+        sSpecsBefore = null;
+        try {
+            SC.getMethod("setDesiredDisplayModeSpecs", Class.forName("android.os.IBinder"), specs.getClass()).invoke(null, token, specs);
+            System.err.println("oneios-display: surfaceflinger's policy is One UI's again: " + policyText(policy(token)));
+        } catch (Throwable refused) {
+            System.err.println("oneios-display: the mode specs could not be given back (" + refused + "): One UI's framework sets its own at its start");
+        }
+    }
+
+    /**
+     * surfaceflinger's policy for the display, as the display manager last set it: {the default mode's id, the highest
+     * refresh rate the panel may run at (the primary physical range's top), its lowest}; -1 each when not readable.
+     */
+    private static float[] policy(Object token) {
+        try {
+            Object specs = SC.getMethod("getDesiredDisplayModeSpecs", Class.forName("android.os.IBinder")).invoke(null, token);
+            float id = specs.getClass().getField("defaultMode").getInt(specs), min, max;
+            try {
+                Object ranges = specs.getClass().getField("primaryRanges").get(specs);
+                Object range = ranges.getClass().getField("physical").get(ranges);
+                min = range.getClass().getField("min").getFloat(range);
+                max = range.getClass().getField("max").getFloat(range);
+            } catch (NoSuchFieldException older) {
+                min = specs.getClass().getField("primaryRefreshRateMin").getFloat(specs);
+                max = specs.getClass().getField("primaryRefreshRateMax").getFloat(specs);
+            }
+            return new float[]{id, max, min};
+        } catch (Throwable unreadable) {
+            return new float[]{-1, -1, -1};
+        }
+    }
+
+    static String policyText(float[] policy) {
+        if (policy[1] < 0) return "not readable";
+        return "default mode " + Math.round(policy[0]) + ", the panel at " + Math.round(policy[2]) + " to " + Math.round(policy[1]) + " Hz";
+    }
+
+    /**
+     * Whether a takeover sets the display's mode specs: the panel is not in its native size, or runs below the native
+     * mode's rate, or surfaceflinger's policy holds it below that rate (One UI's last word before its framework stopped:
+     * 60 Hz with power saving or the standard motion setting, where the layer's vote for 120 counts for nothing), or
+     * lets it fall below it (with the framework gone nothing tells surfaceflinger of a touch, and its idle timer would
+     * lower the rate between gestures). mode is pick()'s, policy is policy()'s; one that could not be read (-1) is taken
+     * as too low.
+     */
+    static boolean wantsSpecs(int[] mode, float[] policy) {
+        if (mode[0] != mode[3] || mode[1] != mode[4]) return true;
+        if (mode[7] < mode[5]) return true;
+        return policy[1] < mode[5] || policy[2] < mode[5] || Math.round(policy[0]) != mode[6];
     }
 
     /** The built-in display: {Long id, IBinder token}. */
@@ -517,7 +617,8 @@ public final class OneiOSDisplay {
 
     /**
      * {active width, height, the highest refresh rate among the modes of that size;
-     *  native width, height, its highest refresh rate, the id of the native mode at that rate}.
+     *  native width, height, its highest refresh rate, the id of the native mode at that rate;
+     *  the active mode's own refresh rate, its id}.
      * The native mode is the largest the panel has, not the one it is in.
      */
     private static int[] mode(long id, Object token) throws Exception {
@@ -593,8 +694,8 @@ public final class OneiOSDisplay {
 
     /** The choice among the modes, apart from the framework (see mode()); null without the active mode. */
     static int[] pick(int[] ids, int[] widths, int[] heights, int[] rates, int active) {
-        int width = 0, height = 0;
-        for (int i = 0; i < ids.length; i++) if (ids[i] == active) { width = widths[i]; height = heights[i]; }
+        int width = 0, height = 0, rate = 0;
+        for (int i = 0; i < ids.length; i++) if (ids[i] == active) { width = widths[i]; height = heights[i]; rate = rates[i]; }
         if (width <= 0 || height <= 0) return null;
         int best = 0, nativeAt = -1;
         for (int i = 0; i < ids.length; i++) {
@@ -603,6 +704,6 @@ public final class OneiOSDisplay {
             long area = (long) widths[i] * heights[i], most = nativeAt < 0 ? 0 : (long) widths[nativeAt] * heights[nativeAt];
             if (nativeAt < 0 || area > most || (area == most && widths[i] == widths[nativeAt] && rates[i] > rates[nativeAt])) nativeAt = i;
         }
-        return new int[]{width, height, best, widths[nativeAt], heights[nativeAt], rates[nativeAt], ids[nativeAt]};
+        return new int[]{width, height, best, widths[nativeAt], heights[nativeAt], rates[nativeAt], ids[nativeAt], rate, active};
     }
 }

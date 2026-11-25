@@ -63,15 +63,34 @@ NDK's `ANativeWindow` on that `Surface`, from the mapped memfd straight into the
   1440x3120: 1436x3120 at x = 2). Both layers are at the top of the built-in display's stack.
 - **The panel.** The modes come from surfaceflinger (`DisplayControl`, the way scrcpy reads them): the active
   one, and the native one, which is the largest the panel has at its highest refresh rate. With `--takeover` (a
-  session: system_server is gone) a panel that One UI left in a lower mode (FHD+ 1080x2340 is One UI's default
-  resolution setting) is put in the native mode: the display's desired mode specs are read, their default mode
-  replaced and their refresh ranges opened to that mode's rate, and written back
-  (`SurfaceControl.setDesiredDisplayModeSpecs`); the helper waits up to a second for the mode to become active.
+  session: system_server is gone) the panel is put in the native mode and **held at its rate**: the display's desired
+  mode specs are read, their default mode replaced and their refresh ranges (primary and app request, physical and
+  render) set to that mode's rate alone, and written back (`SurfaceControl.setDesiredDisplayModeSpecs`); the helper
+  waits up to a second for the mode to become active. It does so whenever the panel is in another size (FHD+
+  1080x2340 is One UI's default resolution setting), runs below the native mode's rate, or surfaceflinger's policy
+  (One UI's last word before its framework stopped) caps the rate below it or lets it fall below it
+  (`OneiOSDisplay.wantsSpecs`, host-tested). Until 2026-11-25 only another size did: with power saving on (or the
+  standard motion setting) One UI's policy is 10 to 60 Hz, the layer's vote for 120 Hz counts for nothing against
+  it, and the panel showed at most 60 of the 100 frames a second the guest drew for a 120 Hz tick (docs/native.md
+  "The frame rate in the shared-RAM VM"). The rate is held, not only allowed: with the framework gone nothing tells
+  surfaceflinger of a touch, and its idle timer (250 ms here) would lower the rate between gestures. The specs as
+  they were are kept and given back when the helper leaves (its shutdown hook in the crosvm mode, the end of the
+  run otherwise: `surfaceflinger's policy is One UI's again: ...`); a helper killed with SIGKILL leaves the 120 Hz
+  specs until One UI's framework sets its own at its start (not tested).
   Then the display's projection is set to the active mode, unrotated, so the layer space is the panel's own
   pixels whatever rotation One UI left. If the mode is refused the panel stays as it was and the frame is
-  scaled. The return restarts surfaceflinger, which forgets both. Without `--takeover` nothing of the display is
-  changed and the logical size comes from the display manager. The layer votes for the mode's highest refresh
-  rate (`setFrameRate`, 120 Hz on this panel), which is the rate the guest's vsync tick runs at.
+  scaled (`the panel shows N frames a second, not the M the guest is told` when the rate was not taken). Without
+  `--takeover` nothing of the display is changed and the logical size comes from the display manager. The layer
+  votes for the mode's highest refresh rate (`setFrameRate`, 120 Hz on this panel), which is the rate the guest's
+  vsync tick runs at.
+  The lines: `panel modes: active 1440x3120 at 60 Hz (mode 2; up to 120 Hz at that size), native 1440x3120 at 120
+  Hz; surfaceflinger's policy: default mode 2, the panel at 10 to 60 Hz` (the active mode's own rate; the old line
+  gave only the size's highest), `asked surfaceflinger for the native mode (id 0) held at 120 Hz`, `the panel is in
+  its native mode 1440x3120 at 120 Hz (mode 0); surfaceflinger's policy: default mode 0, the panel at 120 to 120 Hz`.
+  In the crosvm mode (`--crosvm-display`) the helper also looks at the panel's rate every 5 s (one call to
+  surfaceflinger): `the panel runs at 120 Hz (mode 0, 1440x3120); the guest draws for 120 Hz` when it changes
+  (`: at most 60 of its frames a second are shown` when it is below `--hz`), and at the end `the panel's rate over
+  the session: 120 Hz 100 % (N looks, 5 s apart)`.
   Whether One UI's resolution setting is a panel mode or only a logical size on this phone is not known; the
   helper's `panel modes: active ..., native ...` line of the first run says.
 - **Frames.** One copy per frame, of the damaged rectangle only: the window copies back what the last buffer had
@@ -291,8 +310,11 @@ the lock screen followed it up, and the next one opened the Home screen).
   in `java/OneiOSDisplay.java`, and each has a fallback or a logged failure.
 - The copy is not zero-copy. For that xnuhost would have to keep the guest's frame in a gralloc buffer
   (`AHardwareBuffer`) instead of a memfd and pass that; `virtio_gpu.c` and the socket's hello would change.
-- The native-mode request (`setDesiredDisplayModeSpecs` by reflection) is unproven like the rest; a refusal is
-  logged and the frame is scaled. At 1440x3120 a full-frame copy is 18 MB, 2.2 GB/s at 120 Hz when every frame
+- The native-mode request (`setDesiredDisplayModeSpecs` by reflection) at another size is unproven like the rest; a
+  refusal is logged and the frame is scaled. The request at the native size (the rate alone, 2026-11-25) is
+  host-tested only (`make test`: the choice, 20 checks); whether Samsung's surfaceflinger takes a 120 Hz policy
+  from the helper while power saving is on is the next phone session's `the panel is in its native mode ... at 120
+  Hz` and `the panel's rate over the session` lines. At 1440x3120 a full-frame copy is 18 MB, 2.2 GB/s at 120 Hz when every frame
   is all damage.
 - A guest that truncates the memfd kills the helper (SIGBUS) and the screen goes dark; the session and the way
   back are not affected.
