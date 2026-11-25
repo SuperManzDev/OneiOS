@@ -25,13 +25,15 @@ public final class TestModes {
         int[] sIds = {0, 1, 2, 3, 7, 14}, sW = {1440, 1440, 1440, 1440, 1080, 720}, sH = {3120, 3120, 3120, 3120, 2340, 1560}, sHz = {120, 80, 60, 48, 120, 120};
         p = OneiOSDisplay.pick(sIds, sW, sH, sHz, 2);
         check(p != null && p.length == 9 && p[7] == 60 && p[8] == 2 && p[2] == 120 && p[5] == 120 && p[6] == 0, "the active mode's own rate (60), not the size's highest");
-        check(p != null && OneiOSDisplay.wantsSpecs(p, new float[]{2, 60, 10}), "native size at 60 Hz under a 60 Hz policy: the specs are set");
+        check(p != null && OneiOSDisplay.wantsSpecs(p, new float[]{2, 60, 10}, false) && OneiOSDisplay.wantsSpecs(p, new float[]{2, 60, 10}, true), "native size at 60 Hz under a 60 Hz policy: the specs are set");
         int[] at120 = OneiOSDisplay.pick(sIds, sW, sH, sHz, 0);
-        check(OneiOSDisplay.wantsSpecs(at120, new float[]{2, 60, 10}), "at 120 Hz now but the policy says 60: set");
-        check(OneiOSDisplay.wantsSpecs(at120, new float[]{0, 120, 10}), "the policy lets the rate fall to 10 Hz: set (held)");
-        check(OneiOSDisplay.wantsSpecs(at120, new float[]{-1, -1, -1}), "a policy that cannot be read: set");
-        check(!OneiOSDisplay.wantsSpecs(at120, new float[]{0, 120, 120}), "native size, 120 Hz, held there already: nothing to set");
-        check(OneiOSDisplay.wantsSpecs(OneiOSDisplay.pick(sIds, sW, sH, sHz, 7), new float[]{0, 120, 120}), "another size: set");
+        check(OneiOSDisplay.wantsSpecs(at120, new float[]{2, 60, 10}, false), "at 120 Hz now but the policy says 60: set");
+        check(OneiOSDisplay.wantsSpecs(at120, new float[]{0, 120, 10}, true), "the policy lets the rate fall to 10 Hz: set when the rate is held (crosvm)");
+        check(!OneiOSDisplay.wantsSpecs(at120, new float[]{0, 120, 10}, false) && !OneiOSDisplay.wantsSpecs(p, new float[]{0, 120, 10}, false),
+              "the same policy without the hold (xnuhost's frames): left, the vote asks for the rate");
+        check(OneiOSDisplay.wantsSpecs(at120, new float[]{-1, -1, -1}, false), "a policy that cannot be read: set");
+        check(!OneiOSDisplay.wantsSpecs(at120, new float[]{0, 120, 120}, true), "native size, 120 Hz, held there already: nothing to set");
+        check(OneiOSDisplay.wantsSpecs(OneiOSDisplay.pick(sIds, sW, sH, sHz, 7), new float[]{0, 120, 120}, false), "another size: set");
         check(OneiOSDisplay.policyText(new float[]{2, 60, 10}).equals("default mode 2, the panel at 10 to 60 Hz")
               && OneiOSDisplay.policyText(new float[]{-1, -1, -1}).equals("not readable"), "the policy's line");
         java.util.TreeMap<Integer, Integer> seen = new java.util.TreeMap<>();

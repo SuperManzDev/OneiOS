@@ -675,30 +675,37 @@ The owner's report of take12 (`logs/pa3q-vmboot/take12`: 2560 MiB, 6 vCPUs, 720x
 GPU held at 607 MHz and the big cores at 2.84 GHz or more): it looks like 50 frames a second on a 120 Hz panel.
 What the logs and the code say, and what was changed.
 
-- **The guest draws about 100 frames a second, and one scanout per frame.** `oneios-gpu-report`'s "frames" are the
-  render server's fenced submissions; against the display's own `frame N scanned out` lines they are one each
-  (take10: 16,581 frames for the 16,384 scanouts from 16,385 to 32,769; take12: 11,192 for 8,192). A swipe's 10 s:
-  `frames +1011 mean 6655 us`, 741 under 8 ms, 252 at 8 to 16, 18 longer. So crosvm is handed about 100 frames a
-  second; the loss is after it.
-- **The cause: the panel ran at 60 Hz.** `oneios-display --takeover` set surfaceflinger's mode specs only when the
+- **The guest hands crosvm 70 to 100 frames a second in a swipe.** `oneios-gpu-report`'s "frames" are the render
+  server's fenced submissions; against the display's own `frame N scanned out` lines they were one scanout each in
+  take10 (16,581 frames for the 16,384 scanouts from 16,385 to 32,769) and more than one in take12 (11,192 for the
+  8,192 from 8,193 to 16,385, 4,888 for the 4,096 before: 73 to 84 scanouts per 100 frames; two of its 10 s had 1,552
+  and 2,244 frames, more than 120 a second, so some submissions are not frames shown). Why take12 has more
+  submissions per scanout than take10 is not known. A swipe's 10 s: `frames +1011 mean 6655 us`, 741 under 8 ms,
+  252 at 8 to 16, 18 longer. So crosvm gets well over 60 frames a second; half the rate the owner expects is lost
+  after it.
+- **The cause, inferred (not read during the session): the panel ran at 60 Hz or less.** `oneios-display --takeover` set surfaceflinger's mode specs only when the
   panel was not in its native size; the S25 at WQHD+ already is, so the specs stayed as One UI left them when its
-  framework was stopped. With power saving on (`settings get global low_power` 1 on 2026-11-25; Samsung's
-  cpufreq_limit of 1689600 in take12's run.txt is the same power saver) that is `displayManagerPolicy={defaultModeId=2,
+  framework was stopped. After the return power saving was on (`settings get global low_power` 1, read at 16:51; whether Samsung's
+  cpufreq_limit of 1689600 in take12's run.txt is the power saver's is a guess) and the policy was `displayManagerPolicy={defaultModeId=2,
   ... primaryRanges={physical=[10.00 Hz, 60.00 Hz] ...} appRequestRanges={physical=[10.00 Hz, 60.00 Hz] ...}}`
-  (`dumpsys SurfaceFlinger` after the return; every entry of its mode specs history, 16:06 to 16:25, is 10-60 or
-  60-60, mode 2, and surfaceflinger is not restarted by vm-boot's takeover or return: one process, up 19 h). The
+  (`dumpsys SurfaceFlinger` after the return; the 34 entries of its mode specs history, 16:06:59 to 16:25:14, are all
+  10-60 or 60-60 with mode 2, and surfaceflinger is not restarted by vm-boot's takeover or return: one process, up
+  19 h. The history has no entry after 16:25:14, not even for the return at 16:50, so it is not complete, and the
+  6 minutes before the takeover at 16:31:57 are not covered). The
   layer's `setFrameRate(120)` cannot leave the app request range, so surfaceflinger latched at most 60 of the
   guest's 100 frames, unevenly (the guest's tick is its own 120 Hz timer). The helper's line said `active
   1440x3120 (up to 120 Hz)` and `120 Hz`: the highest rate among the modes of that size and the vote, not the rate
   the panel was in. **Not read during the session**: the active mode while the VM ran (the session had ended); the
   policy is from the dump after it. take10 (the day before, cpufreq_limit 1958400: another profile) has no such dump.
 - **The fix** (runtime/display, `OneiOSDisplay.java`): in a takeover the helper sets the specs whenever the panel's
-  size, its rate, or surfaceflinger's policy is below the native mode's, holds the rate (range 120 to 120: no
-  framework tells surfaceflinger of a touch, and its 250 ms idle timer would lower the rate between gestures),
+  size or surfaceflinger's policy is below the native mode's; in the crosvm mode it also holds the rate (range 120
+  to 120: no framework tells surfaceflinger of a touch, and its 250 ms idle timer would lower the rate between
+  gestures; the hosted session's helper keeps ranges from 0),
   gives One UI's specs back when it leaves, logs the active mode's own rate and the policy, and in the crosvm mode
   looks at the panel's rate every 5 s (runtime/display/README.md "The panel"). Tested on the PC: `make -C
-  runtime/display test` (173 + 20 checks: the choice with the S25's mode list and take12's policy), the dex built.
-  **Not run on the phone.** The lines that prove it there, in `display.txt`: `panel modes: active 1440x3120 at 60 Hz
+  runtime/display test` (173 + 21 checks: the choice with the S25's mode list and take12's policy), the dex built.
+  **Not run on the phone**, and the calls to surfaceflinger (the policy read, the specs given back, the look every
+  5 s) have run nowhere: whether Samsung's surfaceflinger takes a 120 Hz policy from the helper is the test. The lines that prove it there, in `display.txt`: `panel modes: active 1440x3120 at 60 Hz
   (mode 2; ...); surfaceflinger's policy: default mode 2, the panel at 10 to 60 Hz`, then `asked surfaceflinger for
   the native mode (id 0) held at 120 Hz`, `the panel is in its native mode 1440x3120 at 120 Hz (mode 0)`, `the panel
   runs at 120 Hz ...`, at the end `the panel's rate over the session: 120 Hz 100 %` and `surfaceflinger's policy is

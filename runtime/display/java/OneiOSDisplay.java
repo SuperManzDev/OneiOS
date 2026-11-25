@@ -105,6 +105,7 @@ public final class OneiOSDisplay {
         Object transaction = TX.getConstructor().newInstance();
         // --takeover (One UI's framework down, vm-boot --takeover): the panel in its native mode and the projection set here, as the
         // hosted session's takeover does; beside One UI the display is the framework's
+        sHoldRate = true;      // crosvm presents; nothing here sees touches or frames to raise the rate again
         int[] panel = panel(transaction, takeover, takeover, null);
         if (hz <= 0) hz = panel[2];
         // the frame fitted to the panel, centred (the guest's frame is normally the panel's own size)
@@ -448,19 +449,19 @@ public final class OneiOSDisplay {
             float[] policy = policy(token);
             log("panel modes: active " + mode[0] + "x" + mode[1] + " at " + mode[7] + " Hz (mode " + mode[8] + "; up to " + mode[2]
                 + " Hz at that size), native " + mode[3] + "x" + mode[4] + " at " + mode[5] + " Hz; surfaceflinger's policy: " + policyText(policy));
-            if (takeover && wantsSpecs(mode, policy)) {
-                if (nativeMode(token, mode[6], mode[5])) {
+            if (takeover && wantsSpecs(mode, policy, sHoldRate)) {
+                if (nativeMode(token, mode[6], mode[5], sHoldRate)) {
                     // the switch happens at a vsync of surfaceflinger's: wait for it to be the active mode
                     for (int tries = 0; tries < 20; tries++) {
                         Thread.sleep(50);
                         mode = mode((Long) display[0], token);
-                        if (mode[0] == mode[3] && mode[1] == mode[4] && mode[7] >= mode[5]) break;
+                        if (mode[0] == mode[3] && mode[1] == mode[4] && (!sHoldRate || mode[7] >= mode[5])) break;
                     }
                 }
                 if (mode[0] == mode[3] && mode[1] == mode[4]) log("the panel is in its native mode " + mode[0] + "x" + mode[1] + " at " + mode[7]
                     + " Hz (mode " + mode[8] + "); surfaceflinger's policy: " + policyText(policy(token)));
                 else log("the panel stays at " + mode[0] + "x" + mode[1] + ": the guest's frame is scaled to it");
-                if (mode[7] < mode[5]) log("the panel shows " + mode[7] + " frames a second, not the " + mode[5]
+                if (sHoldRate && mode[7] < mode[5]) log("the panel shows " + mode[7] + " frames a second, not the " + mode[5]
                     + " the guest is told: surfaceflinger did not take the rate");
             }
         } catch (Throwable unavailable) {
@@ -501,7 +502,7 @@ public final class OneiOSDisplay {
      * otherwise owns these specs, is gone in a session; the return restarts surfaceflinger, which starts from
      * its own boot mode again and gets One UI's specs when the framework is back.
      */
-    private static boolean nativeMode(Object token, int id, int hz) {
+    private static boolean nativeMode(Object token, int id, int hz, boolean hold) {
         try {
             Class<?> binder = Class.forName("android.os.IBinder");
             Object specs = SC.getMethod("getDesiredDisplayModeSpecs", binder).invoke(null, token);
@@ -518,19 +519,19 @@ public final class OneiOSDisplay {
                     Object ranges = specs.getClass().getField(name).get(specs);
                     for (String part : new String[]{"physical", "render"}) {
                         Object range = ranges.getClass().getField(part).get(ranges);
-                        range.getClass().getField("min").setFloat(range, (float) hz);
+                        range.getClass().getField("min").setFloat(range, hold ? (float) hz : 0f);
                         range.getClass().getField("max").setFloat(range, (float) hz);
                     }
                 } catch (NoSuchFieldException older) {
                     // Android 13 and earlier: four floats on the specs themselves
                     String prefix = name.equals("primaryRanges") ? "primaryRefreshRate" : "appRequestRefreshRate";
-                    specs.getClass().getField(prefix + "Min").setFloat(specs, (float) hz);
+                    specs.getClass().getField(prefix + "Min").setFloat(specs, hold ? (float) hz : 0f);
                     specs.getClass().getField(prefix + "Max").setFloat(specs, (float) hz);
                 }
             }
             Object set = SC.getMethod("setDesiredDisplayModeSpecs", binder, specs.getClass()).invoke(null, token, specs);
             if (set instanceof Boolean && !((Boolean) set)) throw new IllegalStateException("surfaceflinger refused the mode specs");
-            log("asked surfaceflinger for the native mode (id " + id + ") held at " + hz + " Hz");
+            log("asked surfaceflinger for the native mode (id " + id + (hold ? ") held at " : "), up to ") + hz + " Hz");
             return true;
         } catch (Throwable refused) {
             log("the native mode could not be asked for (" + refused + ")");
@@ -539,6 +540,9 @@ public final class OneiOSDisplay {
     }
 
     private static Object sSpecsBefore, sSpecsToken;
+    // The rate held at the native mode's (the ranges' lowest raised to it), not only allowed: the crosvm mode's. The
+    // session's helper (xnuhost's frames) opens the ranges from 0 as before, and its vote asks for the rate.
+    private static boolean sHoldRate;
 
     /** The desired mode specs as they were before nativeMode() changed them (One UI's last), given back to surfaceflinger. */
     private static void restoreSpecs() {
@@ -584,15 +588,15 @@ public final class OneiOSDisplay {
     /**
      * Whether a takeover sets the display's mode specs: the panel is not in its native size, or runs below the native
      * mode's rate, or surfaceflinger's policy holds it below that rate (One UI's last word before its framework stopped:
-     * 60 Hz with power saving or the standard motion setting, where the layer's vote for 120 counts for nothing), or
-     * lets it fall below it (with the framework gone nothing tells surfaceflinger of a touch, and its idle timer would
-     * lower the rate between gestures). mode is pick()'s, policy is policy()'s; one that could not be read (-1) is taken
-     * as too low.
+     * 60 Hz with power saving or the standard motion setting, where the layer's vote for 120 counts for nothing), or,
+     * with hold, lets it fall below it (with the framework gone nothing tells surfaceflinger of a touch, and its idle
+     * timer would lower the rate between gestures). mode is pick()'s, policy is policy()'s; one that could not be read
+     * (-1) is taken as too low.
      */
-    static boolean wantsSpecs(int[] mode, float[] policy) {
+    static boolean wantsSpecs(int[] mode, float[] policy, boolean hold) {
         if (mode[0] != mode[3] || mode[1] != mode[4]) return true;
-        if (mode[7] < mode[5]) return true;
-        return policy[1] < mode[5] || policy[2] < mode[5] || Math.round(policy[0]) != mode[6];
+        if (policy[1] < mode[5] || Math.round(policy[0]) != mode[6]) return true;
+        return hold && (mode[7] < mode[5] || policy[2] < mode[5]);
     }
 
     /** The built-in display: {Long id, IBinder token}. */
