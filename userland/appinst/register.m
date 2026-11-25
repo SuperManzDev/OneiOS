@@ -9,6 +9,7 @@
 // the fallback is installd's MobileInstallation path, scaffolded below but off by default.
 #import <Foundation/Foundation.h>
 
+#include <stdio.h>
 #include <string.h>
 
 // Typed view of the private API. We never reference the class symbol directly (obtained via NSClassFromString),
