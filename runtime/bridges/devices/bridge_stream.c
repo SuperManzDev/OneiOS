@@ -38,6 +38,26 @@ static void to_guest(stream_state *s, uint16_t channel, uint16_t type, const voi
   pthread_mutex_unlock(&s->lock);
 }
 
+static void bright_state(stream_state *s)
+{
+  br_bright_info info;
+  br_bright_info_get(s->config.brightness, &info);
+  uint64_t min_millinits = info.ceiling ? (uint64_t)info.max_nits * 1000u * info.floor / info.ceiling : 0;
+  struct ob_bright_state state = { (info.panel ? OB_BRIGHT_HAS_PANEL : 0) | (info.als ? OB_BRIGHT_HAS_ALS : 0), info.max_nits,
+                                   (uint32_t)min_millinits, br_bright_level(s->config.brightness) };
+  to_guest(s, OB_CH_BRIGHTNESS, OB_BRIGHT_STATE, &state, sizeof state);
+  pthread_mutex_lock(&s->lock);
+  s->stats.brightness_states++;
+  pthread_mutex_unlock(&s->lock);
+}
+
+static void bright_als(void *ctx, const br_als_sample *sample)
+{
+  stream_state *s = ctx;
+  struct ob_bright_als als = { sample->millilux, sample->clear, sample->ir, sample->uv };
+  to_guest(s, OB_CH_BRIGHTNESS, OB_BRIGHT_ALS, &als, sizeof als);
+}
+
 static void battery_send(void *ctx, const br_battery_sample *b)
 {
   stream_state *s = ctx;
@@ -56,11 +76,12 @@ static void from_guest(stream_state *s, const struct ob_header *h, const uint8_t
   case OB_CH_CONTROL:
     if (h->type == OB_CTL_HELLO) {
       struct ob_ctl_hello hello = { OB_PROTO_VERSION, 1u << OB_CH_CONTROL | (s->config.haptic ? 1u << OB_CH_HAPTIC : 0) |
+                                                       (s->config.brightness ? 1u << OB_CH_BRIGHTNESS : 0) |
                                                        (s->config.battery ? 1u << OB_CH_BATTERY : 0) };
       s->stats.hellos++;
       if (s->stats.hellos == 1)
-        br_log(1, "bridge: the guest's hello: channels 0x%x for it (control%s%s)", hello.channels, s->config.haptic ? ", haptics" : "",
-               s->config.battery ? ", battery" : "");
+        br_log(1, "bridge: the guest's hello: channels 0x%x for it (control%s%s%s)", hello.channels, s->config.haptic ? ", haptics" : "",
+               s->config.brightness ? ", brightness" : "", s->config.battery ? ", battery" : "");
       if (br_haptic_impacts_available(s->config.haptic)) {
         struct ob_ctl_hello_ext ext = { hello.version, hello.channels, OB_FEAT_HAPTIC_IMPACT };
         to_guest(s, OB_CH_CONTROL, OB_CTL_HELLO, &ext, sizeof ext);
@@ -83,6 +104,23 @@ static void from_guest(stream_state *s, const struct ob_header *h, const uint8_t
       if (impact.kind >= OB_IMPACT_LIGHT && impact.kind <= OB_IMPACT_HEAVY) (void)br_haptic_impact(s->config.haptic, impact.kind);
     }
     break;
+  case OB_CH_BRIGHTNESS:
+    if (!s->config.brightness) { s->stats.unknown++; break; }
+    s->stats.brightness_requests++;
+    if (h->type == OB_BRIGHT_SET && h->length >= sizeof(struct ob_bright_set)) {
+      struct ob_bright_set set;
+      memcpy(&set, payload, sizeof set);
+      br_bright_set(s->config.brightness, set.level, set.flags & OB_BRIGHT_LINEAR, set.fade_ms);
+    } else if (h->type == OB_BRIGHT_POWER && h->length >= sizeof(struct ob_bright_power)) {
+      struct ob_bright_power power;
+      memcpy(&power, payload, sizeof power);
+      br_bright_display(s->config.brightness, power.on != 0,
+                        power.source == OB_POWER_FRAMEBUFFER ? "the framebuffer's power request" : "the guest");
+    } else if (h->type == OB_BRIGHT_QUERY) {
+      bright_state(s);
+      br_bright_listen(s->config.brightness, bright_als, s);
+    } else s->stats.unknown++;
+    break;
   case OB_CH_BATTERY:
     if (s->config.battery && h->type == OB_BATTERY_QUERY) {
       br_battery_sample sample;
@@ -96,7 +134,7 @@ static void from_guest(stream_state *s, const struct ob_header *h, const uint8_t
     } else s->stats.unknown++;
     break;
   default:
-    s->stats.unknown++;                   // Bluetooth, brightness, thermal, camera: not offered in the hello
+    s->stats.unknown++;                   // Bluetooth, thermal and camera are not offered in the hello
     break;
   }
 }
@@ -141,8 +179,9 @@ int br_stream_serve(int fd, const br_stream_config *config, const volatile int *
     s.stats.bytes_in += (uint64_t)n;
     pthread_mutex_unlock(&s.lock);
   }
-  // A guest that is gone leaves no motor running and no reads for it.
+  // A guest that is gone leaves no motor running and no asynchronous reports for it.
   if (s.config.battery) br_battery_listen(s.config.battery, NULL, NULL);
+  if (s.config.brightness) br_bright_listen(s.config.brightness, NULL, NULL);
   if (s.config.haptic) br_haptic_stop(s.config.haptic);
   pthread_mutex_lock(&s.lock);
   s.ended = 1;

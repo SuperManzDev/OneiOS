@@ -134,10 +134,20 @@ static void test_serve(const char *tmp)
   br_battery_options options = { .dir = root, .poll_ms = 10 };
   br_battery *battery = br_battery_open(&options);
   br_haptic *motor = br_haptic_open_sim();
-  CHECK(battery != NULL && motor != NULL);
+  char backlights[440], panel[480], level[520];
+  snprintf(backlights, sizeof backlights, "%s/backlight", tmp);
+  snprintf(panel, sizeof panel, "%s/panel0-backlight", backlights);
+  snprintf(level, sizeof level, "%s/brightness", panel);
+  mkdir(backlights, 0755); mkdir(panel, 0755);
+  write_node(panel, "max_brightness", "100\n");
+  write_node(panel, "brightness", "40\n");
+  br_bright_options bright_options = { .backlight_dir = backlights, .touch_dir = "/no-touch", .no_als = true, .ceiling = 100, .floor = 1,
+                                       .max_nits = 500 };
+  br_bright *brightness = br_bright_open(&bright_options);
+  CHECK(battery != NULL && motor != NULL && brightness != NULL);
   int pair[2];
   if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair)) abort();
-  server s = { .fd = pair[0], .config = { .haptic = motor, .battery = battery } };
+  server s = { .fd = pair[0], .config = { .haptic = motor, .battery = battery, .brightness = brightness } };
   pthread_t thread;
   if (pthread_create(&thread, NULL, serve_thread, &s)) abort();
   const int g = pair[1];
@@ -150,7 +160,18 @@ static void test_serve(const char *tmp)
   struct ob_header h;
   memcpy(&h, rx.message, 8); memcpy(&hello, rx.message + 8, sizeof hello);
   CHECK(h.channel == OB_CH_CONTROL && h.type == OB_CTL_HELLO && hello.version == OB_PROTO_VERSION);
-  CHECK(hello.channels == (1u << OB_CH_CONTROL | 1u << OB_CH_HAPTIC | 1u << OB_CH_BATTERY));
+  CHECK(hello.channels == (1u << OB_CH_CONTROL | 1u << OB_CH_HAPTIC | 1u << OB_CH_BRIGHTNESS | 1u << OB_CH_BATTERY));
+
+  // brightness: the saved level is reported, one bounded linear set reaches the fake panel
+  guest_send(g, OB_CH_BRIGHTNESS, OB_BRIGHT_QUERY, NULL, 0);
+  struct ob_bright_state bright_state;
+  CHECK(guest_recv(g, &rx, 2000) == 8 + (int)sizeof bright_state);
+  memcpy(&h, rx.message, 8); memcpy(&bright_state, rx.message + 8, sizeof bright_state);
+  CHECK(h.channel == OB_CH_BRIGHTNESS && h.type == OB_BRIGHT_STATE && bright_state.flags == OB_BRIGHT_HAS_PANEL && bright_state.max_nits == 500);
+  struct ob_bright_set bright_set = { .level = BR_BRIGHT_FULL, .fade_ms = 0, .flags = OB_BRIGHT_LINEAR };
+  guest_send(g, OB_CH_BRIGHTNESS, OB_BRIGHT_SET, &bright_set, sizeof bright_set);
+  for (int waited = 0; waited < 1000 && br_bright_current(brightness) != 100; waited += 5) usleep(5000);
+  CHECK(br_bright_current(brightness) == 100);
 
   // the battery: the real level and state at the query, then each change by itself
   guest_send(g, OB_CH_BATTERY, OB_BATTERY_QUERY, NULL, 0);
@@ -199,8 +220,9 @@ static void test_serve(const char *tmp)
   close(g);
   pthread_join(thread, NULL);
   CHECK(s.rc == 0);
-  CHECK(s.stats.hellos == 2 && s.stats.haptic == 11 && s.stats.battery_queries == 1 && s.stats.battery_states >= 3 && s.stats.unknown == 1);
-  CHECK(s.stats.frames_in == 2 + 11 + 1 + 1 && s.stats.frames_bad == 1 && s.stats.bytes_out > 0 && s.stats.bytes_in > 0);
+  CHECK(s.stats.hellos == 2 && s.stats.haptic == 11 && s.stats.brightness_requests == 2 && s.stats.brightness_states == 1 &&
+        s.stats.battery_queries == 1 && s.stats.battery_states >= 3 && s.stats.unknown == 1);
+  CHECK(s.stats.frames_in == 2 + 11 + 2 + 1 + 1 && s.stats.frames_bad == 1 && s.stats.bytes_out > 0 && s.stats.bytes_in > 0);
   br_haptic_flush(motor);
   br_haptic_stats_get(motor, &st);
   CHECK(st.stop >= 1);
@@ -217,6 +239,11 @@ static void test_serve(const char *tmp)
   close(pair[0]); close(pair[1]);
   br_haptic_close(motor);
   br_battery_close(battery);
+  br_bright_close(brightness);
+  unsigned restored = 0;
+  FILE *level_file = fopen(level, "r");
+  CHECK(level_file && fscanf(level_file, "%u", &restored) == 1 && restored == 40);
+  if (level_file) fclose(level_file);
 }
 
 // ---- bridgectl serve, as vm-boot starts it and crosvm reaches it ----------------------------------------------------
@@ -224,18 +251,26 @@ static void test_serve(const char *tmp)
 // as crosvm does when the VM ends: the tool then says so and ends with 0.
 static void test_cli(const char *tool, const char *tmp)
 {
-  char sock[440], root[400], out[440];
+  char sock[440], root[400], out[440], backlights[440], panel[480];
   snprintf(sock, sizeof sock, "%s/bridge.sock", tmp);
   snprintf(root, sizeof root, "%s/power_supply", tmp);
   snprintf(out, sizeof out, "%s/bridge.txt", tmp);
+  snprintf(backlights, sizeof backlights, "%s/cli-backlight", tmp);
+  snprintf(panel, sizeof panel, "%s/panel0-backlight", backlights);
+  mkdir(backlights, 0755); mkdir(panel, 0755);
+  write_node(panel, "max_brightness", "100\n");
+  write_node(panel, "brightness", "40\n");
   pid_t pid = fork();
   if (pid < 0) abort();
   if (!pid) {
     int fd = open(out, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0 || dup2(fd, 1) < 0 || dup2(fd, 2) < 0) _exit(126);
     setenv("ONEIOS_BATTERY_DIR", root, 1);
+    setenv("ONEIOS_BACKLIGHT_DIR", backlights, 1);
+    setenv("ONEIOS_TOUCH_DIR", "/no-touch", 1);
+    setenv("ONEIOS_BRIGHT_MAX", "100", 1);
     setenv("ASAN_OPTIONS", "detect_leaks=0", 1);
-    execl(tool, tool, "serve", sock, "--wait", "20", "--no-haptics", (char *)NULL);
+    execl(tool, tool, "serve", sock, "--wait", "20", "--no-haptics", "--brightness", (char *)NULL);
     _exit(127);
   }
   struct stat st;
@@ -250,7 +285,7 @@ static void test_cli(const char *tool, const char *tmp)
   guest_send(g, OB_CH_CONTROL, OB_CTL_HELLO, &hello, sizeof hello);
   CHECK(guest_recv(g, &rx, 5000) == 8 + (int)sizeof hello);
   memcpy(&hello, rx.message + 8, sizeof hello);
-  CHECK(hello.channels == (1u << OB_CH_CONTROL | 1u << OB_CH_BATTERY));       // --no-haptics: the channel is not offered
+  CHECK(hello.channels == (1u << OB_CH_CONTROL | 1u << OB_CH_BRIGHTNESS | 1u << OB_CH_BATTERY));  // opt-in brightness, no haptics
   guest_send(g, OB_CH_BATTERY, OB_BATTERY_QUERY, NULL, 0);
   struct ob_battery_state state;
   CHECK(guest_recv(g, &rx, 5000) == 8 + (int)sizeof state);
@@ -262,8 +297,8 @@ static void test_cli(const char *tool, const char *tmp)
   char text[4096] = "";
   FILE *f = fopen(out, "r");
   if (f) { size_t n = fread(text, 1, sizeof text - 1, f); text[n] = 0; fclose(f); }
-  CHECK(strstr(text, "serve: listening on ") && strstr(text, "battery served, haptics off (--no-haptics)"));
-  CHECK(strstr(text, "serve: crosvm connected") && strstr(text, "serve: crosvm closed the port (the VM ended): 2 messages from the guest (1 hello, 0 haptic, 1 battery queries"));
+  CHECK(strstr(text, "serve: listening on ") && strstr(text, "battery served, haptics off (--no-haptics), brightness served"));
+  CHECK(strstr(text, "serve: crosvm connected") && strstr(text, "serve: crosvm closed the port (the VM ended): 2 messages from the guest (1 hello, 0 haptic, 0 brightness, 1 battery queries"));
   CHECK(access(sock, F_OK) != 0);                                           // the socket's name is gone once it is taken
 }
 

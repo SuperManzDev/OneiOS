@@ -9,7 +9,7 @@
 //   bridgectl haptic-hal-heavy-click      ACTIVE one-shot IVibrator.perform(HEAVY_CLICK, STRONG); explicit opt-in required
 //   bridgectl haptic [MS [INTENSITY [HZ]]]   one vibration (default 200 ms, 1000, resonance)
 //   bridgectl haptic-pattern         three taps and a ramp: what an iOS pattern feels like
-//   bridgectl serve /SOCKET [--wait S] [--no-haptics] [--no-battery]
+//   bridgectl serve /SOCKET [--wait S] [--no-haptics] [--no-battery] [--brightness]
 //                                    the bridge channel of a VM of crosvm (the native path): listens on the Unix socket
 //                                    crosvm's second serial port connects to (vm-boot) and serves the kernel's bridge
 //                                    driver there: the phone's battery to iOS, iOS's haptics to the phone's motor;
@@ -618,16 +618,17 @@ static int serve(int argc, char **argv)
 {
   const char *path = argc > 2 ? argv[2] : NULL;
   double wait_s = 120;
-  bool haptics = true, battery = true;
+  bool haptics = true, battery = true, brightness = false;
   for (int i = 3; i < argc; i++) {
     if (!strcmp(argv[i], "--no-haptics")) haptics = false;
     else if (!strcmp(argv[i], "--no-battery")) battery = false;
+    else if (!strcmp(argv[i], "--brightness")) brightness = true;
     else if (!strcmp(argv[i], "--wait") && i + 1 < argc) wait_s = atof(argv[++i]);
     else path = NULL;
   }
   struct sockaddr_un addr = { .sun_family = AF_UNIX };
   if (!path || *path != '/' || strlen(path) >= sizeof addr.sun_path || wait_s <= 0 || wait_s > 3600) {
-    fprintf(stderr, "usage: bridgectl serve /SOCKET [--wait SECONDS] [--no-haptics] [--no-battery]\n");
+    fprintf(stderr, "usage: bridgectl serve /SOCKET [--wait SECONDS] [--no-haptics] [--no-battery] [--brightness]\n");
     return 2;
   }
   strcpy(addr.sun_path, path);
@@ -642,6 +643,15 @@ static int serve(int argc, char **argv)
     config.battery = br_battery_open(o.dir ? &o : NULL);
   }
   if (haptics) config.haptic = br_haptic_open_as(getenv("ONEIOS_INPUT_DIR"), BR_HW_UNSET, NULL);
+  if (brightness) {
+    br_bright_options o = { .backlight_dir = getenv("ONEIOS_BACKLIGHT_DIR"), .input_dir = getenv("ONEIOS_INPUT_DIR"),
+                            .input_sysfs = getenv("ONEIOS_INPUT_SYSFS"), .touch_dir = getenv("ONEIOS_TOUCH_DIR") };
+    const char *max = getenv("ONEIOS_BRIGHT_MAX"), *min = getenv("ONEIOS_BRIGHT_MIN"), *nits = getenv("ONEIOS_BRIGHT_NITS");
+    if (max && *max) o.ceiling = (uint32_t)strtoul(max, NULL, 10);
+    if (min && *min) o.floor = (uint32_t)strtoul(min, NULL, 10);
+    if (nits && *nits) o.max_nits = (uint32_t)strtoul(nits, NULL, 10);
+    config.brightness = br_bright_open(&o);
+  }
   unlink(path);
   int server = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (server < 0 || bind(server, (struct sockaddr *)&addr, sizeof addr) || chmod(path, 0600) || listen(server, 1)) {
@@ -649,11 +659,13 @@ static int serve(int argc, char **argv)
     if (server >= 0) close(server);
     if (config.haptic) br_haptic_close(config.haptic);
     if (config.battery) br_battery_close(config.battery);
+    if (config.brightness) br_bright_close(config.brightness);
     return 1;
   }
-  printf("serve: listening on %s for crosvm's second serial port: battery %s, haptics %s\n", path,
+  printf("serve: listening on %s for crosvm's second serial port: battery %s, haptics %s, brightness %s\n", path,
          config.battery ? "served" : battery ? "not served (no battery to read)" : "off (--no-battery)",
-         config.haptic ? "served" : haptics ? "not served (no actuator opened)" : "off (--no-haptics)");
+         config.haptic ? "served" : haptics ? "not served (no actuator opened)" : "off (--no-haptics)",
+         config.brightness ? "served" : brightness ? "not served (no panel or sensor opened)" : "off (default; use --brightness)");
   int client = -1;
   struct timespec t0, now;
   clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -673,14 +685,17 @@ static int serve(int argc, char **argv)
     br_stream_stats st;
     rc = br_stream_serve(client, &config, &serve_stop, &st) ? 1 : 0;
     close(client);
-    printf("serve: %s: %llu messages from the guest (%llu hello, %llu haptic, %llu battery queries, %llu on channels not served; %llu bad "
-           "frames), %llu battery states to it; %llu bytes in, %llu out\n",
+    printf("serve: %s: %llu messages from the guest (%llu hello, %llu haptic, %llu brightness, %llu battery queries, %llu on channels not served; %llu bad "
+           "frames), %llu brightness and %llu battery states to it; %llu bytes in, %llu out\n",
            rc ? "the stream failed" : serve_stop ? "stopped" : "crosvm closed the port (the VM ended)", (unsigned long long)st.frames_in,
-           (unsigned long long)st.hellos, (unsigned long long)st.haptic, (unsigned long long)st.battery_queries, (unsigned long long)st.unknown,
-           (unsigned long long)st.frames_bad, (unsigned long long)st.battery_states, (unsigned long long)st.bytes_in, (unsigned long long)st.bytes_out);
+           (unsigned long long)st.hellos, (unsigned long long)st.haptic, (unsigned long long)st.brightness_requests,
+           (unsigned long long)st.battery_queries, (unsigned long long)st.unknown, (unsigned long long)st.frames_bad,
+           (unsigned long long)st.brightness_states, (unsigned long long)st.battery_states, (unsigned long long)st.bytes_in,
+           (unsigned long long)st.bytes_out);
   }
   if (config.haptic) br_haptic_close(config.haptic);                // its counter line; the motor stopped
   if (config.battery) br_battery_close(config.battery);
+  if (config.brightness) br_bright_close(config.brightness);        // One UI's level restored, ALS and touch state returned
   return rc;
 }
 
