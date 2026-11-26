@@ -3,6 +3,7 @@ package dev.oneios.nativeprep;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.PendingIntent;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.res.ColorStateList;
 import android.content.pm.ShortcutInfo;
@@ -17,6 +18,7 @@ import android.os.Bundle;
 import android.text.method.ScrollingMovementMethod;
 import android.view.Gravity;
 import android.view.View;
+import android.view.Window;
 import android.view.WindowInsets;
 import android.widget.Button;
 import android.widget.LinearLayout;
@@ -178,21 +180,39 @@ public final class MainActivity extends Activity {
     }
 
     private void confirmPrepare() {
-        new AlertDialog.Builder(this)
-                .setTitle("Prepare memory for OneiOS?")
-                .setMessage("This loads the reviewed support modules and requests 2,032 huge pages. The screen and One UI stay running. No VM starts. Continue?")
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Prepare", (dialog, which) -> runCommand("prepare 4096", "Preparing 4 GiB pool…"))
-                .show();
+        showConfirmation(
+                "Prepare memory for OneiOS?",
+                "This loads the reviewed support modules and requests 2,032 huge pages. The screen and One UI stay running. No VM starts. Continue?",
+                "Prepare",
+                () -> runCommand("prepare 4096", "Preparing 4 GiB pool…"));
     }
 
     private void confirmRelease() {
-        new AlertDialog.Builder(this)
-                .setTitle("Release reserved memory?")
-                .setMessage("Release is refused if a VM or shared parcel is active. It never force-removes a module.")
+        showConfirmation(
+                "Release reserved memory?",
+                "Release is refused if a VM or shared parcel is active. It never force-removes a module.",
+                "Release",
+                () -> runCommand("release", "Releasing…"));
+    }
+
+    private void showConfirmation(String title, String message, String action, Runnable accepted) {
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setMessage(message)
                 .setNegativeButton("Cancel", null)
-                .setPositiveButton("Release", (dialog, which) -> runCommand("release", "Releasing…"))
-                .show();
+                .setPositiveButton(action, (ignored, which) -> accepted.run())
+                .create();
+        dialog.setOnShowListener(ignored -> {
+            Window window = dialog.getWindow();
+            if (window != null) {
+                window.setBackgroundDrawable(round(surface, 28));
+                View decor = window.getDecorView();
+                decor.setPadding(dp(4), dp(4), dp(4), dp(4));
+            }
+            dialog.getButton(DialogInterface.BUTTON_POSITIVE).setTextColor(primary);
+            dialog.getButton(DialogInterface.BUTTON_NEGATIVE).setTextColor(primary);
+        });
+        dialog.show();
     }
 
     private void runCommand(String args, String pending) {

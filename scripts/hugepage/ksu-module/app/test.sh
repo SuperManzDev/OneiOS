@@ -25,7 +25,7 @@ n=$((n + 1))
 if unzip -Z1 "$APK" | grep -qx classes.dex && unzip -Z1 "$APK" | grep -q 'res/'; then ok "$n" "DEX and resources packaged"; else bad "$n" "APK contents"; fi
 n=$((n + 1))
 source=$APP/src/dev/oneios/nativeprep/MainActivity.java
-if grep -q 'setPositiveButton("Prepare"' "$source" && grep -q 'ACTION_PREPARE.equals.*getIntent' "$source" && \
+if grep -q 'showConfirmation(' "$source" && grep -q '"Prepare"' "$source" && grep -q 'ACTION_PREPARE.equals.*getIntent' "$source" && \
    grep -q 'postDelayed(this::confirmPrepare' "$source" && ! grep -q 'postDelayed.*runCommand' "$source"; then
     ok "$n" "home shortcut opens confirmation, never automatic preparation"
 else
@@ -49,7 +49,8 @@ n=$((n + 1))
 if grep -q 'setMinHeight(dp(52))' "$source" && grep -q 'WindowInsets.Type.systemBars' "$source" && \
    grep -q 'ACCESSIBILITY_LIVE_REGION_POLITE' "$source" && grep -q 'IMPORTANT_FOR_ACCESSIBILITY_NO' "$source" && \
    grep -q 'app_text_secondary' "$APP/res/values-night/colors.xml" && [ -f "$APP/res/values-night/styles.xml" ] && \
-   ! grep -q 'screenOrientation' "$APP/AndroidManifest.xml"; then
+   ! grep -q 'screenOrientation' "$APP/AndroidManifest.xml" && grep -q 'configChanges="orientation|screenSize|smallestScreenSize|keyboardHidden"' "$APP/AndroidManifest.xml" && \
+   grep -q 'window.setBackgroundDrawable(round(surface, 28))' "$source"; then
     ok "$n" "growing 48dp+ controls, insets, accessibility semantics, rotation and dark theme"
 else
     bad "$n" "native UI floor"
