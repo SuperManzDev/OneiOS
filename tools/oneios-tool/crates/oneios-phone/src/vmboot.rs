@@ -964,6 +964,8 @@ pub struct Options {
     pub wifictl: String,
     /// bridgectl for the phone (runtime/bridges: make), pushed for an Image with the bridge channel (xnuloader-crosvm --bridge)
     pub bridgectl: String,
+    /// Push the Image, helpers and scripts but do not start the VM; a reviewed on-phone launcher may start boot.sh later.
+    pub stage_only: bool,
     /// false (--no-haptics): the bridge channel serves the battery alone
     pub haptics: bool,
     /// true (--native-haptics): strict AIDL native preset backend, no evdev fallback; guest Image also needs oneios_native_impacts=1
@@ -1039,23 +1041,27 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
     if !up.trim().is_empty() {
         bail!("a VM of ours is still up on the phone: {}", up.trim());
     }
-    let meminfo = adb.root_ok(
-        "grep '^MemAvailable:' /proc/meminfo; grep '^pool_avail=' /sys/module/gh_hugepage_reserve/parameters/refill_stat 2>/dev/null\n",
-        "the memory check",
-    )?;
-    let available = crate::vmprobe::mem_available_mib(&meminfo).with_context(|| format!("no MemAvailable in \"{}\"", meminfo.trim()))?;
-    let pool_mib = crate::hugepool::stat(&meminfo, "pool_avail").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) * 2;
-    crate::vmprobe::check_mem(l.ram, available + pool_mib.min(l.ram as u64))?;
-    // A takeover tops the pool up itself once One UI is down (takeover_script); beside One UI it must hold the VM already
-    match check_pool(l.ram as u64, pool_mib, l.shared) {
-        Err(e) if o.takeover => println!("vm-boot: {e:#}\nvm-boot: the takeover tops the pool up while One UI is down, and stops if it cannot"),
-        r => r?,
+    if !o.stage_only {
+        let meminfo = adb.root_ok(
+            "grep '^MemAvailable:' /proc/meminfo; grep '^pool_avail=' /sys/module/gh_hugepage_reserve/parameters/refill_stat 2>/dev/null\n",
+            "the memory check",
+        )?;
+        let available = crate::vmprobe::mem_available_mib(&meminfo).with_context(|| format!("no MemAvailable in \"{}\"", meminfo.trim()))?;
+        let pool_mib = crate::hugepool::stat(&meminfo, "pool_avail").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) * 2;
+        crate::vmprobe::check_mem(l.ram, available + pool_mib.min(l.ram as u64))?;
+        // A takeover tops the pool up itself once One UI is down (takeover_script); beside One UI it must hold the VM already
+        match check_pool(l.ram as u64, pool_mib, l.shared) {
+            Err(e) if o.takeover => println!("vm-boot: {e:#}\nvm-boot: the takeover tops the pool up while One UI is down, and stops if it cannot"),
+            r => r?,
+        }
+        if l.shared {
+            let dev = adb.root_ok(&format!("[ -c {} ] && echo there || echo absent\n", crate::hostshare::DEV), "gunyah_share")?;
+            if !dev.contains("there") {
+                bail!("a shared-RAM Image and no {} on the phone: `phone hostshare load` first", crate::hostshare::DEV);
+            }
+        }
     }
     if l.shared {
-        let dev = adb.root_ok(&format!("[ -c {} ] && echo there || echo absent\n", crate::hostshare::DEV), "gunyah_share")?;
-        if !dev.contains("there") {
-            bail!("a shared-RAM Image and no {} on the phone: `phone hostshare load` first", crate::hostshare::DEV);
-        }
         let c = crate::droidvm::push(adb, &o.droidvm)?;
         println!("vm-boot: a shared-RAM Image: Droid-VM's crosvm ({c}), --protected-vm-pseudo-unprotected");
     }
@@ -1138,6 +1144,11 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
              --stop, its seconds, or any end of the script); its failsafe starts it after {} s whatever happens",
             o.seconds + 300
         );
+    }
+    adb.root_ok(&format!("chown root:root {DIR}/boot.sh {DIR}/kernel.img && chmod 700 {DIR}/boot.sh && chmod 600 {DIR}/kernel.img\n"), "the staged launcher")?;
+    if o.stage_only {
+        println!("vm-boot: staged only: {DIR}/kernel.img, boot.sh, ui.sh and helpers; no VM started and One UI was not stopped");
+        return Ok(());
     }
     let r = adb.root(&crate::adb::detached_start(&format!("{DIR}/boot.sh")))?;
     if !r.out.contains("started") {
@@ -1508,6 +1519,25 @@ mod tests {
         }
         assert!(u.contains("D=/data/local/tmp/oneios-vmboot\nSELF=$D/ui.sh\nCTL=$D/ui-ctl\n") && u.contains("LIMIT=3900\n"));
         assert!(u.contains("start_ui() {") && u.contains("--failsafe)") && !u.contains("$D/result") && u.contains("oneios-vmboot-failsafe"));
+    }
+
+    #[test]
+    fn stage_only_pushes_a_launcher_without_starting_it() {
+        let d = parse_disks(&format!("{SCREEN}input touch\ngpu 00:0c.0 8 0x15f800000\nscanout 1080 2340 120\naudio\nwifi\nbridge\n")).unwrap();
+        let l = Label { ram: 4096, cpus: 6, swiotlb: 32, shared: true, gpu: true };
+        let s = boot_script_with(&l, 900, true, "ab12", Some(&d), false, true,
+                                 &Tuning { takeover: true, pin_first: 2, thermal_log: true, ..Tuning::DEFAULT });
+        assert!(s.contains("--mem size=4096") && s.contains("--cpu-affinity 0=2:1=3:2=4:3=5:4=6:5=7"));
+        assert!(s.contains("--android-display-service name=oneios_disp,screen=gpu-0"));
+        assert!(s.contains("start_ui \"the session ended\"; host_restore"));
+        let options = Options {
+            seconds: 900, thp: true, bridge: "displayctl".into(), swipe_test: false, pin: true,
+            droidvm: "droidvm".into(), gpu_floor_mhz: 0, cpu_floor_percent: 0, takeover: true,
+            pin_first: 2, thermal_log: true, audio_uid: None, wifictl: "wifictl".into(),
+            bridgectl: "bridgectl".into(), stage_only: true, haptics: true, native_haptics: true,
+            brightness: true, brightness_max: Some(2953), bluetooth: true,
+        };
+        assert!(options.stage_only && options.takeover && options.thp && options.native_haptics && options.bluetooth);
     }
 
     #[test]

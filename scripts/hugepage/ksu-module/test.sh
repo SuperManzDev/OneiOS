@@ -34,7 +34,7 @@ else
 fi
 n=$((n + 1))
 
-if grep -q 'echo "automatic boot action: none"' "$HERE/oneios-native" && grep -q '^    prepare|release)' "$HERE/oneios-native" && \
+if grep -q 'echo "automatic boot action: none"' "$HERE/oneios-native" && grep -q '^    prepare|launch|release)' "$HERE/oneios-native" && \
    grep -q 'Android and the screen stay running' "$HERE/oneios-native"; then
     ok "$n" "memory reservation requires the explicit prepare command"
 else
@@ -52,6 +52,15 @@ if grep -q 'TARGET_UNAME' "$HERE/oneios-native" && grep -q 'TARGET_FINGERPRINT' 
     ok "$n" "target, hashes, transactional rollback, ownership, and active-VM release are fail-closed"
 else
     bad "$n" "safety gates are incomplete"
+fi
+n=$((n + 1))
+
+if grep -q 'memory is not prepared' "$HERE/oneios-native" && grep -q 'LAUNCH_NEED_PAGES' "$HERE/oneios-native" && \
+   grep -q 'staged launcher is incomplete' "$HERE/oneios-native" && grep -q 'screen may be black until iOS posts its first frame' "$HERE/oneios-native" && \
+   grep -q 'volume-down for 10 seconds' "$HERE/oneios-native"; then
+    ok "$n" "phone launch is separately gated and warns about the black-screen handoff"
+else
+    bad "$n" "phone launch gates or recovery warning"
 fi
 n=$((n + 1))
 

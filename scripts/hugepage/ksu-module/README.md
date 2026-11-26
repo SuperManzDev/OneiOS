@@ -10,12 +10,15 @@ The only state-changing commands are explicit root commands:
 
 ```sh
 oneios-native prepare 4096  # load the modules and try to reserve the 2 MiB pages
+oneios-native launch        # start the staged phone-resident VM after a separate warning
 oneios-native release       # unload them only when no VM/parcel is active
 ```
 
-`app/` builds the small **OneiOS Memory** control APK. Its launcher screen shows module status and the same Prepare/Release actions. The pinned **Prepare VM memory** home shortcut opens the app's confirmation dialog; it never reserves memory directly. KernelSU root must be granted to `dev.oneios.nativeprep` by the owner.
+`app/` builds the small **OneiOS Memory** control APK. Its launcher screen shows status plus Prepare, Launch and Release. The pinned **Launch OneiOS** home shortcut opens a warning/confirmation dialog; it never starts the VM directly. KernelSU root must be granted to `dev.oneios.nativeprep` by the owner.
 
-`prepare` leaves One UI and the screen running. It uses one bounded mode-1 acquire and fails closed if the pool remains short. A new preparation is transactional: any module or reserved pool it loaded is removed on failure; if cleanup itself cannot complete, status is marked partial and the app requires Release before another attempt. It never starts crosvm; VM launch stays a separate PC/user action. It does not lower the module's host-memory reserve.
+`prepare` leaves One UI and the screen running. It uses one bounded mode-1 acquire and fails closed if the pool remains short. A new preparation is transactional: any module or reserved pool it loaded is removed on failure; if cleanup itself cannot complete, status is marked partial and the app requires Release before another attempt. It does not lower the module's host-memory reserve.
+
+A separately confirmed `launch` action starts the VM payload already staged on the phone. The iOS disks, writable Data store, crosvm, kernel Image, helpers and recovery scripts all live on the phone after `oneios-tool phone vm-boot --stage-only`; the PC is not required for that launch. Launch stops One UI, so the panel can be black until iOS posts its first frame. The confirmation names that transition, the 10-second Volume Down escape and the 15-minute recovery timer.
 
 The package is bound to the model, device, exact kernel release, Android build fingerprint, module hashes, and reviewed private `struct gunyah_vm` offsets recorded in `target.conf`. Any mismatch is refused before `insmod`.
 

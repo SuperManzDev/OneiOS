@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">OneiOS Memory</string>
-    <string name="shortcut_prepare">Prepare VM memory</string>
+    <string name="shortcut_prepare">Launch OneiOS</string>
 </resources>

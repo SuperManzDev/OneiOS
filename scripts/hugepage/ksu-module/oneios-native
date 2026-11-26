@@ -9,6 +9,7 @@ BIN=$MODDIR/bin
 LOCK=/data/local/tmp/oneios-native-on-demand.lock
 OWNED=$MODDIR/state/owned
 P=/sys/module/gh_hugepage_reserve/parameters
+VM_DIR=/data/local/tmp/oneios-vmboot
 
 PREPARE_NEW=0
 say() { echo "oneios-native: $*"; }
@@ -78,6 +79,11 @@ status() {
         echo "ownership: ${state:-unknown} (loaded by this command)"
     else
         echo "ownership: no command marker"
+    fi
+    if [ -f "$VM_DIR/kernel.img" ] && [ -f "$VM_DIR/boot.sh" ]; then
+        echo "launcher: staged on phone"
+    else
+        echo "launcher: not staged; use oneios-tool phone vm-boot --stage-only"
     fi
     echo "automatic boot action: none"
 }
@@ -180,6 +186,37 @@ prepare() {
     say "ready for a ${ram} MiB VM; nothing starts until the separate vm-boot command"
 }
 
+launch_vm() {
+    check_target
+    [ -f "$OWNED" ] && grep -q '^state=ready$' "$OWNED" || die "memory is not prepared; run prepare $LAUNCH_RAM_MIB first"
+    for name in gh_hugepage_reserve gunyah_host_share udmabuf_gki_6.6 gunyah_halt_poll_gki_6.6; do
+        loaded "$name" || die "$name is not loaded; refresh status and prepare again"
+    done
+    active=$(param active_vms)
+    [ "${active:-0}" = 0 ] || die "$active VM(s) already active"
+    avail=$(param pool_avail)
+    case "$avail" in ''|*[!0-9]*) die "pool availability is unreadable" ;; esac
+    [ "$avail" -ge "$LAUNCH_NEED_PAGES" ] || die "pool has $avail/$LAUNCH_NEED_PAGES pages for the staged ${LAUNCH_RAM_MIB} MiB VM"
+    for file in kernel.img boot.sh ui.sh displayctl oneios-display liboneios-display.so oneios-display.dex bridgectl wifictl; do
+        [ -e "$VM_DIR/$file" ] || die "staged launcher is incomplete: missing $VM_DIR/$file; stage it from the computer first"
+    done
+    ps -A -o ARGS= 2>/dev/null | grep -F "$VM_DIR/kernel.img" | grep -v grep >/dev/null && die "a OneiOS crosvm is already running"
+    rm -f "$VM_DIR/result" "$VM_DIR/stop.request"
+    say "launching the staged VM from the phone; One UI and this app will stop, so the screen may be black until iOS posts its first frame"
+    if command -v setsid >/dev/null 2>&1; then
+        setsid /system/bin/sh "$VM_DIR/boot.sh" </dev/null >/dev/null 2>&1 &
+    else
+        /system/bin/sh "$VM_DIR/boot.sh" </dev/null >/dev/null 2>&1 &
+    fi
+    launcher=$!
+    sleep 2
+    if ! kill -0 "$launcher" 2>/dev/null; then
+        result=$(cat "$VM_DIR/result" 2>/dev/null)
+        die "phone launcher ended before takeover${result:+: $result}"
+    fi
+    say "launch handed to the phone recovery script (pid $launcher); volume-down for 10 seconds or the 15-minute timer returns to One UI"
+}
+
 release_all() {
     check_target
     if any_loaded && [ ! -f "$OWNED" ]; then
@@ -218,11 +255,13 @@ usage() {
     cat <<'EOF'
 usage: oneios-native status
        oneios-native prepare [RAM_MIB]
+       oneios-native launch
        oneios-native release
 
-Nothing runs at boot. `prepare` is the only command that reserves memory. It never stops zygote,
-system_server, SurfaceFlinger, the panel, or touch, and it never launches a VM. `release` is refused
-while a VM or shared parcel is active. The KernelSU Manager action button runs read-only `status`.
+Nothing runs at boot. `prepare` is the only command that reserves memory and keeps One UI running.
+`launch` is a separate explicit action: it starts the staged phone-resident VM, stops One UI through the
+reviewed takeover script, and may leave the panel black until iOS posts a frame. The takeover has a timer,
+volume-down escape, and One UI recovery. `release` is refused while a VM or shared parcel is active.
 EOF
 }
 
@@ -238,12 +277,16 @@ interrupted() {
 command=${1:-status}
 case "$command" in
     status) status ;;
-    prepare|release)
+    prepare|launch|release)
         full_root
         mkdir "$LOCK" 2>/dev/null || die "another command holds $LOCK"
         trap cleanup_lock EXIT
         trap interrupted HUP INT TERM
-        if [ "$command" = prepare ]; then prepare "${2:-4096}"; else release_all; fi
+        case "$command" in
+            prepare) prepare "${2:-4096}" ;;
+            launch) launch_vm ;;
+            release) release_all ;;
+        esac
         ;;
     help|-h|--help) usage ;;
     *) usage; exit 2 ;;

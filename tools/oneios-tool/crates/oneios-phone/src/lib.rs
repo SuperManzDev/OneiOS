@@ -173,6 +173,9 @@ pub enum Command {
         /// Stop the running VM now (crosvm stop through its socket) instead
         #[arg(long)]
         stop: bool,
+        /// Push the Image, helpers and recovery scripts to the phone but do not start the VM or stop One UI
+        #[arg(long, conflicts_with = "stop")]
+        stage_only: bool,
         /// The screen's bridge, for an Image made with --display (runtime/display: make)
         #[arg(long, value_name = "FILE", default_value = "runtime/display/build/android/displayctl")]
         bridge: String,
@@ -578,8 +581,8 @@ pub fn main(cli: Cli) -> i32 {
             HaltpollCommand::Load { ko, out } => haltpoll::load(&adb, &ko, &out),
             HaltpollCommand::Unload => haltpoll::unload(&adb),
         }),
-        Command::VmBoot { image, seconds, thp, out, stop, bridge, swipe_test, pin, droidvm, gpu_floor, cpu_floor, takeover, pin_first, thermal_log, audio_uid, wifictl, bridgectl, no_haptics, native_haptics, brightness, brightness_max, bluetooth } => Adb::connect(serial).and_then(|adb| {
-            if stop { vmboot::stop(&adb) } else { vmboot::vm_boot(&adb, &image, &out, &vmboot::Options { seconds, thp, bridge, swipe_test, pin, droidvm, gpu_floor_mhz: gpu_floor, cpu_floor_percent: cpu_floor, takeover, pin_first, thermal_log, audio_uid, wifictl, bridgectl, haptics: !no_haptics, native_haptics, brightness, brightness_max, bluetooth }) }
+        Command::VmBoot { image, seconds, thp, out, stop, stage_only, bridge, swipe_test, pin, droidvm, gpu_floor, cpu_floor, takeover, pin_first, thermal_log, audio_uid, wifictl, bridgectl, no_haptics, native_haptics, brightness, brightness_max, bluetooth } => Adb::connect(serial).and_then(|adb| {
+            if stop { vmboot::stop(&adb) } else { vmboot::vm_boot(&adb, &image, &out, &vmboot::Options { seconds, thp, bridge, swipe_test, pin, droidvm, gpu_floor_mhz: gpu_floor, cpu_floor_percent: cpu_floor, takeover, pin_first, thermal_log, audio_uid, wifictl, bridgectl, stage_only, haptics: !no_haptics, native_haptics, brightness, brightness_max, bluetooth }) }
         }),
         Command::VmProbe { payload, mem, timeout, out, thp, droidvm, shared_ram, thp_shmem } => Adb::connect(serial).and_then(|adb| {
             let crosvm = match droidvm.as_deref() {

@@ -44,6 +44,7 @@ quote() { printf '%s' "$1" | sed "s/'/'\\\\''/g"; }
     printf "TARGET_FINGERPRINT='%s'\n" "$(quote "$fingerprint")"
     printf "PAGEBLOCK_ORDER='9'\nMIGRATE_CMA='-1'\nDISABLE_KAPI='kallsyms_lookup_name'\n"
     printf "VMID_OFF='0'\nRM_OFF='504'\nVM_STATUS_OFF='536'\n"
+    printf "LAUNCH_RAM_MIB='4096'\nLAUNCH_NEED_PAGES='2032'\n"
     printf "SHA_HUGEPAGE='%s'\n" "$(sha256sum "$stage/bin/gh_hugepage_reserve.ko" | cut -d' ' -f1)"
     printf "SHA_HOSTSHARE='%s'\n" "$(sha256sum "$stage/bin/gunyah_host_share.ko" | cut -d' ' -f1)"
     printf "SHA_UDMABUF='%s'\n" "$(sha256sum "$stage/bin/udmabuf_gki.ko" | cut -d' ' -f1)"

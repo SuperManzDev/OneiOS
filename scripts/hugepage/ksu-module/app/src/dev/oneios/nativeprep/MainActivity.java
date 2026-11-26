@@ -34,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 
 public final class MainActivity extends Activity {
     private static final String ACTION_PREPARE = "dev.oneios.nativeprep.PREPARE";
+    private static final String ACTION_LAUNCH = "dev.oneios.nativeprep.LAUNCH";
     private static final String ACTION_PIN = "dev.oneios.nativeprep.PIN";
     private static final String MODULE_COMMAND = "/data/adb/modules/oneios_native_on_demand/system/bin/oneios-native";
     private static final String COMMAND_PICKER =
@@ -45,6 +46,7 @@ public final class MainActivity extends Activity {
     private TextView statusText;
     private TextView stateLabel;
     private Button prepareButton;
+    private Button launchButton;
     private Button releaseButton;
     private Button refreshButton;
     private Button shortcutButton;
@@ -58,6 +60,7 @@ public final class MainActivity extends Activity {
     private int success;
     private int warning;
     private int error;
+    private boolean readyForLaunch;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -79,6 +82,8 @@ public final class MainActivity extends Activity {
         runCommand("status", "Checking host support…");
         if (ACTION_PREPARE.equals(getIntent().getAction())) {
             statusText.postDelayed(this::confirmPrepare, 350);
+        } else if (ACTION_LAUNCH.equals(getIntent().getAction())) {
+            statusText.postDelayed(this::confirmLaunch, 350);
         } else if (ACTION_PIN.equals(getIntent().getAction())) {
             statusText.postDelayed(this::requestShortcut, 350);
         }
@@ -145,9 +150,15 @@ public final class MainActivity extends Activity {
         actionCopy.setLineSpacing(0, 1.16f);
         root.addView(actionCopy, topMargin(matchWrap(), 8));
 
-        prepareButton = button("Prepare 4 GiB", true);
+        prepareButton = button("Prepare 4 GiB", false);
         prepareButton.setOnClickListener(v -> confirmPrepare());
         root.addView(prepareButton, topMargin(match(), 18));
+
+        launchButton = button("Launch OneiOS", true);
+        launchButton.setEnabled(false);
+        launchButton.setAlpha(0.55f);
+        launchButton.setOnClickListener(v -> confirmLaunch());
+        root.addView(launchButton, topMargin(match(), 10));
 
         releaseButton = button("Release reserved memory", false);
         releaseButton.setOnClickListener(v -> confirmRelease());
@@ -162,14 +173,14 @@ public final class MainActivity extends Activity {
         safety.setBackground(outlined(surface, outline, 14));
         TextView safetyTitle = text("Screen-safe by design", 16, Typeface.BOLD, text);
         TextView safetyCopy = text(
-                "No startup service, framework stop, display command, reboot, or automatic VM launch is installed. Module and kernel mismatches are refused before loading.",
+                "No startup service or automatic VM launch is installed. Prepare keeps One UI running. Launch is separate, warned, and protected by the phone recovery script.",
                 14, Typeface.NORMAL, secondary);
         safetyCopy.setLineSpacing(0, 1.14f);
         safety.addView(safetyTitle);
         safety.addView(safetyCopy, topMargin(matchWrap(), 7));
         root.addView(safety, topMargin(matchWrap(), 24));
 
-        shortcutButton = button("Add Prepare shortcut to Home", false);
+        shortcutButton = button("Add Launch shortcut to Home", false);
         shortcutButton.setOnClickListener(v -> requestShortcut());
         root.addView(shortcutButton, topMargin(match(), 16));
 
@@ -185,6 +196,14 @@ public final class MainActivity extends Activity {
                 "This loads the reviewed support modules and requests 2,032 huge pages. The screen and One UI stay running. No VM starts. Continue?",
                 "Prepare",
                 () -> runCommand("prepare 4096", "Preparing 4 GiB pool…"));
+    }
+
+    private void confirmLaunch() {
+        showConfirmation(
+                "Launch OneiOS now?",
+                "The VM image and disks are stored on this phone, so a computer is not required after staging. One UI will stop and the screen may go black until iOS posts its first frame. Hold Volume Down for 10 seconds to return, or wait for the 15-minute automatic recovery. Continue?",
+                "Launch OneiOS",
+                () -> runCommand("launch", "Handing the display to OneiOS…"));
     }
 
     private void confirmRelease() {
@@ -267,6 +286,7 @@ public final class MainActivity extends Activity {
     }
 
     private void applyResult(String args, int result, boolean timedOut, String message) {
+        readyForLaunch = false;
         String shown = message;
         String state;
         int color;
@@ -282,20 +302,28 @@ public final class MainActivity extends Activity {
                     message.contains("ownership: ready");
             boolean partial = message.contains("ownership: partial") || message.contains("ownership: loading");
             if (ready) {
-                state = "Prepared";
-                color = success;
+                readyForLaunch = message.contains("launcher: staged on phone");
+                state = readyForLaunch ? "Prepared — ready to launch" : "Prepared — launcher not staged";
+                color = readyForLaunch ? success : warning;
             } else if (partial || !none) {
+                readyForLaunch = false;
                 state = "Partially prepared — release required";
                 color = error;
                 shown += "\n\nTap Release reserved memory before another Prepare attempt.";
             } else {
+                readyForLaunch = false;
                 state = "Not prepared";
                 color = warning;
             }
         } else if (result == 0 && args.startsWith("prepare") && message.contains("ready for a")) {
-            state = "Ready for VM";
+            readyForLaunch = message.contains("launcher: staged on phone");
+            state = readyForLaunch ? "Ready for VM" : "Memory ready — stage launcher from computer";
+            color = readyForLaunch ? success : warning;
+        } else if (result == 0 && args.equals("launch")) {
+            state = "Launching OneiOS";
             color = success;
         } else if (result == 0 && args.equals("release")) {
+            readyForLaunch = false;
             state = "Released";
             color = success;
         } else if (message.contains("Cannot run program \"su\"") || message.contains("Unable to start KernelSU") ||
@@ -336,11 +364,11 @@ public final class MainActivity extends Activity {
             return;
         }
         Intent intent = new Intent(this, MainActivity.class)
-                .setAction(ACTION_PREPARE)
+                .setAction(ACTION_LAUNCH)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         ShortcutInfo shortcut = new ShortcutInfo.Builder(this, "prepare_vm_memory")
                 .setShortLabel(getString(R.string.shortcut_prepare))
-                .setLongLabel("Prepare OneiOS VM memory")
+                .setLongLabel("Launch OneiOS from this phone")
                 .setIcon(Icon.createWithResource(this, R.drawable.ic_shortcut_prepare))
                 .setIntent(intent)
                 .build();
@@ -356,11 +384,13 @@ public final class MainActivity extends Activity {
 
     private void setBusy(boolean busy) {
         prepareButton.setEnabled(!busy);
+        launchButton.setEnabled(!busy && readyForLaunch);
         releaseButton.setEnabled(!busy);
         refreshButton.setEnabled(!busy);
         shortcutButton.setEnabled(!busy);
         float alpha = busy ? 0.55f : 1f;
         prepareButton.setAlpha(alpha);
+        launchButton.setAlpha(!busy && readyForLaunch ? 1f : 0.55f);
         releaseButton.setAlpha(alpha);
         refreshButton.setAlpha(alpha);
         shortcutButton.setAlpha(alpha);

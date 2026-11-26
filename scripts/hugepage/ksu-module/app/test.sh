@@ -25,15 +25,17 @@ n=$((n + 1))
 if unzip -Z1 "$APK" | grep -qx classes.dex && unzip -Z1 "$APK" | grep -q 'res/'; then ok "$n" "DEX and resources packaged"; else bad "$n" "APK contents"; fi
 n=$((n + 1))
 source=$APP/src/dev/oneios/nativeprep/MainActivity.java
-if grep -q 'showConfirmation(' "$source" && grep -q '"Prepare"' "$source" && grep -q 'ACTION_PREPARE.equals.*getIntent' "$source" && \
-   grep -q 'postDelayed(this::confirmPrepare' "$source" && ! grep -q 'postDelayed.*runCommand' "$source"; then
-    ok "$n" "home shortcut opens confirmation, never automatic preparation"
+if grep -q 'showConfirmation(' "$source" && grep -q 'ACTION_LAUNCH.equals.*getIntent' "$source" && \
+   grep -q 'postDelayed(this::confirmLaunch' "$source" && grep -q 'screen may go black until iOS posts its first frame' "$source" && \
+   grep -q 'Volume Down for 10 seconds' "$source" && ! grep -q 'postDelayed.*runCommand' "$source"; then
+    ok "$n" "home shortcut opens the black-screen/recovery confirmation, never an automatic launch"
 else
-    bad "$n" "prepare confirmation gate"
+    bad "$n" "launch confirmation gate"
 fi
 n=$((n + 1))
 if grep -q 'isRequestPinShortcutSupported' "$source" && grep -q 'requestPinShortcut' "$source" && grep -q 'prepare_vm_memory' "$source" && \
-   grep -q 'R.drawable.ic_shortcut_prepare' "$source" && [ -f "$APP/res/drawable/ic_shortcut_prepare.xml" ]; then
+   grep -q 'setAction(ACTION_LAUNCH)' "$source" && grep -q 'R.drawable.ic_shortcut_prepare' "$source" && \
+   grep -q '>Launch OneiOS<' "$APP/res/values/strings.xml" && [ -f "$APP/res/drawable/ic_shortcut_prepare.xml" ]; then
     ok "$n" "pinned home-screen shortcut"
 else
     bad "$n" "shortcut API"
@@ -60,7 +62,8 @@ n=$((n + 1))
 if grep -q 'waitFor(150, TimeUnit.SECONDS)' "$source" && grep -q 'timeout -s TERM -k 5 140' "$source" && \
    grep -q 'Current status after timeout' "$source" && grep -q 'Root access required' "$source" && \
    grep -q 'permission denied' "$source" && grep -q 'Partially prepared — release required' "$source" && \
-   grep -q 'Not prepared' "$source" && grep -q 'Ready for VM' "$source"; then
+   grep -q 'Not prepared' "$source" && grep -q 'Ready for VM' "$source" && grep -q 'Prepared — ready to launch' "$source" && \
+   grep -q 'Memory ready — stage launcher from computer' "$source" && grep -q 'Launching OneiOS' "$source"; then
     ok "$n" "bounded root process and explicit readiness/error states"
 else
     bad "$n" "root timeout or state model"
