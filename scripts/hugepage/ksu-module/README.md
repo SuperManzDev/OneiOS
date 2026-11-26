@@ -13,6 +13,8 @@ oneios-native prepare 4096  # load the modules and try to reserve the 2 MiB page
 oneios-native release       # unload them only when no VM/parcel is active
 ```
 
+`app/` builds the small **OneiOS Memory** control APK. Its launcher screen shows module status and the same Prepare/Release actions. The pinned **Prepare VM memory** home shortcut opens the app's confirmation dialog; it never reserves memory directly. KernelSU root must be granted to `dev.oneios.nativeprep` by the owner.
+
 `prepare` leaves One UI and the screen running. It uses one bounded mode-1 acquire and fails closed if the pool remains short. It never starts crosvm; VM launch stays a separate PC/user action. It does not lower the module's host-memory reserve.
 
 The package is bound to the model, device, exact kernel release, Android build fingerprint, module hashes, and reviewed private `struct gunyah_vm` offsets recorded in `target.conf`. Any mismatch is refused before `insmod`.
@@ -28,6 +30,7 @@ With the reviewed `.ko` outputs already built and the target phone connected rea
 ```sh
 scripts/hugepage/ksu-module/build-module.sh
 scripts/hugepage/ksu-module/test.sh
+scripts/hugepage/ksu-module/app/test.sh
 ```
 
 The ZIP is written under `out/ksu-module/`. Installation and any reboot require separate owner approval.
