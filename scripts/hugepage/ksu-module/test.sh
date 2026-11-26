@@ -46,7 +46,9 @@ if grep -q 'TARGET_UNAME' "$HERE/oneios-native" && grep -q 'TARGET_FINGERPRINT' 
    grep -q 'module hash differs' "$HERE/oneios-native" && grep -q 'active_vms' "$HERE/oneios-native" && \
    grep -q 'refusing to unload modules another tool installed' "$HERE/oneios-native" && \
    grep -q 'rollback complete: no OneiOS support module remains loaded' "$HERE/oneios-native" && \
-   grep -q 'PARTIAL: rollback could not unload every module' "$HERE/oneios-native"; then
+   grep -q 'PARTIAL: rollback could not unload every module' "$HERE/oneios-native" && \
+   grep -q 'ownership is preserved as partial' "$HERE/oneios-native" && \
+   grep -q 'interrupted: cleaning up before exit' "$HERE/oneios-native"; then
     ok "$n" "target, hashes, transactional rollback, ownership, and active-VM release are fail-closed"
 else
     bad "$n" "safety gates are incomplete"

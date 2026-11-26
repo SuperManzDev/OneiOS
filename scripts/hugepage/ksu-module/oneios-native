@@ -193,12 +193,24 @@ release_all() {
         outstanding=$(cat /sys/module/gunyah_host_share/parameters/outstanding 2>/dev/null)
         case "$outstanding" in *'total=0'*) ;; *) die "host-share still has outstanding parcels: ${outstanding:-unreadable}" ;; esac
     fi
-    loaded gunyah_halt_poll_gki_6.6 && rmmod gunyah_halt_poll_gki_6.6
-    loaded udmabuf_gki_6.6 && rmmod udmabuf_gki_6.6
-    loaded gunyah_host_share && rmmod gunyah_host_share
-    loaded gh_hugepage_reserve && rmmod gh_hugepage_reserve
+    failed=0
+    if loaded gunyah_halt_poll_gki_6.6; then rmmod gunyah_halt_poll_gki_6.6 || failed=1; fi
+    if loaded udmabuf_gki_6.6; then rmmod udmabuf_gki_6.6 || failed=1; fi
+    if loaded gunyah_host_share; then rmmod gunyah_host_share || failed=1; fi
+    if loaded gh_hugepage_reserve; then rmmod gh_hugepage_reserve || failed=1; fi
+    any_loaded && failed=1
+    if [ "$failed" != 0 ]; then
+        mkdir -p "$MODDIR/state"
+        {
+            echo "kernel=$TARGET_UNAME"
+            echo "fingerprint=$TARGET_FINGERPRINT"
+            echo "state=partial"
+        } > "$OWNED"
+        status
+        die "one or more modules could not be unloaded; ownership is preserved as partial. Resolve the named module before another prepare"
+    fi
     rm -f "$OWNED"
-    say "released; Android and the display were not restarted or stopped"
+    say "released; verified that no OneiOS support module remains loaded; Android and the display were not restarted or stopped"
     status
 }
 
@@ -214,13 +226,23 @@ while a VM or shared parcel is active. The KernelSU Manager action button runs r
 EOF
 }
 
+cleanup_lock() { rmdir "$LOCK" 2>/dev/null || true; }
+interrupted() {
+    trap - HUP INT TERM
+    say "interrupted: cleaning up before exit"
+    [ "$PREPARE_NEW" = 1 ] && rollback_new_prepare
+    cleanup_lock
+    exit 130
+}
+
 command=${1:-status}
 case "$command" in
     status) status ;;
     prepare|release)
         full_root
         mkdir "$LOCK" 2>/dev/null || die "another command holds $LOCK"
-        trap 'rmdir "$LOCK" 2>/dev/null' EXIT HUP INT TERM
+        trap cleanup_lock EXIT
+        trap interrupted HUP INT TERM
         if [ "$command" = prepare ]; then prepare "${2:-4096}"; else release_all; fi
         ;;
     help|-h|--help) usage ;;

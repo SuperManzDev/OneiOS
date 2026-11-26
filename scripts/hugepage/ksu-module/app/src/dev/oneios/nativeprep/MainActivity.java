@@ -36,7 +36,7 @@ public final class MainActivity extends Activity {
     private static final String COMMAND_PICKER =
             "if [ -x /system/bin/oneios-native ]; then C=/system/bin/oneios-native; " +
             "elif [ -r " + MODULE_COMMAND + " ]; then C='/system/bin/sh " + MODULE_COMMAND + "'; " +
-            "else echo 'OneiOS KernelSU module is not installed yet.'; exit 127; fi; exec $C ";
+            "else echo 'OneiOS KernelSU module is not installed yet.'; exit 127; fi; exec timeout -s TERM -k 5 140 $C ";
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private TextView statusText;
@@ -222,8 +222,24 @@ public final class MainActivity extends Activity {
                 output.append("Unable to start KernelSU root command.\n");
                 output.append(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()).append('\n');
             }
+            boolean commandTimedOut = timedOut || code == 124;
+            if (commandTimedOut) {
+                output.append("\nCurrent status after timeout:\n");
+                try {
+                    Process status = new ProcessBuilder("su", "-c", COMMAND_PICKER + "status")
+                            .redirectErrorStream(true)
+                            .start();
+                    if (!status.waitFor(12, TimeUnit.SECONDS)) status.destroyForcibly();
+                    try (BufferedReader reader = new BufferedReader(new InputStreamReader(status.getInputStream()))) {
+                        String line;
+                        while ((line = reader.readLine()) != null) output.append(line).append('\n');
+                    }
+                } catch (Exception e) {
+                    output.append("Status refresh failed; reopen the app before another action.\n");
+                }
+            }
             final int result = code;
-            final boolean didTimeOut = timedOut;
+            final boolean didTimeOut = commandTimedOut;
             final String message = output.length() == 0 ? "No output returned." : output.toString().trim();
             runOnUiThread(() -> applyResult(args, result, didTimeOut, message));
         });
@@ -261,7 +277,9 @@ public final class MainActivity extends Activity {
         } else if (result == 0 && args.equals("release")) {
             state = "Released";
             color = success;
-        } else if (message.contains("Cannot run program \"su\"") || message.contains("Unable to start KernelSU")) {
+        } else if (message.contains("Cannot run program \"su\"") || message.contains("Unable to start KernelSU") ||
+                message.toLowerCase().contains("permission denied") || message.toLowerCase().contains("access denied") ||
+                message.toLowerCase().contains("not allowed") || message.toLowerCase().contains("root denied")) {
             state = "Root access required";
             color = error;
             shown = "Open KernelSU Manager and grant root to OneiOS Memory, then return and tap Refresh status.\n\n" + message;

@@ -56,9 +56,10 @@ else
 fi
 n=$((n + 1))
 
-if grep -q 'waitFor(150, TimeUnit.SECONDS)' "$source" && grep -q 'Root access required' "$source" && \
-   grep -q 'Partially prepared — release required' "$source" && grep -q 'Not prepared' "$source" && \
-   grep -q 'Ready for VM' "$source"; then
+if grep -q 'waitFor(150, TimeUnit.SECONDS)' "$source" && grep -q 'timeout -s TERM -k 5 140' "$source" && \
+   grep -q 'Current status after timeout' "$source" && grep -q 'Root access required' "$source" && \
+   grep -q 'permission denied' "$source" && grep -q 'Partially prepared — release required' "$source" && \
+   grep -q 'Not prepared' "$source" && grep -q 'Ready for VM' "$source"; then
     ok "$n" "bounded root process and explicit readiness/error states"
 else
     bad "$n" "root timeout or state model"
