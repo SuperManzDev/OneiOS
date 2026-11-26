@@ -422,18 +422,31 @@ pub fn ui_script(limit: u32) -> String {
 /// scaling_max_freq; thermal limits are not these) lifted to each cluster's top clock until the end. With One UI down nothing
 /// puts them back, turns the screen off for want of touches or lowers the clocks between them (full3: the profile's 2 GHz
 /// cap came back a minute after it was lifted). Empty without the takeover.
-pub fn takeover_script(takeover: bool, need_pages: u64) -> (String, String) {
+pub fn takeover_script(takeover: bool, need_pages: u64, audio: bool) -> (String, String) {
     if !takeover {
         return (String::new(), String::new());
     }
+    let audio_prepare = if audio {
+        "# AAudio follows Android's host media volume even though iOS applies its own digital gain. Save it, use the\n\
+         # host's full range for the VM, and restore it only after One UI's AudioService is back. Also release any\n\
+         # vibrator request system_server owns before it is stopped. This is shutdown hygiene; Samsung's useful\n\
+         # SemHaptic path still needs a bridge of its own.\n\
+         host_music=$(cmd media_session volume --stream 3 --get 2>/dev/null | awk '/volume is/ { print $4; exit }')\n\
+         case \"$host_music\" in ''|*[!0-9]*) host_music= ;; *) cmd media_session volume --stream 3 --set 15 >/dev/null 2>&1 ;; esac\n\
+         cmd vibrator_manager cancel >/dev/null 2>&1\n"
+    } else {
+        "host_music=\n"
+    };
     let stop = format!(
         "# One UI's framework stopped for the VM's life (vm-boot --takeover): ui.sh, the way back armed first\n\
          gpu_restore() {{ :; }}; cpu_restore() {{ :; }}; caps_restore() {{ :; }}; wifi_restore() {{ :; }}\n\
+         host_restore() {{ [ -n \"$host_music\" ] && cmd media_session volume --stream 3 --set \"$host_music\" >/dev/null 2>&1; host_music=; }}\n\
+         {audio_prepare}\
          . $D/ui.sh\n\
          rm -rf $CTL; mkdir -p $CTL\n\
          for svc in zygote_secondary perfmond media.tuner zygote_next; do getprop init.svc.$svc > $CTL/base.$svc; done\n\
          {}\
-         trap 'thp_restore; gpu_restore; cpu_restore; caps_restore; wifi_restore; start_ui \"the session ended\"' EXIT HUP INT TERM\n\
+         trap 'thp_restore; gpu_restore; cpu_restore; caps_restore; wifi_restore; start_ui \"the session ended\"; host_restore' EXIT HUP INT TERM\n\
          sync\necho 3 > /proc/sys/vm/drop_caches\n\
          echo \"takeover: One UI is down while the VM runs; memory $(mem_line)\"\n\
          need={need_pages}\n\
@@ -479,7 +492,7 @@ pub fn boot_script_with(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Op
     let (cpu_floor, cpu_restore) = cpu_floor_script(t.cpu_floor_percent);
     // the pool pages the VM's RAM takes, the shared-RAM VM's allowance outside it aside (check_pool)
     let need = (u64::from(l.ram).saturating_sub(SMALL_PAGES_MIB_SHARED) + 1) / 2;
-    let (takeover_stop, caps_restore) = takeover_script(t.takeover, need);
+    let (takeover_stop, caps_restore) = takeover_script(t.takeover, need, disks.is_some_and(|d| d.audio));
     let thermal_log = thermal_log_script(t.thermal_log);
     let (mem, cpus, swiotlb) = (l.ram, l.cpus, l.swiotlb);
     // Droid-VM's crosvm and its shared-RAM VM, or AVF's and its protected one with the restricted DMA pool
@@ -1348,7 +1361,7 @@ mod tests {
         assert!(s.contains(" \\\n  ${wifi_mac:+--net tap-name=oneios0,mac=$wifi_mac} \\\n  --block "));
         // given back after crosvm, and by the trap before One UI starts
         assert!(s.find("wait $pid; rc=$?\nthp_restore\nwifi_restore\n").unwrap() > start);
-        assert!(s.contains("caps_restore; wifi_restore; start_ui \"the session ended\"' EXIT HUP INT TERM"));
+        assert!(s.contains("caps_restore; wifi_restore; start_ui \"the session ended\"; host_restore' EXIT HUP INT TERM"));
         assert!(s.contains("wifi_restore() { :; }") && s.find("wifi_restore() { :; }").unwrap() < start);
         // without a takeover One UI keeps wlan0
         let plain = boot_script_with(&l, 3600, true, "ab12", Some(&d), false, true, &Tuning::DEFAULT);
@@ -1430,6 +1443,11 @@ mod tests {
         let l = Label { ram: 2560, cpus: 6, swiotlb: 32, shared: true, gpu: true };
         let s = boot_script_with(&l, 3600, true, "ab12", Some(&d), false, true, &Tuning { takeover: true, ..Tuning::DEFAULT });
         assert!(s.contains(" \\\n  --virtio-snd backend=aaudio,capture=false \\\n  --block "), "in crosvm's process, before the disks");
+        assert!(s.contains("host_music=$(cmd media_session volume --stream 3 --get") &&
+                s.contains("cmd media_session volume --stream 3 --set 15") &&
+                s.contains("cmd vibrator_manager cancel") &&
+                s.contains("start_ui \"the session ended\"; host_restore"),
+                "a takeover uses the full host media range, releases Android's vibrator, and restores the volume after One UI");
         let s = boot_script_with(&l, 3600, true, "ab12", Some(&d), false, true, &Tuning { audio_uid: Some(2000), ..Tuning::DEFAULT });
         assert!(s.contains(" \\\n  --virtio-snd backend=aaudio,capture=false,uid=2000 \\\n"));
         assert!(parse_disks(&format!("{SCREEN}audio 1\n")).is_err());
@@ -1448,7 +1466,7 @@ mod tests {
         assert!(at("trap thp_restore EXIT") < at(". $D/ui.sh"));
         assert!(at(". $D/ui.sh") < at("bg /system/bin/sh $SELF --failsafe"));
         assert!(at("bg /system/bin/sh $SELF --failsafe") < at("setprop ctl.stop zygote"));
-        assert!(at("trap 'thp_restore; gpu_restore; cpu_restore; caps_restore; wifi_restore; start_ui \"the session ended\"' EXIT HUP INT TERM")
+        assert!(at("trap 'thp_restore; gpu_restore; cpu_restore; caps_restore; wifi_restore; start_ui \"the session ended\"; host_restore' EXIT HUP INT TERM")
             > at("setprop ctl.stop zygote"));
         // Samsung's cpufreq_limit lifted with One UI down, before the caps and the floors; put back with the caps
         assert!(at("setprop ctl.stop zygote") < at("echo -1 > $SL"));

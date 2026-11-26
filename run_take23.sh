@@ -5,7 +5,7 @@ ROOT=$(cd "$(dirname "$0")" && pwd)
 cd "$ROOT"
 
 TOOL=tools/oneios-tool/target/release/oneios-tool
-IMAGE=out/crosvm/kernel-take23-fixed-2880.img
+IMAGE=out/crosvm/kernel-take23-fixed.img
 DROIDVM=/mnt/oneios-build/dl/droidvm-prebuilt/f7c6ce8
 
 # Stop only a prior OneiOS vm-boot session. qcrosvm is Android's unrelated trusted VM.
@@ -22,10 +22,9 @@ exec "$TOOL" phone vm-boot \
   --pin-first 2 \
   --thp \
   --thermal-log \
-  --audio-uid 2000 \
   --native-haptics \
   --brightness \
   --brightness-max 2953 \
   --bluetooth \
   --seconds 900 \
-  --out phone-vmboot-take23-fixed-2880
+  --out phone-vmboot-take23-fixed
