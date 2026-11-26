@@ -212,6 +212,12 @@ pub fn bindings(layout: &Value, layout_name: &str, slot_of: &IndexMap<String, us
     let slots = slots(gen::key_list(layout, "slots")?)?;
     let mut functions = Vec::new();
     for name in imports {
+        // Clang may emit a weak authenticated-call slot beside the real undefined method, for example
+        // `l__ZN11IOHIDDevice10conformsToEjj.ptrauth`. It is a linker-local pointer alias, not another IOHIDDevice
+        // function to bind; the corresponding global method below supplies its target.
+        if name.starts_with("l_") && name.ends_with(".ptrauth") {
+            continue;
+        }
         if name == CONSTRUCTOR {
             functions.push((name.clone(), gen::key_hex(gen::key(layout, "constructor")?, "linked")?));
         } else if name == DESTRUCTOR {
