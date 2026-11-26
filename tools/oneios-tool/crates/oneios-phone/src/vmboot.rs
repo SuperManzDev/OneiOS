@@ -112,7 +112,7 @@ pub fn label(image: &[u8]) -> Option<Label> {
 }
 
 /// FILE.disks: the pool crosvm's tree must name, the Data store and crosvm's `--block` values.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Disks {
     pub swiotlb: u32,
     pub pool: u64,
@@ -137,10 +137,12 @@ pub struct Disks {
     pub bridge: bool,
     /// false (vm-boot --no-haptics): `bridgectl serve --no-haptics`, the battery alone
     pub bridge_haptics: bool,
+    /// true (vm-boot --native-haptics): strict AIDL native impact backend, no evdev fallback
+    pub bridge_native_haptics: bool,
 }
 
 /// The GPU's PCI address (crosvm's pci-address=), drm2kgsl's host arena in MiB and where the Image expects it.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Gpu {
     pub pci: String,
     pub drm_mib: u64,
@@ -148,7 +150,7 @@ pub struct Gpu {
 }
 
 /// `fb OFFSET BYTES WIDTH HEIGHT STRIDE SEQ`: offsets in the pool, the frame first, the count's page after it.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Fb {
     pub offset: u64,
     pub bytes: u64,
@@ -214,7 +216,7 @@ pub fn parse_disks(text: &str) -> Result<Disks> {
         }
     }
     let (store, store_gib) = store.context("no store line")?;
-    let d = Disks { swiotlb: swiotlb.context("no swiotlb-mib line")?, pool: pool.context("no pool line")?, store, store_gib, blocks, fb, input, gpu, scanout, audio, wifi, bridge, bridge_haptics: true };
+    let d = Disks { swiotlb: swiotlb.context("no swiotlb-mib line")?, pool: pool.context("no pool line")?, store, store_gib, blocks, fb, input, gpu, scanout, audio, wifi, bridge, bridge_haptics: true, bridge_native_haptics: false };
     if d.scanout.is_some() && (d.gpu.is_none() || d.fb.is_none()) {
         bail!("a scanout without the GPU or the screen: xnuloader-crosvm gives it with --gpu-scanout and --display");
     }
@@ -506,7 +508,16 @@ pub fn boot_script_with(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Op
     // and it ends when crosvm closes the port
     let (serve_start, serve_serial, serve_end) = match disks {
         Some(d) if d.bridge => (
-            BRIDGE_START.replace("{flags}", if d.bridge_haptics { "" } else { " --no-haptics" }),
+            BRIDGE_START
+                .replace("{flags}", if d.bridge_haptics { "" } else { " --no-haptics" })
+                .replace(
+                    "{env}",
+                    if d.bridge_native_haptics {
+                        "ONEIOS_HW_BACKEND_HAPTICS=treble ONEIOS_HW_FALLBACK=0 ONEIOS_HAPTIC_NATIVE_IMPACTS=1 "
+                    } else {
+                        ""
+                    },
+                ),
             "${bsock:+ --serial type=unix-stream,hardware=serial,num=2,path=$bsock,input-unix-stream}",
             BRIDGE_END,
         ),
@@ -818,7 +829,7 @@ pub const BRIDGE_START: &str = r#"# the bridge channel: the phone's battery to i
 bsock=; bridged=
 if [ -x $D/bridgectl ]; then
   rm -f $D/bridge.sock
-  $D/bridgectl serve $D/bridge.sock --wait 120{flags} </dev/null >>$D/bridge.txt 2>&1 &
+  {env}$D/bridgectl serve $D/bridge.sock --wait 120{flags} </dev/null >>$D/bridge.txt 2>&1 &
   bridged=$!
   t=0; while [ $t -lt 50 ] && [ ! -S $D/bridge.sock ] && kill -0 $bridged 2>/dev/null; do sleep 0.1 2>/dev/null || sleep 1; t=$((t + 1)); done
   if [ -S $D/bridge.sock ]; then
@@ -930,6 +941,8 @@ pub struct Options {
     pub bridgectl: String,
     /// false (--no-haptics): the bridge channel serves the battery alone
     pub haptics: bool,
+    /// true (--native-haptics): strict AIDL native preset backend, no evdev fallback; guest Image also needs oneios_native_impacts=1
+    pub native_haptics: bool,
 }
 
 /// `phone vm-boot --stop`: ask the running VM's script to stop it now (crosvm stop through its socket).
@@ -957,6 +970,7 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
     };
     if let Some(d) = disks.as_mut() {
         d.bridge_haptics = o.haptics;
+        d.bridge_native_haptics = o.native_haptics;
     }
     if disks.as_ref().is_some_and(|d| d.bridge) && !Path::new(&o.bridgectl).is_file() {
         bail!("the Image has the bridge channel and {} is not there: runtime/build.sh (or make -C runtime/bridges build/android/bridgectl), or name it with --bridgectl", o.bridgectl);
@@ -1054,7 +1068,13 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
         adb.root_ok(&format!("cd {DIR} && chown root:root bridgectl && chmod 755 bridgectl\n"), "bridgectl's owner")?;
         println!(
             "vm-boot: the bridge channel: the phone's battery to iOS{} (bridgectl serve on crosvm's second serial port; bridge.txt)",
-            if o.haptics { " and iOS's haptics to the phone's motor" } else { ", no haptics (--no-haptics)" }
+            if o.native_haptics {
+                " and iOS's haptics through strict AIDL native presets (experimental; guest Image must have oneios_native_impacts=1)"
+            } else if o.haptics {
+                " and iOS's haptics to the phone's motor"
+            } else {
+                ", no haptics (--no-haptics)"
+            }
         );
     }
     fs::create_dir_all(out).with_context(|| format!("cannot make {out}"))?;
@@ -1331,6 +1351,11 @@ mod tests {
         quiet.bridge_haptics = false;
         let s = boot_script_with(&l, 3600, true, "ab12", Some(&quiet), false, true, &Tuning::DEFAULT);
         assert!(s.contains("$D/bridgectl serve $D/bridge.sock --wait 120 --no-haptics </dev/null"));
+        // explicit native impacts: strict Treble/AIDL selection and no evdev fallback, before bridgectl starts
+        let mut native = d.clone();
+        native.bridge_native_haptics = true;
+        let s = boot_script_with(&l, 3600, true, "ab12", Some(&native), false, true, &Tuning::DEFAULT);
+        assert!(s.contains("ONEIOS_HW_BACKEND_HAPTICS=treble ONEIOS_HW_FALLBACK=0 ONEIOS_HAPTIC_NATIVE_IMPACTS=1 $D/bridgectl serve"));
         // an Image without it: no tool, no second port
         let none = parse_disks(&format!("{SCREEN}input touch\n")).unwrap();
         let s = boot_script_with(&l, 3600, true, "ab12", Some(&none), false, true, &Tuning::DEFAULT);
