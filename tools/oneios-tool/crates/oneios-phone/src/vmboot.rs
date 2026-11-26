@@ -141,6 +141,8 @@ pub struct Disks {
     pub bridge_native_haptics: bool,
     /// true (vm-boot --brightness): explicitly opt in to the native serial brightness bridge
     pub bridge_brightness: bool,
+    /// Safe panel ceiling for the native brightness bridge; required when bridge_brightness
+    pub bridge_brightness_max: Option<u32>,
     /// true (vm-boot --bluetooth): explicitly opt in to the native serial HCI bridge
     pub bridge_bluetooth: bool,
 }
@@ -220,7 +222,7 @@ pub fn parse_disks(text: &str) -> Result<Disks> {
         }
     }
     let (store, store_gib) = store.context("no store line")?;
-    let d = Disks { swiotlb: swiotlb.context("no swiotlb-mib line")?, pool: pool.context("no pool line")?, store, store_gib, blocks, fb, input, gpu, scanout, audio, wifi, bridge, bridge_haptics: true, bridge_native_haptics: false, bridge_brightness: false, bridge_bluetooth: false };
+    let d = Disks { swiotlb: swiotlb.context("no swiotlb-mib line")?, pool: pool.context("no pool line")?, store, store_gib, blocks, fb, input, gpu, scanout, audio, wifi, bridge, bridge_haptics: true, bridge_native_haptics: false, bridge_brightness: false, bridge_brightness_max: None, bridge_bluetooth: false };
     if d.scanout.is_some() && (d.gpu.is_none() || d.fb.is_none()) {
         bail!("a scanout without the GPU or the screen: xnuloader-crosvm gives it with --gpu-scanout and --display");
     }
@@ -511,24 +513,26 @@ pub fn boot_script_with(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Op
     // second serial port connects to its socket (given only when the socket is there: crosvm does not start without it),
     // and it ends when crosvm closes the port
     let (serve_start, serve_serial, serve_end) = match disks {
-        Some(d) if d.bridge => (
-            BRIDGE_START
-                .replace(
-                    "{flags}",
-                    &format!("{}{}{}", if d.bridge_haptics { "" } else { " --no-haptics" }, if d.bridge_brightness { " --brightness" } else { "" },
-                             if d.bridge_bluetooth { " --bluetooth" } else { "" }),
-                )
-                .replace(
-                    "{env}",
-                    if d.bridge_native_haptics {
-                        "ONEIOS_HW_BACKEND_HAPTICS=treble ONEIOS_HW_FALLBACK=0 ONEIOS_HAPTIC_NATIVE_IMPACTS=1 "
-                    } else {
-                        ""
-                    },
-                ),
-            "${bsock:+ --serial type=unix-stream,hardware=serial,num=2,path=$bsock,input-unix-stream}",
-            BRIDGE_END,
-        ),
+        Some(d) if d.bridge => {
+            let mut env = String::new();
+            if d.bridge_native_haptics {
+                env.push_str("ONEIOS_HW_BACKEND_HAPTICS=treble ONEIOS_HW_FALLBACK=0 ONEIOS_HAPTIC_NATIVE_IMPACTS=1 ");
+            }
+            if let Some(max) = d.bridge_brightness_max {
+                env.push_str(&format!("ONEIOS_BRIGHT_MAX={max} "));
+            }
+            (
+                BRIDGE_START
+                    .replace(
+                        "{flags}",
+                        &format!("{}{}{}", if d.bridge_haptics { "" } else { " --no-haptics" },
+                                 if d.bridge_brightness { " --brightness" } else { "" }, if d.bridge_bluetooth { " --bluetooth" } else { "" }),
+                    )
+                    .replace("{env}", &env),
+                "${bsock:+ --serial type=unix-stream,hardware=serial,num=2,path=$bsock,input-unix-stream}",
+                BRIDGE_END,
+            )
+        },
         _ => (String::new(), "", ""),
     };
     let (mut touch_find, mut escape_start, mut escape_end) = (String::new(), String::new(), String::new());
@@ -953,6 +957,8 @@ pub struct Options {
     pub native_haptics: bool,
     /// true (--brightness): opt in to the native serial brightness channel
     pub brightness: bool,
+    /// Safe physical panel ceiling required by --brightness
+    pub brightness_max: Option<u32>,
     /// true (--bluetooth): opt in to the native serial HCI bridge
     pub bluetooth: bool,
 }
@@ -972,6 +978,12 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
     if !(5..=3600).contains(&o.seconds) || !(1..=8).contains(&l.cpus) || !(2..=1024).contains(&l.swiotlb) {
         bail!("--seconds 5..3600; the Image's vCPUs 1..8, its pool 2..1024 MiB");
     }
+    if (o.native_haptics || o.brightness || o.bluetooth) && !o.takeover {
+        bail!("--native-haptics, --brightness and --bluetooth are takeover-only experiments: add --takeover");
+    }
+    if o.brightness && !matches!(o.brightness_max, Some(1..=65535)) {
+        bail!("--brightness requires --brightness-max 1..65535, measured from One UI's manual range");
+    }
     if l.ram > 480 && !o.thp {
         bail!("a VM of {} MiB needs --thp and gh_hugepage_reserve's pool (Gunyah's own memory ends near 0.5 GB of 4 KiB pages)", l.ram);
     }
@@ -984,6 +996,7 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
         d.bridge_haptics = o.haptics;
         d.bridge_native_haptics = o.native_haptics;
         d.bridge_brightness = o.brightness;
+        d.bridge_brightness_max = o.brightness_max;
         d.bridge_bluetooth = o.bluetooth;
     }
     if disks.as_ref().is_some_and(|d| d.bridge) && !Path::new(&o.bridgectl).is_file() {
@@ -1373,13 +1386,22 @@ mod tests {
         // brightness is explicit and reaches only the native bridge server when opted in
         let mut lit = parse_disks(&format!("{SCREEN}input touch\nbridge\n")).unwrap();
         lit.bridge_brightness = true;
+        lit.bridge_brightness_max = Some(2953);
         let s = boot_script_with(&l, 3600, true, "ab12", Some(&lit), false, true, &Tuning::DEFAULT);
-        assert!(s.contains("$D/bridgectl serve $D/bridge.sock --wait 120 --brightness </dev/null"));
+        assert!(s.contains("ONEIOS_BRIGHT_MAX=2953 $D/bridgectl serve $D/bridge.sock --wait 120 --brightness </dev/null"));
         // Bluetooth is explicit and reaches only the native bridge server when opted in
         let mut radio = parse_disks(&format!("{SCREEN}input touch\nbridge\n")).unwrap();
         radio.bridge_bluetooth = true;
         let s = boot_script_with(&l, 3600, true, "ab12", Some(&radio), false, true, &Tuning::DEFAULT);
         assert!(s.contains("$D/bridgectl serve $D/bridge.sock --wait 120 --bluetooth </dev/null"));
+        // all opt-ins compose on one command without changing their strict gates
+        let mut all = d.clone();
+        all.bridge_native_haptics = true;
+        all.bridge_brightness = true;
+        all.bridge_brightness_max = Some(2953);
+        all.bridge_bluetooth = true;
+        let s = boot_script_with(&l, 3600, true, "ab12", Some(&all), false, true, &Tuning::DEFAULT);
+        assert!(s.contains("ONEIOS_HW_BACKEND_HAPTICS=treble ONEIOS_HW_FALLBACK=0 ONEIOS_HAPTIC_NATIVE_IMPACTS=1 ONEIOS_BRIGHT_MAX=2953 $D/bridgectl serve $D/bridge.sock --wait 120 --brightness --bluetooth"));
         // an Image without it: no tool, no second port
         let none = parse_disks(&format!("{SCREEN}input touch\n")).unwrap();
         let s = boot_script_with(&l, 3600, true, "ab12", Some(&none), false, true, &Tuning::DEFAULT);
