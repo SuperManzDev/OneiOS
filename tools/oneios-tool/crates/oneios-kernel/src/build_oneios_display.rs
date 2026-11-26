@@ -222,8 +222,12 @@ pub fn bind(data: &[u8], abi: &Abi) -> Result<Bound> {
         }
     }
     require(pure.iter().all(|slot| owned.contains(slot)), || "an original abstract slot is not implemented by the owned backend".to_string())?;
-    let unbound: Vec<&str> = object.undefined().filter(|name| name.contains(CLASS) && !bindings.contains_key(*name)).collect::<BTreeSet<_>>()
-        .into_iter().collect();
+    // Clang emits weak linker-local authenticated-call slots beside the real undefined parent methods. They name
+    // pointer aliases (for example `l__ZN25IOMobileFramebufferLegacy4initEP12OSDictionary.ptrauth`), not additional
+    // methods that need original-kernel bindings; their corresponding global imports are bound below.
+    let unbound: Vec<&str> = object.undefined()
+        .filter(|name| !(name.starts_with("l_") && name.ends_with(".ptrauth")))
+        .filter(|name| name.contains(CLASS) && !bindings.contains_key(*name)).collect::<BTreeSet<_>>().into_iter().collect();
     require(unbound.is_empty(), || format!("original-class imports without a binding: {}", unbound.join(", ")))?;
     Ok(Bound { bindings, owned, native, compiled: compiled.iter().map(|entry| entry.symbol.clone()).collect() })
 }
