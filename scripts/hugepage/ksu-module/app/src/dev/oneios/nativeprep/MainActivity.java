@@ -8,6 +8,7 @@ import android.content.res.ColorStateList;
 import android.content.pm.ShortcutInfo;
 import android.content.pm.ShortcutManager;
 import android.graphics.Color;
+import android.graphics.Insets;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.Icon;
@@ -16,6 +17,7 @@ import android.os.Bundle;
 import android.text.method.ScrollingMovementMethod;
 import android.view.Gravity;
 import android.view.View;
+import android.view.WindowInsets;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -25,6 +27,7 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 public final class MainActivity extends Activity {
     private static final String ACTION_PREPARE = "dev.oneios.nativeprep.PREPARE";
@@ -68,6 +71,7 @@ public final class MainActivity extends Activity {
         error = getColor(R.color.app_error);
         getWindow().setStatusBarColor(getColor(R.color.app_background));
         getWindow().setNavigationBarColor(getColor(R.color.app_background));
+        getWindow().setDecorFitsSystemWindows(false);
         setContentView(buildContent());
         runCommand("status", "Checking host support…");
         if (ACTION_PREPARE.equals(getIntent().getAction())) {
@@ -83,12 +87,18 @@ public final class MainActivity extends Activity {
         scroll.setBackgroundColor(getColor(R.color.app_background));
         LinearLayout root = column();
         root.setPadding(dp(24), dp(24), dp(24), dp(36));
+        root.setOnApplyWindowInsetsListener((view, windowInsets) -> {
+            Insets bars = windowInsets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+            view.setPadding(dp(24) + bars.left, dp(24) + bars.top, dp(24) + bars.right, dp(36) + bars.bottom);
+            return WindowInsets.CONSUMED;
+        });
         scroll.addView(root, matchWrap());
 
         LinearLayout mark = new LinearLayout(this);
         mark.setOrientation(LinearLayout.HORIZONTAL);
         mark.setGravity(Gravity.CENTER_VERTICAL);
         TextView icon = text("M", 18, Typeface.BOLD, onPrimary);
+        icon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         icon.setGravity(Gravity.CENTER);
         icon.setBackground(round(primary, 14));
         mark.addView(icon, box(48, 48));
@@ -112,6 +122,7 @@ public final class MainActivity extends Activity {
         statusCard.setBackground(round(surface, 16));
         TextView statusTitle = text("Host support", 18, Typeface.BOLD, text);
         stateLabel = text("Checking…", 14, Typeface.BOLD, warning);
+        stateLabel.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         statusText = text("Waiting for root status.", 13, Typeface.NORMAL, secondary);
         statusText.setTypeface(Typeface.MONOSPACE);
         statusText.setTextIsSelectable(true);
@@ -191,32 +202,91 @@ public final class MainActivity extends Activity {
         worker.execute(() -> {
             StringBuilder output = new StringBuilder();
             int code = -1;
+            boolean timedOut = false;
             try {
                 Process process = new ProcessBuilder("su", "-c", COMMAND_PICKER + args)
                         .redirectErrorStream(true)
                         .start();
+                if (!process.waitFor(150, TimeUnit.SECONDS)) {
+                    timedOut = true;
+                    process.destroy();
+                    if (!process.waitFor(2, TimeUnit.SECONDS)) process.destroyForcibly();
+                } else {
+                    code = process.exitValue();
+                }
                 try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
                     String line;
                     while ((line = reader.readLine()) != null) output.append(line).append('\n');
                 }
-                code = process.waitFor();
             } catch (Exception e) {
-                output.append("Unable to run root command: ").append(e.getMessage()).append('\n');
+                output.append("Unable to start KernelSU root command.\n");
+                output.append(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()).append('\n');
             }
             final int result = code;
+            final boolean didTimeOut = timedOut;
             final String message = output.length() == 0 ? "No output returned." : output.toString().trim();
-            runOnUiThread(() -> {
-                statusText.setText(message);
-                if (result == 0) {
-                    stateLabel.setText(args.startsWith("prepare") ? "Ready" : args.equals("release") ? "Released" : "Status updated");
-                    stateLabel.setTextColor(success);
-                } else {
-                    stateLabel.setText(result == 127 ? "Module unavailable" : "Action refused safely");
-                    stateLabel.setTextColor(error);
-                }
-                setBusy(false);
-            });
+            runOnUiThread(() -> applyResult(args, result, didTimeOut, message));
         });
+    }
+
+    private void applyResult(String args, int result, boolean timedOut, String message) {
+        String shown = message;
+        String state;
+        int color;
+        if (timedOut) {
+            state = "Timed out — check status";
+            color = error;
+            shown += "\n\nThe command exceeded 150 seconds and was stopped. No VM was launched. Tap Refresh status before trying anything else.";
+        } else if (result == 0 && args.equals("status")) {
+            boolean none = message.contains("hugepool: not loaded") && message.contains("hostshare: not loaded") &&
+                    message.contains("udmabuf: not loaded") && message.contains("halt-poll: not loaded");
+            boolean ready = message.contains("hugepool: loaded") && message.contains("hostshare: loaded") &&
+                    message.contains("udmabuf: loaded") && message.contains("halt-poll: loaded") &&
+                    message.contains("ownership: ready");
+            boolean partial = message.contains("ownership: partial") || message.contains("ownership: loading");
+            if (ready) {
+                state = "Prepared";
+                color = success;
+            } else if (partial || !none) {
+                state = "Partially prepared — release required";
+                color = error;
+                shown += "\n\nTap Release reserved memory before another Prepare attempt.";
+            } else {
+                state = "Not prepared";
+                color = warning;
+            }
+        } else if (result == 0 && args.startsWith("prepare") && message.contains("ready for a")) {
+            state = "Ready for VM";
+            color = success;
+        } else if (result == 0 && args.equals("release")) {
+            state = "Released";
+            color = success;
+        } else if (message.contains("Cannot run program \"su\"") || message.contains("Unable to start KernelSU")) {
+            state = "Root access required";
+            color = error;
+            shown = "Open KernelSU Manager and grant root to OneiOS Memory, then return and tap Refresh status.\n\n" + message;
+        } else if (result == 127 || message.contains("not installed yet")) {
+            state = "Module unavailable";
+            color = error;
+            shown += "\n\nInstall and activate the OneiOS on-demand KernelSU module, then refresh.";
+        } else if (message.contains("fingerprint changed") || message.contains("package is for") || message.contains("module hash differs")) {
+            state = "Unsupported build";
+            color = error;
+        } else if (message.contains("PARTIAL") || message.contains("ownership: partial") || message.contains("state is partial")) {
+            state = "Partially prepared — release required";
+            color = error;
+        } else if (message.contains("pages are available")) {
+            state = "Not enough contiguous memory";
+            color = warning;
+            shown += "\n\nThe screen stayed on and no VM started. Rebooting and preparing earlier may provide more contiguous memory.";
+        } else {
+            state = "Not prepared";
+            color = error;
+        }
+        stateLabel.setText(state);
+        stateLabel.setTextColor(color);
+        statusText.setText(shown);
+        setBusy(false);
     }
 
     private void requestShortcut() {
@@ -232,7 +302,7 @@ public final class MainActivity extends Activity {
         ShortcutInfo shortcut = new ShortcutInfo.Builder(this, "prepare_vm_memory")
                 .setShortLabel(getString(R.string.shortcut_prepare))
                 .setLongLabel("Prepare OneiOS VM memory")
-                .setIcon(Icon.createWithResource(this, R.drawable.ic_launcher))
+                .setIcon(Icon.createWithResource(this, R.drawable.ic_shortcut_prepare))
                 .setIntent(intent)
                 .build();
         Intent callbackIntent = new Intent(this, MainActivity.class).setAction("dev.oneios.nativeprep.PINNED");
@@ -310,7 +380,7 @@ public final class MainActivity extends Activity {
     }
 
     private LinearLayout.LayoutParams match() {
-        return new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52));
+        return new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
     }
 
     private LinearLayout.LayoutParams wrap() {

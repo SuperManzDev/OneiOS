@@ -32,7 +32,8 @@ else
     bad "$n" "prepare confirmation gate"
 fi
 n=$((n + 1))
-if grep -q 'isRequestPinShortcutSupported' "$source" && grep -q 'requestPinShortcut' "$source" && grep -q 'prepare_vm_memory' "$source"; then
+if grep -q 'isRequestPinShortcutSupported' "$source" && grep -q 'requestPinShortcut' "$source" && grep -q 'prepare_vm_memory' "$source" && \
+   grep -q 'R.drawable.ic_shortcut_prepare' "$source" && [ -f "$APP/res/drawable/ic_shortcut_prepare.xml" ]; then
     ok "$n" "pinned home-screen shortcut"
 else
     bad "$n" "shortcut API"
@@ -45,11 +46,22 @@ else
     bad "$n" "unsafe app operation"
 fi
 n=$((n + 1))
-if grep -q 'setMinHeight(dp(52))' "$source" && grep -q 'app_text_secondary' "$APP/res/values-night/colors.xml" && \
-   [ -f "$APP/res/values-night/styles.xml" ]; then
-    ok "$n" "48dp+ controls and dark theme"
+if grep -q 'setMinHeight(dp(52))' "$source" && grep -q 'WindowInsets.Type.systemBars' "$source" && \
+   grep -q 'ACCESSIBILITY_LIVE_REGION_POLITE' "$source" && grep -q 'IMPORTANT_FOR_ACCESSIBILITY_NO' "$source" && \
+   grep -q 'app_text_secondary' "$APP/res/values-night/colors.xml" && [ -f "$APP/res/values-night/styles.xml" ] && \
+   ! grep -q 'screenOrientation' "$APP/AndroidManifest.xml"; then
+    ok "$n" "growing 48dp+ controls, insets, accessibility semantics, rotation and dark theme"
 else
     bad "$n" "native UI floor"
+fi
+n=$((n + 1))
+
+if grep -q 'waitFor(150, TimeUnit.SECONDS)' "$source" && grep -q 'Root access required' "$source" && \
+   grep -q 'Partially prepared — release required' "$source" && grep -q 'Not prepared' "$source" && \
+   grep -q 'Ready for VM' "$source"; then
+    ok "$n" "bounded root process and explicit readiness/error states"
+else
+    bad "$n" "root timeout or state model"
 fi
 n=$((n + 1))
 

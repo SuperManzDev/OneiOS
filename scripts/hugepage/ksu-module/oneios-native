@@ -10,8 +10,13 @@ LOCK=/data/local/tmp/oneios-native-on-demand.lock
 OWNED=$MODDIR/state/owned
 P=/sys/module/gh_hugepage_reserve/parameters
 
+PREPARE_NEW=0
 say() { echo "oneios-native: $*"; }
-die() { say "refused: $*" >&2; exit 1; }
+die() {
+    say "refused: $*" >&2
+    [ "$PREPARE_NEW" = 1 ] && rollback_new_prepare
+    exit 1
+}
 loaded() { grep -q "^$1 " /proc/modules 2>/dev/null; }
 any_loaded() { loaded gh_hugepage_reserve || loaded gunyah_host_share || loaded udmabuf_gki_6.6 || loaded gunyah_halt_poll_gki_6.6; }
 param() { cat "$P/$1" 2>/dev/null; }
@@ -68,7 +73,12 @@ status() {
     else
         echo "halt-poll: not loaded"
     fi
-    [ -f "$OWNED" ] && echo "ownership: loaded by this command" || echo "ownership: no command marker"
+    if [ -f "$OWNED" ]; then
+        state=$(sed -n 's/^state=//p' "$OWNED" | tail -n 1)
+        echo "ownership: ${state:-unknown} (loaded by this command)"
+    else
+        echo "ownership: no command marker"
+    fi
     echo "automatic boot action: none"
 }
 
@@ -85,6 +95,28 @@ load_support() {
     loaded gunyah_halt_poll_gki_6.6 || insmod "$BIN/gunyah_halt_poll.ko" || die "halt-poll module did not load"
 }
 
+rollback_new_prepare() {
+    PREPARE_NEW=0
+    say "rolling back this failed prepare; Android and the display remain running"
+    failed=0
+    loaded gunyah_halt_poll_gki_6.6 && rmmod gunyah_halt_poll_gki_6.6 || true
+    loaded gunyah_halt_poll_gki_6.6 && failed=1
+    loaded udmabuf_gki_6.6 && rmmod udmabuf_gki_6.6 || true
+    loaded udmabuf_gki_6.6 && failed=1
+    loaded gunyah_host_share && rmmod gunyah_host_share || true
+    loaded gunyah_host_share && failed=1
+    loaded gh_hugepage_reserve && rmmod gh_hugepage_reserve || true
+    loaded gh_hugepage_reserve && failed=1
+    if [ "$failed" = 0 ]; then
+        rm -f "$OWNED"
+        say "rollback complete: no OneiOS support module remains loaded"
+    else
+        mkdir -p "$MODDIR/state"
+        echo "state=partial" > "$OWNED"
+        say "PARTIAL: rollback could not unload every module; use status, then release before a VM"
+    fi
+}
+
 prepare() {
     ram=${1:-4096}
     case "$ram" in ''|*[!0-9]*) die "RAM_MIB must be an integer" ;; esac
@@ -95,7 +127,14 @@ prepare() {
     if any_loaded && [ ! -f "$OWNED" ]; then
         die "a support module was loaded outside this command; refusing to adopt or alter it. Unload it with its original tool or reboot"
     fi
+    if any_loaded && ! grep -q '^state=ready$' "$OWNED" 2>/dev/null; then
+        die "a previous prepare is partial; run release before trying again"
+    fi
+    if ! any_loaded && [ -f "$OWNED" ]; then
+        die "the ownership marker is stale; run release to clear it before trying again"
+    fi
     [ -c /dev/gunyah ] || die "no /dev/gunyah"
+    if any_loaded; then PREPARE_NEW=0; else PREPARE_NEW=1; fi
     mkdir -p "$MODDIR/state" || die "cannot create module state"
     {
         echo "kernel=$TARGET_UNAME"
@@ -127,7 +166,17 @@ prepare() {
         avail=$(param pool_avail)
     fi
     status
-    [ "${avail:-0}" -ge "$need" ] || die "only ${avail:-0}/$need pages are available; no VM was started and the screen was not touched. Run release, reboot if desired, and invoke prepare earlier"
+    if [ "${avail:-0}" -lt "$need" ]; then
+        if [ "$PREPARE_NEW" = 0 ]; then
+            {
+                echo "kernel=$TARGET_UNAME"
+                echo "fingerprint=$TARGET_FINGERPRINT"
+                echo "state=partial"
+            } > "$OWNED"
+        fi
+        die "only ${avail:-0}/$need pages are available; no VM was started and the screen was not touched. Run release, reboot if desired, and invoke prepare earlier"
+    fi
+    PREPARE_NEW=0
     say "ready for a ${ram} MiB VM; nothing starts until the separate vm-boot command"
 }
 
