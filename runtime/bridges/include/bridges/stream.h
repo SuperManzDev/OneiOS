@@ -16,13 +16,15 @@ typedef struct {
   br_haptic *haptic;                      // NULL: the haptic channel is not served
   br_battery *battery;                    // NULL: the battery channel is not served
   br_bright *brightness;                  // NULL: brightness and ambient light are not served
+  br_hci *(*hci_factory)(br_hci_rx_fn rx, br_hci_state_fn state, void *ctx);  // NULL: no Bluetooth channel
+  const char *bt_address_path;            // default /mnt/vendor/efs/bluetooth/bt_addr
 } br_stream_config;
 
 // What went over the stream, for the log and the tests.
 typedef struct {
   uint64_t bytes_in, bytes_out;
   uint64_t frames_in, frames_bad;         // whole messages from the guest; frames given up (length, checksum)
-  uint64_t hellos, haptic, battery_queries, battery_states, brightness_requests, brightness_states, unknown;
+  uint64_t hellos, haptic, hci, hci_states, battery_queries, battery_states, brightness_requests, brightness_states, unknown;
 } br_stream_stats;
 
 // Serves fd (a connected stream socket, or any descriptor poll() and read() take) until the other end closes it

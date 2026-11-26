@@ -147,7 +147,9 @@ static void test_serve(const char *tmp)
   CHECK(battery != NULL && motor != NULL && brightness != NULL);
   int pair[2];
   if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair)) abort();
-  server s = { .fd = pair[0], .config = { .haptic = motor, .battery = battery, .brightness = brightness } };
+  const uint8_t bt_addr[6] = { 0x02, 0x0e, 0x10, 0xaa, 0xbb, 0xcc };
+  br_hci_sim_set_address(bt_addr);
+  server s = { .fd = pair[0], .config = { .haptic = motor, .battery = battery, .brightness = brightness, .hci_factory = br_hci_open_sim } };
   pthread_t thread;
   if (pthread_create(&thread, NULL, serve_thread, &s)) abort();
   const int g = pair[1];
@@ -160,7 +162,22 @@ static void test_serve(const char *tmp)
   struct ob_header h;
   memcpy(&h, rx.message, 8); memcpy(&hello, rx.message + 8, sizeof hello);
   CHECK(h.channel == OB_CH_CONTROL && h.type == OB_CTL_HELLO && hello.version == OB_PROTO_VERSION);
-  CHECK(hello.channels == (1u << OB_CH_CONTROL | 1u << OB_CH_HAPTIC | 1u << OB_CH_BRIGHTNESS | 1u << OB_CH_BATTERY));
+  CHECK(hello.channels == (1u << OB_CH_CONTROL | 1u << OB_CH_HAPTIC | 1u << OB_CH_HCI | 1u << OB_CH_BRIGHTNESS | 1u << OB_CH_BATTERY));
+
+  // Bluetooth: lazy controller open, ready state, HCI Reset completion, malformed command refused, close
+  guest_send(g, OB_CH_HCI, OB_HCI_OPEN, NULL, 0);
+  struct ob_hci_state bt_state;
+  int bt_size = guest_recv(g, &rx, 2000);
+  CHECK(bt_size == 8 + (int)sizeof bt_state);
+  memcpy(&h, rx.message, 8); memcpy(&bt_state, rx.message + 8, sizeof bt_state);
+  CHECK(h.channel == OB_CH_HCI && h.type == OB_HCI_STATE && bt_state.state == OB_HCI_STATE_READY);
+  static const uint8_t reset[] = { 0x03, 0x0c, 0x00 };
+  guest_send(g, OB_CH_HCI, OB_HCI_COMMAND, reset, sizeof reset);
+  do bt_size = guest_recv(g, &rx, 2000); while (bt_size > 0 && (memcpy(&h, rx.message, 8), h.type == OB_HCI_STATE));
+  CHECK(bt_size >= 8 + 2 && h.channel == OB_CH_HCI && h.type == OB_HCI_EVENT);
+  static const uint8_t malformed[] = { 0x03, 0x0c, 0x04 };
+  guest_send(g, OB_CH_HCI, OB_HCI_COMMAND, malformed, sizeof malformed);
+  guest_send(g, OB_CH_HCI, OB_HCI_CLOSE, NULL, 0);
 
   // brightness: the saved level is reported, one bounded linear set reaches the fake panel
   guest_send(g, OB_CH_BRIGHTNESS, OB_BRIGHT_QUERY, NULL, 0);
@@ -176,7 +193,9 @@ static void test_serve(const char *tmp)
   // the battery: the real level and state at the query, then each change by itself
   guest_send(g, OB_CH_BATTERY, OB_BATTERY_QUERY, NULL, 0);
   struct ob_battery_state state;
-  CHECK(guest_recv(g, &rx, 2000) == 8 + (int)sizeof state);
+  int battery_size;
+  do battery_size = guest_recv(g, &rx, 2000); while (battery_size > 0 && (memcpy(&h, rx.message, 8), h.channel == OB_CH_HCI));
+  CHECK(battery_size == 8 + (int)sizeof state);
   memcpy(&h, rx.message, 8); memcpy(&state, rx.message + 8, sizeof state);
   CHECK(h.channel == OB_CH_BATTERY && h.type == OB_BATTERY_STATE && h.length == sizeof state);
   CHECK(state.flags == OB_BATTERY_PRESENT && state.percent == 73 && state.temp_deci_c == 305 && state.voltage_mv == 4012 && state.current_ma == -400 &&
@@ -220,9 +239,10 @@ static void test_serve(const char *tmp)
   close(g);
   pthread_join(thread, NULL);
   CHECK(s.rc == 0);
-  CHECK(s.stats.hellos == 2 && s.stats.haptic == 11 && s.stats.brightness_requests == 2 && s.stats.brightness_states == 1 &&
-        s.stats.battery_queries == 1 && s.stats.battery_states >= 3 && s.stats.unknown == 1);
-  CHECK(s.stats.frames_in == 2 + 11 + 2 + 1 + 1 && s.stats.frames_bad == 1 && s.stats.bytes_out > 0 && s.stats.bytes_in > 0);
+  CHECK(s.stats.hellos == 2 && s.stats.haptic == 11 && s.stats.hci == 4 && s.stats.hci_states >= 2 &&
+        s.stats.brightness_requests == 2 && s.stats.brightness_states == 1 && s.stats.battery_queries == 1 &&
+        s.stats.battery_states >= 3 && s.stats.unknown == 2);
+  CHECK(s.stats.frames_in == 2 + 11 + 4 + 2 + 1 + 1 && s.stats.frames_bad == 1 && s.stats.bytes_out > 0 && s.stats.bytes_in > 0);
   br_haptic_flush(motor);
   br_haptic_stats_get(motor, &st);
   CHECK(st.stop >= 1);
@@ -297,8 +317,8 @@ static void test_cli(const char *tool, const char *tmp)
   char text[4096] = "";
   FILE *f = fopen(out, "r");
   if (f) { size_t n = fread(text, 1, sizeof text - 1, f); text[n] = 0; fclose(f); }
-  CHECK(strstr(text, "serve: listening on ") && strstr(text, "battery served, haptics off (--no-haptics), brightness served"));
-  CHECK(strstr(text, "serve: crosvm connected") && strstr(text, "serve: crosvm closed the port (the VM ended): 2 messages from the guest (1 hello, 0 haptic, 0 brightness, 1 battery queries"));
+  CHECK(strstr(text, "serve: listening on ") && strstr(text, "battery served, haptics off (--no-haptics), brightness served, Bluetooth off"));
+  CHECK(strstr(text, "serve: crosvm connected") && strstr(text, "serve: crosvm closed the port (the VM ended): 2 messages from the guest (1 hello, 0 haptic, 0 Bluetooth, 0 brightness, 1 battery queries"));
   CHECK(access(sock, F_OK) != 0);                                           // the socket's name is gone once it is taken
 }
 

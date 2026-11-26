@@ -141,6 +141,8 @@ pub struct Disks {
     pub bridge_native_haptics: bool,
     /// true (vm-boot --brightness): explicitly opt in to the native serial brightness bridge
     pub bridge_brightness: bool,
+    /// true (vm-boot --bluetooth): explicitly opt in to the native serial HCI bridge
+    pub bridge_bluetooth: bool,
 }
 
 /// The GPU's PCI address (crosvm's pci-address=), drm2kgsl's host arena in MiB and where the Image expects it.
@@ -218,7 +220,7 @@ pub fn parse_disks(text: &str) -> Result<Disks> {
         }
     }
     let (store, store_gib) = store.context("no store line")?;
-    let d = Disks { swiotlb: swiotlb.context("no swiotlb-mib line")?, pool: pool.context("no pool line")?, store, store_gib, blocks, fb, input, gpu, scanout, audio, wifi, bridge, bridge_haptics: true, bridge_native_haptics: false, bridge_brightness: false };
+    let d = Disks { swiotlb: swiotlb.context("no swiotlb-mib line")?, pool: pool.context("no pool line")?, store, store_gib, blocks, fb, input, gpu, scanout, audio, wifi, bridge, bridge_haptics: true, bridge_native_haptics: false, bridge_brightness: false, bridge_bluetooth: false };
     if d.scanout.is_some() && (d.gpu.is_none() || d.fb.is_none()) {
         bail!("a scanout without the GPU or the screen: xnuloader-crosvm gives it with --gpu-scanout and --display");
     }
@@ -513,7 +515,8 @@ pub fn boot_script_with(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Op
             BRIDGE_START
                 .replace(
                     "{flags}",
-                    &format!("{}{}", if d.bridge_haptics { "" } else { " --no-haptics" }, if d.bridge_brightness { " --brightness" } else { "" }),
+                    &format!("{}{}{}", if d.bridge_haptics { "" } else { " --no-haptics" }, if d.bridge_brightness { " --brightness" } else { "" },
+                             if d.bridge_bluetooth { " --bluetooth" } else { "" }),
                 )
                 .replace(
                     "{env}",
@@ -950,6 +953,8 @@ pub struct Options {
     pub native_haptics: bool,
     /// true (--brightness): opt in to the native serial brightness channel
     pub brightness: bool,
+    /// true (--bluetooth): opt in to the native serial HCI bridge
+    pub bluetooth: bool,
 }
 
 /// `phone vm-boot --stop`: ask the running VM's script to stop it now (crosvm stop through its socket).
@@ -979,6 +984,7 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
         d.bridge_haptics = o.haptics;
         d.bridge_native_haptics = o.native_haptics;
         d.bridge_brightness = o.brightness;
+        d.bridge_bluetooth = o.bluetooth;
     }
     if disks.as_ref().is_some_and(|d| d.bridge) && !Path::new(&o.bridgectl).is_file() {
         bail!("the Image has the bridge channel and {} is not there: runtime/build.sh (or make -C runtime/bridges build/android/bridgectl), or name it with --bridgectl", o.bridgectl);
@@ -1369,6 +1375,11 @@ mod tests {
         lit.bridge_brightness = true;
         let s = boot_script_with(&l, 3600, true, "ab12", Some(&lit), false, true, &Tuning::DEFAULT);
         assert!(s.contains("$D/bridgectl serve $D/bridge.sock --wait 120 --brightness </dev/null"));
+        // Bluetooth is explicit and reaches only the native bridge server when opted in
+        let mut radio = parse_disks(&format!("{SCREEN}input touch\nbridge\n")).unwrap();
+        radio.bridge_bluetooth = true;
+        let s = boot_script_with(&l, 3600, true, "ab12", Some(&radio), false, true, &Tuning::DEFAULT);
+        assert!(s.contains("$D/bridgectl serve $D/bridge.sock --wait 120 --bluetooth </dev/null"));
         // an Image without it: no tool, no second port
         let none = parse_disks(&format!("{SCREEN}input touch\n")).unwrap();
         let s = boot_script_with(&l, 3600, true, "ab12", Some(&none), false, true, &Tuning::DEFAULT);

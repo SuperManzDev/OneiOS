@@ -13,6 +13,7 @@
 typedef struct {
   int fd;
   br_stream_config config;
+  br_hci *hci;                            // made lazily on the guest's OB_HCI_OPEN
   pthread_mutex_t lock;                   // the writes, and the counters they change
   br_stream_stats stats;
   int failed;                             // a write failed: the stream is given up
@@ -58,6 +59,24 @@ static void bright_als(void *ctx, const br_als_sample *sample)
   to_guest(s, OB_CH_BRIGHTNESS, OB_BRIGHT_ALS, &als, sizeof als);
 }
 
+static void hci_rx(void *ctx, uint8_t type, const uint8_t *packet, size_t length)
+{
+  stream_state *s = ctx;
+  to_guest(s, OB_CH_HCI, type, packet, (uint32_t)length);
+}
+
+static void hci_state(void *ctx, int state)
+{
+  stream_state *s = ctx;
+  struct ob_hci_state message = { .state = (uint32_t)state };
+  if (state == OB_HCI_STATE_READY)
+    (void)br_bt_address(s->config.bt_address_path ? s->config.bt_address_path : "/mnt/vendor/efs/bluetooth/bt_addr", message.bd_addr);
+  to_guest(s, OB_CH_HCI, OB_HCI_STATE, &message, sizeof message);
+  pthread_mutex_lock(&s->lock);
+  s->stats.hci_states++;
+  pthread_mutex_unlock(&s->lock);
+}
+
 static void battery_send(void *ctx, const br_battery_sample *b)
 {
   stream_state *s = ctx;
@@ -76,12 +95,14 @@ static void from_guest(stream_state *s, const struct ob_header *h, const uint8_t
   case OB_CH_CONTROL:
     if (h->type == OB_CTL_HELLO) {
       struct ob_ctl_hello hello = { OB_PROTO_VERSION, 1u << OB_CH_CONTROL | (s->config.haptic ? 1u << OB_CH_HAPTIC : 0) |
+                                                       (s->config.hci_factory ? 1u << OB_CH_HCI : 0) |
                                                        (s->config.brightness ? 1u << OB_CH_BRIGHTNESS : 0) |
                                                        (s->config.battery ? 1u << OB_CH_BATTERY : 0) };
       s->stats.hellos++;
       if (s->stats.hellos == 1)
-        br_log(1, "bridge: the guest's hello: channels 0x%x for it (control%s%s%s)", hello.channels, s->config.haptic ? ", haptics" : "",
-               s->config.brightness ? ", brightness" : "", s->config.battery ? ", battery" : "");
+        br_log(1, "bridge: the guest's hello: channels 0x%x for it (control%s%s%s%s)", hello.channels, s->config.haptic ? ", haptics" : "",
+               s->config.hci_factory ? ", Bluetooth" : "", s->config.brightness ? ", brightness" : "",
+               s->config.battery ? ", battery" : "");
       if (br_haptic_impacts_available(s->config.haptic)) {
         struct ob_ctl_hello_ext ext = { hello.version, hello.channels, OB_FEAT_HAPTIC_IMPACT };
         to_guest(s, OB_CH_CONTROL, OB_CTL_HELLO, &ext, sizeof ext);
@@ -103,6 +124,20 @@ static void from_guest(stream_state *s, const struct ob_header *h, const uint8_t
       memcpy(&impact, payload, sizeof impact);
       if (impact.kind >= OB_IMPACT_LIGHT && impact.kind <= OB_IMPACT_HEAVY) (void)br_haptic_impact(s->config.haptic, impact.kind);
     }
+    break;
+  case OB_CH_HCI:
+    if (!s->config.hci_factory) { s->stats.unknown++; break; }
+    s->stats.hci++;
+    if (h->type == OB_HCI_OPEN) {
+      if (!s->hci) s->hci = s->config.hci_factory(hci_rx, hci_state, s);
+      else if (br_hci_state(s->hci) == OB_HCI_STATE_FAILED) br_hci_close(s->hci);
+      if (!s->hci || br_hci_open(s->hci)) hci_state(s, OB_HCI_STATE_FAILED);
+      else if (br_hci_state(s->hci) == OB_HCI_STATE_READY) hci_state(s, OB_HCI_STATE_READY);
+    } else if (h->type == OB_HCI_CLOSE) {
+      if (s->hci) br_hci_close(s->hci);
+    } else if (s->hci && h->type >= OB_HCI_COMMAND && h->type <= OB_HCI_ISO && br_hci_packet_ok((uint8_t)h->type, payload, h->length)) {
+      (void)br_hci_send(s->hci, (uint8_t)h->type, payload, h->length);
+    } else s->stats.unknown++;
     break;
   case OB_CH_BRIGHTNESS:
     if (!s->config.brightness) { s->stats.unknown++; break; }
@@ -134,7 +169,7 @@ static void from_guest(stream_state *s, const struct ob_header *h, const uint8_t
     } else s->stats.unknown++;
     break;
   default:
-    s->stats.unknown++;                   // Bluetooth, thermal and camera are not offered in the hello
+    s->stats.unknown++;                   // Thermal and camera are not offered in the hello
     break;
   }
 }
@@ -152,6 +187,7 @@ int br_stream_serve(int fd, const br_stream_config *config, const volatile int *
   pthread_mutex_lock(&s.lock);
   s.fd = fd;
   s.config = *config;
+  s.hci = NULL;
   s.failed = s.ended = 0;
   memset(&s.stats, 0, sizeof s.stats);
   pthread_mutex_unlock(&s.lock);
@@ -183,6 +219,7 @@ int br_stream_serve(int fd, const br_stream_config *config, const volatile int *
   if (s.config.battery) br_battery_listen(s.config.battery, NULL, NULL);
   if (s.config.brightness) br_bright_listen(s.config.brightness, NULL, NULL);
   if (s.config.haptic) br_haptic_stop(s.config.haptic);
+  if (s.hci) { br_hci_close(s.hci); s.hci = NULL; }  // HAL close is queued; bridgectl exits after this one stream
   pthread_mutex_lock(&s.lock);
   s.ended = 1;
   s.stats.frames_bad = parser.dropped;
