@@ -43,7 +43,7 @@ its own.
 
 | Phase | When | What |
 |---|---|---|
-| `appinst install FILE.ipa` | user action | unzip; thin each Mach-O to **arm64e** (fallback arm64), never setting the platform-binary flag; **refuse** an encrypted slice; re-sign ad-hoc at 4 KiB with `ldid`, preserving the app's own entitlements on the main executable; compute CDHashes; write the **trust inbox**; place the `.app` under `/var/containers/Bundle/Application/<UUID>` and create the data container under `/var/mobile/Containers/Data/Application/<UUID>`; write a pending marker; request a restart |
+| `appinst install FILE.ipa` | user action | unzip; thin each Mach-O to **arm64e** (fallback arm64), never setting the platform-binary flag; **refuse** an encrypted slice; re-sign ad-hoc at 4 KiB with the pinned in-process `libunixnu-ldid.dylib`, preserving each binary's existing entitlements; compute CDHashes; write the **trust inbox**; place the `.app` under `/var/containers/Bundle/Application/<UUID>` and create the data container under `/var/mobile/Containers/Data/Application/<UUID>`; write a pending marker; request a restart |
 | (guest-VM restart) | owner's call | xnuhost folds the trust inbox into the owner trust module it injects; TXM now trusts the new CDHashes |
 | `appinst finalize` | at boot (service) | register each pending app with installd/LaunchServices now that its signature validates; clear the marker |
 
@@ -81,16 +81,15 @@ simpler on the device) — this choice is the xnuhost author's, and is the main 
 (`--entitlements userland/appinst/entitlements.plist`, identifier `com.oneios.appinst`), arm64e, 4 KiB pages,
 verified by `userland/tweak cdhash`. appinst's own CDHash goes into `owner-trust.json` through `roottweak`, so
 it runs like the other helpers, and its private entitlements (place app bundles, create data containers, rebuild
-the LaunchServices database) are honoured because it is itself trust-cached. The on-device signer `ldid` is a
-separate arm64e dependency, placed beside the helpers like `dropbear` (`userland/appinst/README.md`).
+the LaunchServices database) are honoured because it is itself trust-cached. `build-signer.sh` builds the pinned
+Procursus ldid/OpenSSL/libplist sources as `libunixnu-ldid.dylib`; appinst loads its one signing export in-process.
+The appinst binary and signer dylib are both arm64e, ad-hoc signed with 4 KiB pages, and both CDHashes go into the owner trust cache.
 
-## What needs a Mac build and on-device verification
+## What still needs on-device verification
 
-1. **Build on a Mac or the Linux cross toolchain** — iOS binaries can't be compiled on the dev box used to write
-   this; the C/Obj-C is syntax-clean and the host-side fold is tested, but nothing here has been run on arm64e.
-2. **Supply `ldid`** (arm64e, 4 KiB, trust-cached) at `/private/var/oneios/bin/ldid`.
-3. **Wire the xnuhost fold** of the trust inbox at guest boot (reference: `host/fold-trust-inbox.py`).
-4. **LaunchServices registration** (`register.m`): `registerApplicationDictionary:` in place is the primary
+1. **Place and trust the two built arm64e components** (`appinst`, `libunixnu-ldid.dylib`) in the image's helpers. The Linux cross build and Mach-O/signature audits pass; neither component has run inside this guest yet.
+2. **Wire the trust-inbox fold** into the phone-resident restart path (reference: `host/fold-trust-inbox.py`).
+3. **LaunchServices registration** (`register.m`): `registerApplicationDictionary:` in place is the primary
    path. installd's provisioning-profile requirement is the most likely thing to reject a profile-less app; on
    this guest a trust-cached binary should read as anchor-trusted and skip it, but if installd still refuses, the
    fallbacks are (a) the installd/MobileInstallation SPI path (entitlements already granted) or (b) a small
@@ -99,5 +98,5 @@ separate arm64e dependency, placed beside the helpers like `dropbear` (`userland
    pre-creates one (owned by mobile, uid 501); if LaunchServices/installd instead assigns its own container UUID
    at registration, the pre-created one is orphaned — then either pass the container path in the registration
    dictionary or let installd create it and drop the pre-creation.
-5. **Entitlements of installed apps** carry over from the original signature; capabilities that need Apple
+4. **Entitlements of installed apps** carry over from the original signature; capabilities that need Apple
    services (push, associated domains) won't function — expected for an ad-hoc install.

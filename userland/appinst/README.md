@@ -34,21 +34,22 @@ like `userland/helpers`:
 userland/appinst/build.sh [OUT_DIR]        # default out/userland/appinst
 ```
 
-Output: `OUT_DIR/appinst` (one binary: `install`, `finalize`, `serve` subcommands) and `OUT_DIR/cdhashes.txt`.
+Output: `OUT_DIR/appinst` (one binary: `install`, `finalize`, `serve`), `OUT_DIR/libunixnu-ldid.dylib`, build records/licenses in the signer cache, and `OUT_DIR/cdhashes.txt` for both trusted Mach-Os.
 Built on the Mac (Xcode) or on Linux with the cross toolchain; it links `-framework Foundation -lz` (CommonCrypto
 and LaunchServices resolve at runtime). It is **arm64e** because iOS 27 kills arm64 platform binaries at exec.
 
-### The signer (`ldid`) — a dependency, not built here
+### The signer (`libunixnu-ldid.dylib`) — pinned and built here
 
-appinst re-signs on the device, where there is no Python or cctools, so it calls **`ldid`** at
-`/private/var/oneios/bin/ldid` (like the helpers' debug shell uses a prebuilt `dropbear`). Build an **arm64e**
-`ldid` (ProcursusTeam/ldid, or take Droid-VM/ownervisor's), sign it ad-hoc at 4 KiB like these binaries, and put
-it in the helpers output directory before `roottweak apply` so its own CDHash is trusted. `ldid`'s default code
-signature page size is 4 KiB, which matches the kernel.
+`build.sh` also builds the pinned Procursus ldid sources and static OpenSSL/libplist dependencies as an **arm64e**
+in-process signer, `libunixnu-ldid.dylib`, using `build-signer.sh`. appinst loads its single
+`unixnu_ldid_sign_bundle` export from `/private/var/oneios/bin/libunixnu-ldid.dylib`; no guest fork, Python,
+cctools, external signer command or Apple key is needed. The wrapper runs `-Hsha256 -M -S`, preserving each
+binary's existing entitlements and producing a 4 KiB-page ad-hoc signature. Both appinst and the signer dylib
+must be installed as helpers and included in the owner trust cache.
 
 ## Install it into an image
 
-Put `OUT_DIR/appinst`, the two files in `services.d/`, and the `ldid` binary into the helpers output directory,
+Put `OUT_DIR/appinst`, `OUT_DIR/libunixnu-ldid.dylib`, and the two files in `services.d/` into the helpers output directory,
 then `roottweak apply --helpers DIR` (it installs every signed Mach-O into `/private/var/oneios/bin` and lists
 its CDHash in `owner-trust.json`). Enable the services with `enabled/appinst-finalize` and
 `enabled/appinst-serve` in the Data seed. See `userland/helpers/README.md`.

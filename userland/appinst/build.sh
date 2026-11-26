@@ -4,9 +4,9 @@
 #
 #   userland/appinst/build.sh [OUT_DIR]        default out/userland/appinst (git-ignored)
 #
-# Output: OUT_DIR/appinst (one binary with the install/finalize/serve subcommands) and OUT_DIR/cdhashes.txt.
-# Put OUT_DIR/appinst — and an arm64e `ldid` named "ldid" (see README "the signer") — into the helpers output
-# directory so `roottweak apply --helpers` installs them in /private/var/oneios/bin and trusts their CDHashes.
+# Output: OUT_DIR/appinst, OUT_DIR/libunixnu-ldid.dylib (the pinned in-process signer), and OUT_DIR/cdhashes.txt.
+# Put both Mach-O files into the helpers output so `roottweak apply --helpers` installs them in
+# /private/var/oneios/bin and trusts their CDHashes.
 #
 # Toolchain: scripts/ios (docs/building.md section 9), same as the helpers: ios-clang, then ios-sign.py. The link
 # is against the guest's iOS 27 stubs (out/ios27-tbd) when present, else the SDK's. arm64e because iOS 27 kills
@@ -41,21 +41,13 @@ cc_m -c "$HERE/serve.m"    -o "$OBJ/serve.o"
 
 "$IOS_DIR/ios-sign.py" --identifier com.oneios.appinst --entitlements "$HERE/entitlements.plist" "$OUT/appinst" >/dev/null
 
-# Same reader the image build uses: fails on an unsigned file, and prints arch + page size.
-python3 -I "$REPO/userland/tweak" cdhash "$OUT/appinst" | tee "$OUT/cdhashes.txt"
+# The signer is pinned source, built as an arm64e dylib and loaded in-process by appinst (no guest fork).
+"$HERE/build-signer.sh" "$OUT"
+
+# Same reader the image build uses: fails on unsigned files and prints arch + signature page size.
+python3 -I "$REPO/userland/tweak" cdhash "$OUT/appinst" > "$OUT/appinst-cdhash.txt"
+cat "$OUT/appinst-cdhash.txt" "$OUT/ldid-cdhash.txt" | tee "$OUT/cdhashes.txt"
 if grep -v -q 'arm64e pages=4096' "$OUT/cdhashes.txt"; then
-  echo "build.sh: appinst is not arm64e with 4 KiB signature pages (line above)" >&2; exit 1
-fi
-
-# ldid is a separate dependency (the on-device signer); like dropbear for the helpers, it is not built here.
-if [ ! -f "$OUT/ldid" ]; then
-  cat >&2 <<EOF
-
-appinst built. One dependency is still needed at install time: an arm64e 'ldid' at
-  /private/var/oneios/bin/ldid   (the on-device ad-hoc signer appinst calls).
-Build it for arm64e (e.g. the ProcursusTeam/ldid 'ldid' target with the scripts/ios toolchain, or take
-Droid-VM/ownervisor's), sign it ad hoc with 4 KiB pages like these binaries, and place it in the helpers
-output directory before 'roottweak apply' so its CDHash is trusted too. See README.md "the signer".
-EOF
+  echo "build.sh: an appinst component is not arm64e with 4 KiB signature pages (lines above)" >&2; exit 1
 fi
 echo "appinst in $OUT"

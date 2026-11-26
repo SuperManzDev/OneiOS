@@ -5,6 +5,7 @@
 #import <Foundation/Foundation.h>
 
 #include <dirent.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <limits.h>
 #include <spawn.h>
@@ -91,19 +92,24 @@ static void collect_machos(NSString *dir, NSMutableArray<NSString *> *out) {
   }
 }
 
-// ---- ldid ad-hoc sign at 4 KiB (ldid's default page size), optionally with entitlements/identifier ----
-static int ldid_sign(const char *file, const char *ent_xml_path, const char *identifier) {
-  char sflag[PATH_MAX + 2];
-  if (ent_xml_path) snprintf(sflag, sizeof sflag, "-S%s", ent_xml_path);
-  else snprintf(sflag, sizeof sflag, "-S");
-  char iflag[256];
-  const char *argv[6]; int n = 0;
-  argv[n++] = APPINST_LDID;
-  argv[n++] = sflag;
-  if (identifier) { snprintf(iflag, sizeof iflag, "-I%s", identifier); argv[n++] = iflag; }
-  argv[n++] = file;
-  argv[n] = NULL;
-  return run(argv);
+// ---- pinned in-process ldid signer: no fork or external command in the guest ---------------------------
+typedef int (*ldid_sign_fn)(const char *, char *, size_t);
+static int ldid_sign(const char *file, char *why, size_t why_size) {
+  static void *library;
+  static ldid_sign_fn sign;
+  if (!sign) {
+    library = dlopen(APPINST_LDID_LIBRARY, RTLD_NOW | RTLD_LOCAL);
+    if (!library) {
+      snprintf(why, why_size, "load %s: %s", APPINST_LDID_LIBRARY, dlerror());
+      return 1;
+    }
+    sign = (ldid_sign_fn)dlsym(library, "unixnu_ldid_sign_bundle");
+    if (!sign) {
+      snprintf(why, why_size, "unixnu_ldid_sign_bundle: %s", dlerror());
+      return 1;
+    }
+  }
+  return sign(file, why, why_size);
 }
 
 static NSString *hex_of(const uint8_t *b, int n) {
@@ -155,7 +161,6 @@ int appinst_install(const char *ipa_path) {
     collect_machos(app, machos);
     if (machos.count == 0) { logln("no Mach-O found in the bundle"); rm_rf(work_c); return 1; }
 
-    NSString *main_exe = [app stringByAppendingPathComponent:exe];
     NSMutableArray<NSString *> *cdhashes = [NSMutableArray array];
 
     for (NSString *m in machos) {
@@ -172,25 +177,15 @@ int appinst_install(const char *ipa_path) {
       if (te == MACHO_NOT_MACHO) continue;          // shouldn't happen (we filtered), but be safe
       if (te != MACHO_OK) { logln("thin %s: %s", m.lastPathComponent.UTF8String, macho_strerror(te)); rm_rf(work_c); return 1; }
 
-      BOOL is_main = [m isEqualToString:main_exe];
-
-      // 2) preserve the app's own entitlements on the main executable.
-      char *ent = NULL; size_t ent_len = 0; char ent_path[PATH_MAX]; ent_path[0] = 0;
-      if (is_main) {
-        if (macho_entitlements_xml(mc, &ent, &ent_len) == MACHO_OK && ent) {
-          snprintf(ent_path, sizeof ent_path, "%s/entitlements.plist", work_c);
-          FILE *f = fopen(ent_path, "wb");
-          if (f) { fwrite(ent, 1, ent_len, f); fclose(f); } else ent_path[0] = 0;
-        }
-        free(ent);
-      }
-
-      // 3) re-sign ad-hoc at 4 KiB (clears the platform-binary flag by definition of an ad-hoc signature).
-      int sr = ldid_sign(mc, is_main && ent_path[0] ? ent_path : NULL, is_main ? bundle_id.UTF8String : NULL);
-      if (sr != 0) { logln("ldid failed on %s (rc=%d). Is %s present?", m.lastPathComponent.UTF8String, sr, APPINST_LDID);
+      // 2) re-sign ad-hoc at 4 KiB. The pinned in-process ldid uses -Hsha256 -M -S: it keeps the existing
+      // entitlements, and an ad-hoc signature never grants Apple's platform-binary status.
+      char signer_why[256] = {0};
+      int sr = ldid_sign(mc, signer_why, sizeof signer_why);
+      if (sr != 0) { logln("ldid failed on %s (rc=%d): %s", m.lastPathComponent.UTF8String, sr,
+                          signer_why[0] ? signer_why : "no reason returned");
         rm_rf(work_c); return 1; }
 
-      // 4) read back the CDHash the trust cache needs.
+      // 3) read back the CDHash the trust cache needs.
       uint8_t cd[MACHO_CDHASH_LEN];
       macho_err ce = macho_cdhash(mc, cd);
       if (ce != MACHO_OK) { logln("cdhash %s: %s", m.lastPathComponent.UTF8String, macho_strerror(ce)); rm_rf(work_c); return 1; }
@@ -198,10 +193,10 @@ int appinst_install(const char *ipa_path) {
       logln("signed %-28s %s", m.lastPathComponent.UTF8String, arch);
     }
 
-    // 5) trust inbox (xnuhost folds these into the owner trust module at the next boot).
+    // 4) trust inbox (the phone launcher folds these into the owner trust module before the next boot).
     if (write_trust_inbox(bundle_id, cdhashes) != 0) { rm_rf(work_c); return 1; }
 
-    // 6) place the bundle under a fresh container UUID and pre-create the data container.
+    // 5) place the bundle under a fresh container UUID and pre-create the data container.
     NSString *bundle_uuid = NSUUID.UUID.UUIDString;
     NSString *data_uuid = NSUUID.UUID.UUIDString;
     NSString *dest_dir = [@(APPINST_BUNDLE_ROOT) stringByAppendingPathComponent:bundle_uuid];
@@ -216,7 +211,7 @@ int appinst_install(const char *ipa_path) {
       mkdirs([data_dir stringByAppendingPathComponent:sub].fileSystemRepresentation, 0755);
     chown_r(data_dir.fileSystemRepresentation, 501, 501);   // mobile owns its data container
 
-    // 7) pending marker for phase 2 (registration after the restart makes the CDHashes valid).
+    // 6) pending marker for phase 2 (registration after the restart makes the CDHashes valid).
     mkdirs(APPINST_PENDING, 0755);
     NSDictionary *marker = @{ @"bundle_id": bundle_id, @"app_path": dest_app, @"data_path": data_dir,
                               @"bundle_uuid": bundle_uuid, @"data_uuid": data_uuid };
@@ -226,7 +221,7 @@ int appinst_install(const char *ipa_path) {
     rm_rf(work_c);
     logln("staged %@ — %lu Mach-O(s) trusted. Restart the guest to finish.", bundle_id, (unsigned long)cdhashes.count);
 
-    // 8) ask for the guest-VM restart that commits the trust cache.
+    // 7) ask for the guest-VM restart that commits the trust cache.
     if (appinst_request_restart() != 0)
       logln("could not request a restart automatically — restart the guest VM to finish installing %@.", bundle_id);
     return 0;

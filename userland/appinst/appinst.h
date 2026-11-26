@@ -20,7 +20,7 @@
 #define APPINST_ROOT        "/private/var/oneios/appinst"
 #define APPINST_WORK        APPINST_ROOT "/work"          // temp unzip/sign scratch
 #define APPINST_PENDING     APPINST_ROOT "/pending"       // <bundleid>.plist markers for phase 2
-#define APPINST_LDID        "/private/var/oneios/bin/ldid"// on-device ad-hoc signer (see README)
+#define APPINST_LDID_LIBRARY "/private/var/oneios/bin/libunixnu-ldid.dylib" // pinned in-process ad-hoc signer
 
 // The trust inbox: one JSON per app, in exactly the owner-trust-extra shape make-owner-trust-bundle.py reads
 // ({"cdhashes":[...hex...],"category":0}). xnuhost folds every file here into the owner trust module it injects
