@@ -73,7 +73,7 @@ n=$((n + 1))
 
 if [ "${BUILD:-0}" = 1 ]; then
     "$HERE/build-module.sh" >/tmp/oneios-ksu-build-test.log
-    zipfile=$(sed -n 's/^build-module: //p' /tmp/oneios-ksu-build-test.log | head -n 1)
+    zipfile=$(sed -n 's/^build-module: \(.*\.zip\)$/\1/p' /tmp/oneios-ksu-build-test.log | head -n 1)
     if [ -f "$zipfile" ] && unzip -Z1 "$zipfile" | grep -qx 'module.prop' && \
        unzip -Z1 "$zipfile" | grep -qx 'system/bin/oneios-native' && \
        ! unzip -Z1 "$zipfile" | grep -Eq '(^|/)(post-fs-data|service|boot-completed)\.sh$'; then

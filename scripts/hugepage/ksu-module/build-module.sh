@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build an inert, on-demand KernelSU module for the connected reviewed phone.
+# Build an inert, on-demand KernelSU module for the reviewed phone; a connected phone revalidates the checked-in target profile.
 set -euo pipefail
 ROOT=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 HERE=$ROOT/scripts/hugepage/ksu-module
@@ -12,14 +12,26 @@ ADB=${ADB:-adb}
 mkdir -p "$OUT"
 for f in "$HUGE" "$SHARE" "$UDMABUF" "$HALTPOLL"; do [ -f "$f" ] || { echo "build-module: no $f" >&2; exit 1; }; done
 command -v zip >/dev/null || { echo "build-module: zip is required" >&2; exit 1; }
-"$ADB" get-state >/dev/null
-
+PROFILE=${PROFILE:-$HERE/target-pa3q.conf}
+[ -r "$PROFILE" ] || { echo "build-module: no reviewed target profile $PROFILE" >&2; exit 1; }
+. "$PROFILE"
+model=$TARGET_MODEL
+device=$TARGET_DEVICE
+kernel=$TARGET_UNAME
+fingerprint=$TARGET_FINGERPRINT
 phone() { "$ADB" shell "$1" | tr -d '\r'; }
-model=$(phone 'getprop ro.product.model')
-device=$(phone 'getprop ro.product.device')
-kernel=$(phone 'uname -r')
-fingerprint=$(phone 'getprop ro.build.fingerprint')
-[ -n "$model" ] && [ -n "$device" ] && [ -n "$kernel" ] && [ -n "$fingerprint" ] || { echo "build-module: incomplete target identity" >&2; exit 1; }
+if "$ADB" get-state >/dev/null 2>&1; then
+    live_model=$(phone 'getprop ro.product.model')
+    live_device=$(phone 'getprop ro.product.device')
+    live_kernel=$(phone 'uname -r')
+    live_fingerprint=$(phone 'getprop ro.build.fingerprint')
+    [ "$live_model/$live_device/$live_kernel/$live_fingerprint" = "$model/$device/$kernel/$fingerprint" ] || {
+        echo "build-module: connected phone differs from reviewed profile: $live_model/$live_device $live_kernel" >&2; exit 1;
+    }
+    echo "build-module: connected phone matches $PROFILE"
+else
+    echo "build-module: phone offline; packaging the fail-closed reviewed profile $PROFILE"
+fi
 case "$model/$device" in SM-S938U/pa3q) ;; *) echo "build-module: refused unreviewed target $model/$device" >&2; exit 1 ;; esac
 
 stage=$(mktemp -d "${TMPDIR:-/tmp}/oneios-ksu.XXXXXX")
@@ -42,9 +54,9 @@ quote() { printf '%s' "$1" | sed "s/'/'\\\\''/g"; }
     printf "TARGET_DEVICE='%s'\n" "$(quote "$device")"
     printf "TARGET_UNAME='%s'\n" "$(quote "$kernel")"
     printf "TARGET_FINGERPRINT='%s'\n" "$(quote "$fingerprint")"
-    printf "PAGEBLOCK_ORDER='9'\nMIGRATE_CMA='-1'\nDISABLE_KAPI='kallsyms_lookup_name'\n"
-    printf "VMID_OFF='0'\nRM_OFF='504'\nVM_STATUS_OFF='536'\n"
-    printf "LAUNCH_RAM_MIB='4096'\nLAUNCH_NEED_PAGES='2032'\n"
+    printf "PAGEBLOCK_ORDER='%s'\nMIGRATE_CMA='%s'\nDISABLE_KAPI='%s'\n" "$PAGEBLOCK_ORDER" "$MIGRATE_CMA" "$DISABLE_KAPI"
+    printf "VMID_OFF='%s'\nRM_OFF='%s'\nVM_STATUS_OFF='%s'\n" "$VMID_OFF" "$RM_OFF" "$VM_STATUS_OFF"
+    printf "LAUNCH_RAM_MIB='%s'\nLAUNCH_NEED_PAGES='%s'\n" "$LAUNCH_RAM_MIB" "$LAUNCH_NEED_PAGES"
     printf "SHA_HUGEPAGE='%s'\n" "$(sha256sum "$stage/bin/gh_hugepage_reserve.ko" | cut -d' ' -f1)"
     printf "SHA_HOSTSHARE='%s'\n" "$(sha256sum "$stage/bin/gunyah_host_share.ko" | cut -d' ' -f1)"
     printf "SHA_UDMABUF='%s'\n" "$(sha256sum "$stage/bin/udmabuf_gki.ko" | cut -d' ' -f1)"
