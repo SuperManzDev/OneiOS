@@ -182,7 +182,9 @@ static void test_serve(const char *tmp)
   // brightness: the saved level is reported, one bounded linear set reaches the fake panel
   guest_send(g, OB_CH_BRIGHTNESS, OB_BRIGHT_QUERY, NULL, 0);
   struct ob_bright_state bright_state;
-  CHECK(guest_recv(g, &rx, 2000) == 8 + (int)sizeof bright_state);
+  int bright_size;
+  do bright_size = guest_recv(g, &rx, 2000); while (bright_size > 0 && (memcpy(&h, rx.message, 8), h.channel != OB_CH_BRIGHTNESS));
+  CHECK(bright_size == 8 + (int)sizeof bright_state);
   memcpy(&h, rx.message, 8); memcpy(&bright_state, rx.message + 8, sizeof bright_state);
   CHECK(h.channel == OB_CH_BRIGHTNESS && h.type == OB_BRIGHT_STATE && bright_state.flags == OB_BRIGHT_HAS_PANEL && bright_state.max_nits == 500);
   struct ob_bright_set bright_set = { .level = BR_BRIGHT_FULL, .fade_ms = 0, .flags = OB_BRIGHT_LINEAR };
@@ -194,7 +196,7 @@ static void test_serve(const char *tmp)
   guest_send(g, OB_CH_BATTERY, OB_BATTERY_QUERY, NULL, 0);
   struct ob_battery_state state;
   int battery_size;
-  do battery_size = guest_recv(g, &rx, 2000); while (battery_size > 0 && (memcpy(&h, rx.message, 8), h.channel == OB_CH_HCI));
+  do battery_size = guest_recv(g, &rx, 2000); while (battery_size > 0 && (memcpy(&h, rx.message, 8), h.channel != OB_CH_BATTERY));
   CHECK(battery_size == 8 + (int)sizeof state);
   memcpy(&h, rx.message, 8); memcpy(&state, rx.message + 8, sizeof state);
   CHECK(h.channel == OB_CH_BATTERY && h.type == OB_BATTERY_STATE && h.length == sizeof state);
