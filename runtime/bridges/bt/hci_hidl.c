@@ -60,8 +60,11 @@ typedef struct {
   bool aidl;                      // the AIDL HAL on /dev/binder, not HIDL on /dev/hwbinder
   uint32_t header;                // the AIDL token header the HAL accepted
   bool waiting_init;              // initialize() returned, initializationComplete not yet
+  unsigned init_retries;          // one recovery when AIDL reports the previous client still initialized
   uint64_t dropped, events, logged_first;
 } hidl_bt;
+
+static int enqueue(hidl_bt *b, uint8_t op, uint8_t type, const uint8_t *packet, size_t length);
 
 static unsigned init_timeout_ms(void)
 {
@@ -130,6 +133,7 @@ static void incoming(hidl_bt *b, const struct binder_transaction_data *tr)
   const uint8_t *packet;
   size_t length;
   int32_t status;
+  bool retry_init = false;
   hb_reader_init(&r, (const void *)(uintptr_t)tr->data.ptr.buffer, tr->data_size, (const void *)(uintptr_t)tr->data.ptr.offsets, tr->offsets_size);
   int rc = b->aidl ? aidl_callback_transact(tr->code, &r, &reply, &type, &packet, &length, &status)
                    : bt_callback_transact(tr->code, &r, &reply, &type, &packet, &length, &status);
@@ -143,15 +147,28 @@ static void incoming(hidl_bt *b, const struct binder_transaction_data *tr)
     pthread_mutex_lock(&b->lock);
     bool expected = b->waiting_init;
     b->waiting_init = false;
+    // AIDL status 1 is ALREADY_INITIALIZED. The Android client can disappear before the HAL has observed its binder
+    // death (the takeover stops zygote immediately); Qualcomm's service closes that old session as it reports status 1.
+    // Close idempotently and initialize once more, after this callback has been answered. Never loop on a real fault.
+    retry_init = b->aidl && status == 1 && expected && b->init_retries == 0;
+    if (retry_init) b->init_retries++;
+    else b->init_retries = 0;
     pthread_mutex_unlock(&b->lock);
-    br_log(status ? 0 : 1, "bluetooth: HAL initialisation %s (status %d)%s", status ? "failed" : "complete: the controller is on", status,
-           expected ? "" : " (not waited for)");
-    br_hci_set_state(b->hci, status == 0 ? 1 : 2);
+    if (retry_init) {
+      br_log(1, "bluetooth: HAL still had the previous AIDL client: closing it and retrying initialization once");
+    } else {
+      br_log(status ? 0 : 1, "bluetooth: HAL initialisation %s (status %d)%s", status ? "failed" : "complete: the controller is on", status,
+             expected ? "" : " (not waited for)");
+      br_hci_set_state(b->hci, status == 0 ? 1 : 2);
+    }
   }
   free_buffer(b->fd, tr->data.ptr.buffer);
-  if (tr->flags & TF_ONE_WAY) return;
-  if (rc || reply.overflow) reply_status(b->fd, rc ? rc : HB_UNKNOWN_TRANSACTION);
-  else reply_parcel(b->fd, &reply);
+  if (!(tr->flags & TF_ONE_WAY)) {
+    if (rc || reply.overflow) reply_status(b->fd, rc ? rc : HB_UNKNOWN_TRANSACTION);
+    else reply_parcel(b->fd, &reply);
+  }
+  if (retry_init && (enqueue(b, OP_CLOSE, 0, NULL, 0) || enqueue(b, OP_OPEN, 0, NULL, 0)))
+    br_hci_set_state(b->hci, 2);
 }
 
 // Reads what the driver has for this thread. reply != NULL: a call is waiting; *done becomes 1 when
@@ -320,6 +337,21 @@ static void connect_hal(hidl_bt *b)
     br_hci_set_state(b->hci, 2);
     return;
   }
+  if (b->aidl) {
+    // The service has one global HCI client. During takeover Android's Bluetooth process has just gone, but Qualcomm's
+    // HAL can still retain that client until binder death is processed. close() is idempotent in the stable AIDL HAL;
+    // take explicit ownership before initialize instead of depending on that timing.
+    static const uint32_t headers[] = { AIDL_HDR_SYST, AIDL_HDR_VNDR };
+    int close_rc = -EIO;
+    for (unsigned i = 0; i < 2 && close_rc; i++) {
+      hb_parcel_init(&p);
+      aidl_put_token(&p, AIDL_HCI, headers[i]);
+      close_rc = call(b, b->service, AIDL_CLOSE, &p, NULL);
+      if (!close_rc) b->header = headers[i];
+    }
+    br_log(close_rc ? 0 : 1, "bluetooth: AIDL ownership: previous client close%s%s", close_rc ? " failed: " : " complete",
+           close_rc ? why(close_rc) : "");
+  }
   pthread_mutex_lock(&b->lock);
   b->waiting_init = true;
   pthread_mutex_unlock(&b->lock);
@@ -470,7 +502,14 @@ static int enqueue(hidl_bt *b, uint8_t op, uint8_t type, const uint8_t *packet, 
   return 0;
 }
 
-static int hidl_open(void *ctx) { return enqueue(ctx, OP_OPEN, 0, NULL, 0); }
+static int hidl_open(void *ctx)
+{
+  hidl_bt *b = ctx;
+  pthread_mutex_lock(&b->lock);
+  b->init_retries = 0;
+  pthread_mutex_unlock(&b->lock);
+  return enqueue(b, OP_OPEN, 0, NULL, 0);
+}
 static void hidl_close(void *ctx) { (void)enqueue(ctx, OP_CLOSE, 0, NULL, 0); }
 static int hidl_send(void *ctx, uint8_t type, const uint8_t *packet, size_t length) { return enqueue(ctx, OP_SEND, type, packet, length); }
 
