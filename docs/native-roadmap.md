@@ -13,7 +13,7 @@ Legend: ✅ shipped to this branch · 🔄 in progress · ⏳ todo · 📱 needs
 - ✅ Take 23 proved sound, AIDL Bluetooth, Wi-Fi, touch and brightness on the phone. Bluetooth transferred 5,691 guest messages with no malformed bridge frames.
 - **Take 23 display finding:** the image was accidentally built with `--gpu`, not `--gpu-scanout`. `vm-boot` therefore selected the pool-copy fallback. The panel remained under One UI's 10–30 Hz policy and partial-row copies caused visible flicker. This was a presentation-path regression, not a new Metal failure: the guest logged no rejected GPU operations.
 - 🔄 `kernel-take23-fixed.img` is rebuilt with `--gpu-scanout`; its disk recipe contains `scanout 1440 3120 120` and its boot arguments contain `oneios-virtio-scanout=1`. It needs one short phone confirmation.
-- 🔄 Haptics remain open. Take 23 carried 14 guest haptic messages as one long envelope: 13 duration effects and two stops, with **zero discrete impacts**. The HAL reported no failures, so the next session must test named interactions (keyboard tap, selection tick, lock/unlock) rather than judging the startup envelope.
+- 🔄 Haptics remain open, with a concrete Take 23 build regression fixed. Take 23 carried 14 guest haptic messages as one long envelope—13 duration effects and two stops—with **zero discrete impacts**. Unlike Take 22, its image omitted `oneios-hid-buttons-builtin=1` and `oneios-button-haptics=1`; the kernel logged `ONEIOS BUTTON HAPTICS: off`. The fixed image restores both arguments (and Take 22's `oneios-data-wait=1800`). The next session must confirm named interactions: keyboard tap, selection tick and lock/unlock.
 
 ## 2. The two findings behind “50 fps and hot”
 
@@ -25,7 +25,7 @@ Legend: ✅ shipped to this branch · 🔄 in progress · ⏳ todo · 📱 needs
 ### P0 — visible regressions and hardware acceptance
 
 - 🔄📱 **Take 23 fixed scanout:** run `build_take23_fixed.sh`, then `run_take23.sh`. Acceptance: display log says it asked SurfaceFlinger for native mode 0, panel policy 120–120 Hz, crosvm display service present, and no pool-copy lines or visible flicker.
-- 🔄📱 **Haptics:** reproduce keyboard, selection, lock and notification patterns separately. Acceptance: short interactions produce `native impact ... source N ms, classified after 5 ms silence`; no 110 ms HEAVY_CLICK for a 5–10 ms tap; sustained patterns remain VIB/STOP.
+- 🔄📱 **Haptics:** the fixed image restores Take 22's built-in side-key and stand-in button-haptics arguments. Reproduce keyboard, selection, lock and notification patterns separately. Acceptance: boot logs `ONEIOS BUTTON HAPTICS: on`; short interactions produce `native impact ... source N ms, classified after 5 ms silence`; no 110 ms HEAVY_CLICK for a 5–10 ms tap; sustained patterns remain VIB/STOP.
 - ✅ **Bluetooth AIDL:** the S25 HAL is `android.hardware.bluetooth.IBluetoothHci/default`. The bridge now closes a stale previous AIDL client before initialize and retries `ALREADY_INITIALIZED` once. Physical preflight passed open, HCI Reset, Read BD_ADDR and close; Android Bluetooth recovered afterward. Never print controller identity data.
 - ✅ **Brightness:** bounded test wrote 119 with ceiling 2953 and restored One UI's saved level.
 - ✅ **Native haptic capability:** TICK/CLICK/HEAVY_CLICK read-only inventory passed on vibrator HAL v2.

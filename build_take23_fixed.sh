@@ -13,7 +13,7 @@ make -C runtime/loader
 "$LOADER" "$KERNEL" "$OUT" \
   --ram-mib 4096 \
   --cpus 6 \
-  --args-add oneios_native_impacts=1 \
+  --args-add 'oneios-data-wait=1800 oneios-hid-buttons-builtin=1 oneios-button-haptics=1 oneios_native_impacts=1' \
   --image "$IMAGE_SET" \
   --display 1440x3120 \
   --scale 3 \
