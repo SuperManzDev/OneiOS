@@ -25,6 +25,7 @@ import android.widget.TextView;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.util.Collections;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -323,6 +324,7 @@ public final class MainActivity extends Activity {
                 .setIcon(Icon.createWithResource(this, R.drawable.ic_shortcut_prepare))
                 .setIntent(intent)
                 .build();
+        manager.updateShortcuts(Collections.singletonList(shortcut));
         Intent callbackIntent = new Intent(this, MainActivity.class).setAction("dev.oneios.nativeprep.PINNED");
         PendingIntent callback = PendingIntent.getActivity(this, 10, callbackIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
