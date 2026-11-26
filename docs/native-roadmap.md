@@ -46,7 +46,8 @@ Legend: ✅ shipped to this branch · 🔄 in progress · ⏳ todo · 📱 needs
 - ⏳📱 **GPS:** adapt the iOS 27.2 GNSS feeder to 24A446 and inject one fixed coordinate.
 - ⏳ **16 KiB XNU pages:** first read raw `ID_AA64MMFR0_EL1` at EL1 and prove Gunyah stage 2 accepts a 16 KiB stage-1 guest. Do not start the pmap conversion before that.
 - ⏳📱 **RAM experiments:** step reserve sizing while preserving One UI recovery; avoid the known 16 MiB metal2vulkan block-size hang. Balloon/free-page reporting is later work.
-- ⏳ **6–7.5 GiB guest RAM:** reserve up front only after proving the way back still has enough host memory. The current validated configuration is 4 GiB with 2,032 required 2 MiB pages.
+- 🔄 **Early huge-page KernelSU module:** package the reserve module and its pinned parameters as an early-boot KernelSU module so it fills before Android fragments RAM, with status/disable controls and no Knox/EFS writes. A late load after temporary root was restored could not refill 2,032 pages even with One UI stopped; it reached 1,424 pages after mode-2 reclaim, so the short display/haptics confirmation uses 2880 MiB (exactly 1,424 required pages).
+- ⏳ **6–7.5 GiB guest RAM:** reserve up front only after proving the way back still has enough host memory. The 4 GiB image needs 2,032 available 2 MiB pages; 3040 MiB needs 1,504.
 
 ### P3 — larger work
 
