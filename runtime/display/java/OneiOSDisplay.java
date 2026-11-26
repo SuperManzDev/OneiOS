@@ -496,6 +496,21 @@ public final class OneiOSDisplay {
     }
 
     /**
+     * Writes desired mode specs through the signature of this Android release. Android 17 changed the second
+     * argument from one DesiredDisplayModeSpecs object to an array (one entry for this display token).
+     */
+    private static Object setSpecs(Object token, Object specs) throws Exception {
+        Class<?> binder = Class.forName("android.os.IBinder");
+        try {
+            return SC.getMethod("setDesiredDisplayModeSpecs", binder, specs.getClass()).invoke(null, token, specs);
+        } catch (NoSuchMethodException android17) {
+            Object list = java.lang.reflect.Array.newInstance(specs.getClass(), 1);
+            java.lang.reflect.Array.set(list, 0, specs);
+            return SC.getMethod("setDesiredDisplayModeSpecs", binder, list.getClass()).invoke(null, token, list);
+        }
+    }
+
+    /**
      * Asks surfaceflinger for the panel's native mode: the display's desired mode specs as they are, with the
      * default mode replaced and the refresh ranges opened up to that mode's rate (the object's shape changed
      * between Android releases, so it is read and written back rather than built). system_server, which
@@ -529,7 +544,7 @@ public final class OneiOSDisplay {
                     specs.getClass().getField(prefix + "Max").setFloat(specs, (float) hz);
                 }
             }
-            Object set = SC.getMethod("setDesiredDisplayModeSpecs", binder, specs.getClass()).invoke(null, token, specs);
+            Object set = setSpecs(token, specs);
             if (set instanceof Boolean && !((Boolean) set)) throw new IllegalStateException("surfaceflinger refused the mode specs");
             log("asked surfaceflinger for the native mode (id " + id + (hold ? ") held at " : "), up to ") + hz + " Hz");
             return true;
@@ -550,7 +565,7 @@ public final class OneiOSDisplay {
         if (specs == null) return;
         sSpecsBefore = null;
         try {
-            SC.getMethod("setDesiredDisplayModeSpecs", Class.forName("android.os.IBinder"), specs.getClass()).invoke(null, token, specs);
+            setSpecs(token, specs);
             System.err.println("oneios-display: surfaceflinger's policy is One UI's again: " + policyText(policy(token)));
         } catch (Throwable refused) {
             System.err.println("oneios-display: the mode specs could not be given back (" + refused + "): One UI's framework sets its own at its start");

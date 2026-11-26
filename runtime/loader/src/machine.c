@@ -47,6 +47,24 @@ void xl_machine_mac(const xl_machine *m, unsigned which, uint8_t mac[6])
   mac[3] = (uint8_t)(seed >> 16); mac[4] = (uint8_t)(seed >> 8); mac[5] = (uint8_t)seed;
 }
 
+// -[CADisplayMode preferredScale] in QuartzCore does not read /chosen display-scale. In 24A446 its
+// unchanged virtual-device answer is @2x, so @3x needs the same two guarded page-in fixups as xnuhost.
+uint32_t xl_scale_fixups(const char *build, uint32_t scale, char *list, uint32_t length, uint32_t size)
+{
+  static const char *const fixups_24A446_3x[] = {
+    "dyld_shared_cache_arm64e.01,40b17a8,49008052,69008052",
+    "dyld_shared_cache_arm64e.01,40b17bc,280080520895889a,680080521f2003d5",
+  };
+  if (scale != 3 || !build || strcmp(build, "24A446")) return length;
+  for (unsigned i = 0; i < sizeof fixups_24A446_3x / sizeof *fixups_24A446_3x; i++) {
+    uint32_t n = (uint32_t)strlen(fixups_24A446_3x[i]) + 1;
+    if (length > size || n > size - length) break;
+    memcpy(list + length, fixups_24A446_3x[i], n);
+    length += n;
+  }
+  return length;
+}
+
 void xl_machine_board(xl_machine *m, unsigned ncpu, const xl_device_kind *kinds, unsigned ndev)
 {
   m->ncpu = ncpu;

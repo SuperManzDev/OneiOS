@@ -323,6 +323,11 @@ int main(int argc, char **argv)
     m.display_height = display_h;
     m.display_scale = display_scale;
     m.display_hz = display_hz;
+    // QuartzCore does not consume /chosen display-scale. Carry the guarded build-specific @3x fixups
+    // just as xnuhost does, so MobileGestalt, the display driver and the render server agree on scale.
+    static char scale_fixups[256];
+    m.text_fixups_length = xl_scale_fixups(set.build, display_scale, scale_fixups, 0, sizeof scale_fixups);
+    if (m.text_fixups_length) m.text_fixups = scale_fixups;
   }
   FILE *r = fopen("/dev/urandom", "rb");
   if (!r || fread(m.random_seed, 1, sizeof m.random_seed, r) != sizeof m.random_seed) { fprintf(stderr, "/dev/urandom: read failed\n"); return 1; }
@@ -502,10 +507,16 @@ int main(int argc, char **argv)
            GPU_PCI_DEV, (unsigned long long)DRM_HOST_MIB, (unsigned long long)drm_host);
   else
     printf("  restricted DMA pool (crosvm --swiotlb %u) at PA 0x%llx\n", swiotlb_mib, (unsigned long long)pool);
-  if (display_w)
+  if (display_w) {
     printf("  display: %ux%u @%ux, %u Hz; the boot video at PA 0x%llx (the pool's start, %llu bytes, %llu a row); the disks' windows from 0x%llx\n",
            display_w, display_h, display_scale, display_hz, (unsigned long long)fb_pa, (unsigned long long)fb_bytes,
            (unsigned long long)fb_stride, (unsigned long long)disks_pa);
+    if (m.text_fixups_length) {
+      unsigned count = 0;
+      for (uint32_t i = 0; i < m.text_fixups_length; i++) count += m.text_fixups[i] == 0;
+      printf("  UI scale: %u guarded QuartzCore fixups for build %s in /chosen text-fixups\n", count, set.build);
+    }
+  }
   if (display_w)
     printf("  touch: crosvm's virtio-input functions on PCI bus 0 (the kernel finds them), their pages in the pool at 0x%llx (%llu KiB)\n",
            (unsigned long long)input_pa, (unsigned long long)(INPUT_WINDOW >> 10));

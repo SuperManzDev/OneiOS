@@ -169,6 +169,15 @@ static void machine_default(xl_machine *m)
 
 static void test_machine(void)
 {
+  char scale_fixups[256] = { 0 };
+  uint32_t fixup_len = xl_scale_fixups("24A446", 3, scale_fixups, 0, sizeof scale_fixups);
+  const char *second = scale_fixups + strlen(scale_fixups) + 1;
+  CHECK(fixup_len > 0 && !strcmp(scale_fixups, "dyld_shared_cache_arm64e.01,40b17a8,49008052,69008052"));
+  CHECK(second < scale_fixups + fixup_len && !strcmp(second, "dyld_shared_cache_arm64e.01,40b17bc,280080520895889a,680080521f2003d5"));
+  CHECK(xl_scale_fixups("24A446", 2, scale_fixups, 0, sizeof scale_fixups) == 0);
+  CHECK(xl_scale_fixups("unknown", 3, scale_fixups, 0, sizeof scale_fixups) == 0);
+  CHECK(xl_scale_fixups("24A446", 3, scale_fixups, 0, 8) == 0);
+
   xl_machine m;
   const char *err = NULL;
   machine_default(&m);
@@ -250,6 +259,7 @@ static void test_machine(void)
   static const char prime[] = "/System/Library/a.metallib\n/Applications/B.app/default.metallib\n";
   m.prime_list = prime; m.prime_list_length = sizeof prime - 1;
   m.display_width = 1440; m.display_height = 3120; m.display_scale = 2; m.display_hz = 120;
+  m.text_fixups = scale_fixups; m.text_fixups_length = fixup_len;
   t = xl_machine_tree(&m, &err);
   CHECK(t != NULL);
   if (t) {
@@ -257,6 +267,8 @@ static void test_machine(void)
     uint32_t word = 0;
     p = xl_adt_get(ch, "oneios-prime-list");   // the shader priming list as given, without a NUL
     CHECK(p && p->length == sizeof prime - 1 && !memcmp(p->value, prime, sizeof prime - 1));
+    p = xl_adt_get(ch, "text-fixups");
+    CHECK(p && p->length == fixup_len && !memcmp(p->value, scale_fixups, fixup_len));
     p = xl_adt_get(ch, "display-scale");
     CHECK(p && p->length == 4 && (memcpy(&word, p->value, 4), word) == 2);
     p = xl_adt_get(ch, "display-rotation");

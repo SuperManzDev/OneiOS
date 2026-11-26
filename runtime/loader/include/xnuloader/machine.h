@@ -100,6 +100,10 @@ typedef struct {
   uint32_t    host_page_size;
 } xl_machine;
 
+// QuartzCore's build-specific display-scale fixups for /chosen text-fixups. Appends NUL-separated
+// FILE,OFFSET,ORIGINAL,REPLACEMENT entries and returns the new length. Unknown builds and @2x add nothing.
+uint32_t xl_scale_fixups(const char *build, uint32_t scale, char *list, uint32_t length, uint32_t size);
+
 // The board xnuhost emulates: where its windows are (physical addresses inside /arm-io).
 #define XL_BOARD_ARMIO_BASE     0x1000ull
 #define XL_BOARD_ARMIO_SIZE     (0x40000000ull - XL_BOARD_ARMIO_BASE)

@@ -602,7 +602,7 @@ pub fn boot_script_with(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Op
                  $H --crosvm-display {CROSVM_DISPLAY} --size {w}x{h} --hz {hz} --wait 120{tk} </dev/null >>$D/display.txt 2>&1 &\n    \
                  bridge=$!\n    echo \"display: the helper ($bridge) gives crosvm a layer over One UI for the VM's screen: display.txt\"\n  \
                  else\n    echo \"display: no $H: the VM runs without its screen\"\n  fi\nfi\n",
-                tk = if t.takeover { " --takeover --screen-file $D/screen.off" } else { "" }
+                tk = if t.takeover { " --takeover" } else { "" }
             );
         }
         // After the VM: the bridge sees crosvm gone and closes its session (the layer goes); a bridge still there after
@@ -702,14 +702,37 @@ pub fn boot_script_with(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Op
         if swipe {
             touch_find = touch_find.replace("--socket $D/touch.sock </dev/null", "--socket $D/touch.sock --swipe-at 200 --swipe-every 60 </dev/null");
         }
-        // In a takeover the side keys go to the VM too (read, never grabbed: One UI is down) and a click of power switches the
-        // panel: displayctl touch makes screen.off, the helper switches the panel by it (OneiOSDisplay --screen-file)
+        // In a takeover the side keys go to the VM too (read, never grabbed: One UI is down). Power is forwarded only:
+        // iOS decides whether to lock or wake. The host must not blank the panel itself, which raced SpringBoard's first
+        // frame, produced a black screen, and broke power+volume screenshots.
         if t.takeover {
             touch_find = touch_find
                 .replace("tsock=\nforward=\n", "tsock=\nforward=\nkl=; for k in $keys; do kl=\"${kl:+$kl,}/dev/input/$k\"; done\n")
-                .replace(" </dev/null >>$D/touch.txt 2>&1 &\n", "${kl:+ --keys $kl --screen-file $D/screen.off} </dev/null >>$D/touch.txt 2>&1 &\n");
+                .replace(" </dev/null >>$D/touch.txt 2>&1 &\n", "${kl:+ --keys $kl} </dev/null >>$D/touch.txt 2>&1 &\n");
         }
     }
+    // Stopping Samsung's system_server can leave the physical touch IC asleep even though its event node stays open.
+    // Wake it only after the takeover has completed, before crosvm connects to the already-listening forwarder. These
+    // are the same early/late display-on writes One UI's input HAL and the hosted brightness bridge use. Leave mode and
+    // ownership alone; start_ui restores One UI, whose HAL resumes managing the node at the end.
+    let touch_wake = if t.takeover && disks.is_some_and(|d| d.input) {
+        concat!(
+            "TSP=/sys/class/sec/tsp/enabled\n",
+            "if [ -w $TSP ]; then\n",
+            "  tsp_before=$(cat $TSP 2>/dev/null)\n",
+            "  if echo 2,0 > $TSP && echo 2,1 > $TSP; then\n",
+            "    tsp_after=$(cat $TSP 2>/dev/null)\n",
+            "    echo \"touch: Samsung TSP wake 2,0 then 2,1 after One UI stopped (before ${tsp_before:-?}, after ${tsp_after:-?})\"\n",
+            "  else\n",
+            "    echo \"touch: WARNING: Samsung TSP wake was refused after One UI stopped\"\n",
+            "  fi\n",
+            "else\n",
+            "  echo \"touch: WARNING: no writable $TSP after One UI stopped\"\n",
+            "fi\n"
+        )
+    } else {
+        ""
+    };
     // crosvm's Android display blits each frame into the helper's Surface on the GPU with the Vulkan driver it is named (it
     // loads none by itself, and does a CPU copy per frame without one): Droid-VM's Turnip of the package (droidvm::FILES)
     let crosvm_env = if disks.is_some_and(|d| d.scanout.is_some()) {
@@ -759,7 +782,7 @@ if [ {thp} = 1 ]; then
 fi
 grep -E '^(MemAvailable|SwapFree):' /proc/meminfo | tr -s ' ' | sed 's/^/before /'
 echo "start $(date +%s) up $(cut -d' ' -f1 /proc/uptime)"
-{takeover_stop}{gpu_floor}{cpu_floor}{wifi_start}{serve_start}pool=
+{takeover_stop}{touch_wake}{gpu_floor}{cpu_floor}{wifi_start}{serve_start}pool=
 # crosvm logs at info: at debug its GPU renderer wrote a line per submission and fence (take8: 407 MB in 45 minutes,
 # whose copy at the end broke the adb link and left the session's other files empty)
 set -f
@@ -1018,7 +1041,7 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
         }
         if disks.as_ref().is_some_and(|d| d.input) {
             println!(
-                "vm-boot: the screen ({}x{}) on a layer over One UI, the touchscreen to the VM while it runs; volume down held 10 s stops it; in a takeover the side keys go to iOS too (power: the panel and the lock)",
+                "vm-boot: the screen ({}x{}) on a layer over One UI, the touchscreen to the VM while it runs; volume down held 10 s stops it; in a takeover the side keys go to iOS too (power is forwarded; iOS owns lock/wake)",
                 f.width, f.height
             );
         } else {
@@ -1365,12 +1388,17 @@ mod tests {
         // the pool topped up with One UI down when it holds less than the VM's 1776 pages, else left alone
         assert!(s.contains("need=1776\n") && at("echo 3 > /proc/sys/vm/drop_caches") < at("echo 3 > $P/acquire"));
         assert!(s.contains("{ end \"refused pool $avail of $need pages after a top-up\"; exit 1; }"));
+        // system_server is fully down before the Samsung display-on sequence wakes the TSP; crosvm connects afterward
+        assert!(s.contains("echo 2,0 > $TSP && echo 2,1 > $TSP"));
+        assert!(at("takeover: One UI is down while the VM runs") < at("echo 2,0 > $TSP"));
+        assert!(at("echo 2,1 > $TSP") < at("$C --log-level info run"));
         assert!(at("echo $floor > $f/scaling_min_freq") < at("$C --log-level info run"));
         // the helper places its layer on the panel itself, and the caps come back after crosvm
-        assert!(s.contains("--crosvm-display oneios_disp --size 1080x2340 --hz 120 --wait 120 --takeover --screen-file $D/screen.off </dev/null"));
-        // the side keys to the VM, read and never taken, and the panel switched by a click of power
+        assert!(s.contains("--crosvm-display oneios_disp --size 1080x2340 --hz 120 --wait 120 --takeover </dev/null"));
+        // the side keys to the VM, read and never taken; power is forwarded only, so iOS owns lock/wake
         assert!(s.contains("kl=; for k in $keys; do kl=\"${kl:+$kl,}/dev/input/$k\"; done\n"));
-        assert!(s.contains("--socket $D/touch.sock${kl:+ --keys $kl --screen-file $D/screen.off} </dev/null >>$D/touch.txt 2>&1 &\n"));
+        assert!(s.contains("--socket $D/touch.sock${kl:+ --keys $kl} </dev/null >>$D/touch.txt 2>&1 &\n"));
+        assert!(!s.contains("--screen-file"));
         assert!(at("wait $pid") < at("thp_restore\ngpu_restore\ncpu_restore\ncaps_restore\n"));
         // the same takeover with the default tuning: floors off, the governor scales (the power default)
         let d_off = boot_script_with(&l, 3600, true, "ab12", Some(&d), false, true, &Tuning { takeover: true, ..Tuning::DEFAULT });
@@ -1382,6 +1410,7 @@ mod tests {
         // without --takeover nothing of it
         let plain = boot_script_with(&l, 3600, true, "ab12", Some(&d), false, true, &Tuning::DEFAULT);
         assert!(!plain.contains("ui.sh") && !plain.contains("ctl.stop") && !plain.contains("--takeover"));
+        assert!(!plain.contains("/sys/class/sec/tsp/enabled"), "One UI owns the TSP outside a takeover");
         // ui.sh: hugepool's helpers with this folder's names, its results its own
         let u = ui_script(3900);
         if let Ok(dir) = std::env::var("ONEIOS_DUMP_DIR") {

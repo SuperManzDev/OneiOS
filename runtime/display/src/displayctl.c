@@ -804,7 +804,7 @@ static int touch_main(int argc, char **argv)
         if (!m) continue;
         key_events++;
         if (send_all(client, out, m * sizeof *out)) { gone = 1; break; }
-        if (toggle) {
+        if (toggle && screen_path) {
           screen_off = !screen_off;
           switches++;
           if (screen_off) {
