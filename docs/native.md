@@ -777,3 +777,27 @@ What the logs and the code say, and what was changed.
    not the frame rate.
 4. The phone's ID registers: read by vmprobe run 1 (no FEAT_LVA, 4 KiB only, PAC APA 5).
 5. The Adreno 830's kernel side for XNU with Turnip (references: UniXNU's Adreno740, UniXNU-houji's A750 port).
+
+## Flattening the power gap (2026-11-25)
+
+The native VM must cost more than bare Android, but much of today's gap is waste we can cut.
+
+- **The clock floors are off by default now** (`vm-boot --gpu-floor 0 --cpu-floor 0`; `tools/oneios-tool`). They pinned
+  the GPU at 607 MHz and each CPU cluster at 60% of its top for the whole session to hide a swipe's first-frame stutter,
+  but that stutter was the panel held at 60 Hz (`native-frame-latency`), not the clocks. The residency proves the cost:
+  in take12 (floors on) the perf cluster held ~3.0 GHz and **never** dropped to idle and the GPU sat at 607 MHz while
+  only ~12% busy; in take10 (governor, no floors) the perf cluster averaged 1.37 GHz and was idle (≤1.2 GHz) **84%** of
+  the time and the GPU averaged 282 MHz for the same work — and take12 ran ~8 °C hotter on the big-core zone (63.7 vs
+  55.7 °C mean). So the default is now the governor's own scaling; `--gpu-floor 607` / `--cpu-floor 60` stay as opt-in
+  for an A/B. A real battery-drain number (fuel-gauge `current_now`, or `dumpsys batterystats`) still needs the phone;
+  the residency and temperature are a proxy, not watts.
+- **The virtio-gpu transport busy-polls (the structural cost, not yet fixed).** The guest's virtio-gpu on crosvm's PCI
+  has no interrupt: the loader gives PCI functions no `droidvm,intid` (`runtime/loader/src/machine.c`, the `XL_DEV_GPU`
+  case), so the transport (`DroidVMVirtioGpu.cpp`, vendored under `kits/droidvm`, staged by `kernel/build-native.sh`,
+  not a tracked file) waits on each fence by polling the used ring with 100 µs sleeps — a vCPU never deep-idles and the
+  submit→fence round trip is ~6.6 ms with the GPU ~1–30% busy. The fix is not shippable from the PC: it needs either
+  (a) crosvm's virtio-pci MSI-X delivered and the vendored transport sleeping on it, verified against Gunyah's
+  interrupt delivery on the phone (a line that never fires costs every wait its ~20 ms guard — unprovable on QEMU), or
+  (b) an adaptive backoff in that vendored transport (tight spin while a submission is in flight for latency, a real
+  sleep/WFI only when nothing is pending for power). Both touch vendored source and need a phone A/B; see
+  `native-frame-latency` for the frame-rate half.
