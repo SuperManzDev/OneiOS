@@ -1,0 +1,6 @@
+id=oneios_native_on_demand
+name=OneiOS Native VM (On Demand)
+version=0.1.0
+versionCode=1
+author=OneiOS
+description=Manual, fail-closed Gunyah huge-page and support-module preparation; never runs at boot
