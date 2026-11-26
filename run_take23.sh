@@ -22,6 +22,7 @@ exec "$TOOL" phone vm-boot \
   --pin-first 2 \
   --thp \
   --thermal-log \
+  --audio-uid 2000 \
   --native-haptics \
   --brightness \
   --brightness-max 2953 \

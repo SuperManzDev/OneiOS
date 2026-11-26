@@ -28,6 +28,7 @@ Legend: ✅ shipped to this branch · 🔄 in progress · ⏳ todo · 📱 needs
 - 🔄📱 **Haptics:** the fixed image restores Take 22's built-in side-key and stand-in button-haptics arguments. Reproduce keyboard, selection, lock and notification patterns separately. Acceptance: boot logs `ONEIOS BUTTON HAPTICS: on`; short interactions produce `native impact ... source N ms, classified after 5 ms silence`; no 110 ms HEAVY_CLICK for a 5–10 ms tap; sustained patterns remain VIB/STOP.
 - ✅ **Bluetooth AIDL:** the S25 HAL is `android.hardware.bluetooth.IBluetoothHci/default`. The bridge now closes a stale previous AIDL client before initialize and retries `ALREADY_INITIALIZED` once. Physical preflight passed open, HCI Reset, Read BD_ADDR and close; Android Bluetooth recovered afterward. Never print controller identity data.
 - ✅ **Brightness:** bounded test wrote 119 with ceiling 2953 and restored One UI's saved level.
+- 🔄📱 **Speaker level:** Take 23's guest reached volume 128/128 (0 dB digital gain) and virtio-snd dropped no periods, but crosvm opened AAudio as uid 0. Droid-VM's own AAudio backend documents that Android silences a uid-0 stream. The next run uses `vm-boot --audio-uid 2000`; confirm physical speaker level before changing guest gain.
 - ✅ **Native haptic capability:** TICK/CLICK/HEAVY_CLICK read-only inventory passed on vibrator HAL v2.
 
 ### P1 — performance and upstream strategy
