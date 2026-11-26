@@ -280,6 +280,7 @@ obt_ios_claim(uint32_t owner, uint32_t unit)
 		t.qh = t.qt = t.qn = 0;
 		t.said_tx = t.said_rx = 0;
 		bzero(&t.shim, sizeof(t.shim));
+		t.shim.vsc_empty = obt_vsc_empty;
 	}
 	lck_mtx_unlock(&ios_lock);
 	if (e == 0) {

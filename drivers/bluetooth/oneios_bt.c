@@ -18,6 +18,7 @@
 #include <kern/thread.h>
 #include <pexpert/pexpert.h>
 #include "oneios_bt.h"
+#include "oneios_bt_env.h"
 #include "oneios_bridge.h"
 
 extern void IOSleep(unsigned milliseconds);
@@ -56,6 +57,37 @@ off(const char *why)
 	OBT_SAY("%s\n", obt_result);
 	obt_ios_fail(why);
 	oneios_bt_adt_hide();
+}
+
+bool obt_vsc_empty;
+
+/*
+ * Bluetooth powers on in a VM (docs/hardware.md 4, "Bluetooth powers on"; oneios_bt_env.h): 24A446's bluetoothd
+ * powers on only with transport-encoding 10, and 10 alone would give it its own simulated controller. So the nub gets
+ * 10 and bluetoothd's environment BT_HCI_TRANSPORT=H4:POSIX (kern_exec.c, hosted 0087), which keeps its HCI on
+ * com.apple.uart.sk.bluetooth; vendor commands get BTVC's answer (obt_shim.vsc_empty). oneios-bt-hci=0: the tree's
+ * transport-encoding as xnuhost published it (1, H4: power init fails, the state before 2026-11-23);
+ * oneios-bt-hci=T:D another transport and driver of bluetoothd's.
+ */
+static void
+hci_env(void)
+{
+	char arg[48] = "";
+	int r, was;
+
+	(void)PE_parse_boot_arg_str("oneios-bt-hci", arg, sizeof(arg));
+	r = obt_hci_env(arg, oneios_bluetoothd_env, sizeof(oneios_bluetoothd_env));
+	if (r == 0) {
+		OBT_SAY("bluetoothd: transport-encoding as published, no BT_HCI_TRANSPORT (oneios-bt-hci=0): in a VM its power "
+		    "init passes only with 10\n");
+		return;
+	}
+	was = oneios_bt_adt_transport(OBT_TRANSPORT_POWER_VM);
+	obt_vsc_empty = true;
+	OBT_SAY("bluetoothd: transport-encoding %d -> %u (its power init in a VM) and %s at its start (its HCI: "
+	    "/dev/btwake and com.apple.uart.sk.bluetooth, not its own simulated controller)%s; vendor commands answered "
+	    "here as its virtual controller does (status 0)\n", was, OBT_TRANSPORT_POWER_VM, oneios_bluetoothd_env,
+	    r == 3 ? "; oneios-bt-hci's value is not a transport:driver pair bluetoothd knows: the default instead" : "");
 }
 
 /* After the root mount: the transport core, the two kernel controls and the /dev nodes (devfs is up then). bluetoothd
@@ -115,4 +147,5 @@ oneios_bt_start(void)
 	thread_deallocate(th);
 	snprintf(obt_result, sizeof(obt_result), "on: the phone's controller through the host's Bluetooth HAL (opened when bluetoothd connects)");
 	OBT_SAY("%s\n", obt_result);
+	hci_env();
 }

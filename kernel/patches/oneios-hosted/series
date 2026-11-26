@@ -309,3 +309,7 @@
 # 30.1 s ... err=-3905") although the link was up, so it never saved the network or its password: the next session knew
 # 0 networks and the owner typed the password again. The #if also takes XNU_ONEIOS_NATIVE. README.md, "0083".
 0083-native-wifi-association-event.patch
+# native Bluetooth HCI transport (2026-11-26): hosted 0087 for XNU_ONEIOS_NATIVE too. bluetoothd's VM power check
+# requires transport-encoding 10, while its real HCI must stay on the OneiOS H4/POSIX bridge; the driver publishes
+# transport 10 and kern_exec adds BT_HCI_TRANSPORT=H4:POSIX to bluetoothd. oneios-bt-hci=0 disables the override.
+0084-native-bluetoothd-hci-transport.patch

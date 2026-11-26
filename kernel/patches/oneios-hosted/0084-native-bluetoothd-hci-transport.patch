@@ -1,0 +1,70 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 75bf3f4..b239c3c 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -6741,6 +6741,52 @@ bad:
+ }
+ 
+ 
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
++/*
++ * OneiOS native (0084, from hosted 0087): bluetoothd's HCI transport, by its environment. In a virtual machine (/defaults/vmm-present)
++ * 24A446's /usr/sbin/bluetoothd powers on only with transport-encoding 10, and the same number would give it BTVC, a
++ * simulated controller inside its own process (power init 0x100628730, chip initialisation 0x1006294b4, HCI transport
++ * choice 0x10036f8ac). With BT_HCI_TRANSPORT=TRANSPORT:DRIVER in its environment, the HCI transport is taken from that
++ * by name and the number is not read there. So the Bluetooth driver (drivers/bluetooth/oneios_bt.c) sets the nub's
++ * transport-encoding to 10 and fills oneios_bluetoothd_env ("BT_HCI_TRANSPORT=H4:POSIX": H4 over /dev/btwake and the
++ * kernel control com.apple.uart.sk.bluetooth) when the host serves a controller; at each exec of /usr/sbin/bluetoothd
++ * it is added to the environment, unless the environment already names BT_HCI_TRANSPORT (then that is kept). Empty
++ * (Bluetooth off, oneios_bt=0, oneios-bt-hci=0): nothing is added. The launchd job is on the sealed root and cannot be
++ * changed. One line per exec of bluetoothd:
++ *   oneios-bt: bluetoothd gets BT_HCI_TRANSPORT=H4:POSIX (docs/hardware.md 4)      or: ... kept: BT_HCI_TRANSPORT=...
++ */
++char oneios_bluetoothd_env[64];
++
++static int
++oneios_bluetoothd_env_add(struct image_params *imgp, int ptr_size)
++{
++	static const char path[] = "/usr/sbin/bluetoothd";
++	static const char key[] = "BT_HCI_TRANSPORT=";
++	int error;
++
++	if (oneios_bluetoothd_env[0] == '\0' || strcmp(imgp->ip_strings + strlen(EXECUTABLE_KEY), path) != 0) {
++		return 0;
++	}
++	for (char *s = imgp->ip_endargv; s < imgp->ip_strendp; s += strlen(s) + 1) {
++		if (strncmp(s, key, sizeof(key) - 1) == 0) {
++			printf("oneios-bt: bluetoothd's environment names it already, kept: %s\n", s);
++			return 0;
++		}
++	}
++	if ((error = exec_add_user_string(imgp, CAST_USER_ADDR_T(oneios_bluetoothd_env), UIO_SYSSPACE, TRUE)) != 0) {
++		printf("oneios-bt: %s not added to bluetoothd's environment: %d\n", oneios_bluetoothd_env, error);
++		return error;
++	}
++	if (imgp->ip_argspace < ptr_size) {
++		return E2BIG;
++	}
++	imgp->ip_argspace -= ptr_size;
++	imgp->ip_envc++;
++	printf("oneios-bt: bluetoothd gets %s (docs/hardware.md 4)\n", oneios_bluetoothd_env);
++	return 0;
++}
++#endif /* XNU_HOSTED || XNU_ONEIOS_NATIVE */
++
+ /*
+  * exec_extract_strings
+  *
+@@ -6940,6 +6986,12 @@ exec_extract_strings(struct image_params *imgp)
+ 		imgp->ip_argspace -= new_ptr_size; /* to hold envv[] entry */
+ 		imgp->ip_envc++;
+ 	}
++#if XNU_HOSTED || XNU_ONEIOS_NATIVE
++	error = oneios_bluetoothd_env_add(imgp, new_ptr_size);
++	if (error) {
++		goto bad;
++	}
++#endif
+ 
+ 	/* Save space for envv[] NULL terminator */
+ 	if (imgp->ip_argspace < new_ptr_size) {

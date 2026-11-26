@@ -120,7 +120,7 @@ oneios_haptic_vib(uint32_t ms, uint32_t intensity, uint32_t frequency_hz)
  * traffic. The receiver is available only through the host's extended HELLO.
  * The host does not make an unsafe fallback to the Samsung sine path. */
 int
-oneios_haptic_impact(uint32_t kind)
+oneios_haptic_impact(uint32_t kind, uint32_t source_ms, uint32_t quiet_ms)
 {
 	if (!oh_ready || !oh_native_impacts || !(oneios_bridge_features() & OB_FEAT_HAPTIC_IMPACT) ||
 	    kind < OB_IMPACT_LIGHT || kind > OB_IMPACT_HEAVY) {
@@ -132,7 +132,8 @@ oneios_haptic_impact(uint32_t kind)
 		oh_sent_impact++;
 		if (oh_impacts_logged < OH_LOG) {
 			oh_impacts_logged++;
-			printf("ONEIOS HAPTIC: native impact %u: kind %u sent to the host\n", oh_impacts_logged, kind);
+			printf("ONEIOS HAPTIC: native impact %u: kind %u sent to the host; source %u ms, classified after %u ms silence\n",
+			    oh_impacts_logged, kind, source_ms, quiet_ms);
 		}
 	} else {
 		oh_send_failed++;
@@ -212,6 +213,7 @@ oneios_haptic_actuator_play(const int16_t *frames, uint32_t count, uint32_t chan
 	lck_mtx_lock(&oh_alock);
 	oh_act.native_taps = oh_native_impacts;
 	struct oa_request r = oa_period(&oh_act, frames, count, channels);
+	uint32_t classified_quiet_ms = oh_act.quiet_us / 1000u;
 	oh_act_periods++;
 	oh_act_frames += count;
 	if (peak != 0) {
@@ -232,9 +234,11 @@ oneios_haptic_actuator_play(const int16_t *frames, uint32_t count, uint32_t chan
 	} else if (r.action == OA_IMPACT) {
 		/* Short isolated samples are distinct from 20/50 ms segments
 		 * of a sustained waveform. The 3 thresholds are experimental. */
+		/* The Samsung HAL's HEAVY_CLICK lasts 110 ms. A 5-10 ms iOS tap at full PCM peak is not a 110 ms impact:
+		 * choose CLICK (60 ms) for a short strong tap, and reserve HEAVY for a longer strong envelope. */
 		uint32_t kind = r.intensity <= 250 ? OB_IMPACT_LIGHT :
-		    r.intensity <= 800 ? OB_IMPACT_MEDIUM : OB_IMPACT_HEAVY;
-		(void)oneios_haptic_impact(kind);
+		    (r.ms <= 10 || r.intensity <= 800) ? OB_IMPACT_MEDIUM : OB_IMPACT_HEAVY;
+		(void)oneios_haptic_impact(kind, r.ms, classified_quiet_ms);
 	}
 	return count;
 }

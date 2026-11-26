@@ -33,6 +33,7 @@
 #define OA_RENEW_MS    12u
 #define OA_LONG_MS     30u
 #define OA_QUIET_MS    10u
+#define OA_NATIVE_QUIET_MS 5u   /* one engine period: classify an isolated tap without an extra 10 ms hold */
 #define OA_LEVEL_STEP  100u
 
 enum { OA_NONE = 0, OA_VIB = 1, OA_STOP = 2, OA_IMPACT = 3 };
@@ -113,13 +114,16 @@ oa_period(struct oa_state *s, const int16_t *frames, uint32_t count, uint32_t ch
 		s->quiet_us += period_us;
 		if (s->native_taps && !s->on && s->run_us > 0 &&
 		    s->run_us < OA_LONG_MS * 1000u &&
-		    s->quiet_us >= OA_QUIET_MS * 1000u) {
+		    s->quiet_us >= OA_NATIVE_QUIET_MS * 1000u) {
 			r.action = OA_IMPACT;
+			r.ms = (s->run_us + 999u) / 1000u;   /* classifier input: distinguish a short tap from a stronger long impact */
 			r.intensity = s->short_peak * 1000u / 32768u;
 			if (r.intensity == 0) r.intensity = 1;
 			if (r.intensity > 1000) r.intensity = 1000;
 			s->short_peak = 0;
 			s->sign = 0;
+			s->run_us = 0;
+			s->run_crossings = 0;
 		}
 		if (s->quiet_us >= OA_QUIET_MS * 1000u) {
 			if (s->on && s->run_us >= OA_LONG_MS * 1000u) {

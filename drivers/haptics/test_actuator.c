@@ -10,7 +10,7 @@ static int failures, checks;
 
 #define PERIOD 240u   // the engine's period: 5 ms at 48 kHz
 
-struct tally { unsigned vibs, stops, impacts, impact_intensity, first_ms, last_intensity, last_hz; };
+struct tally { unsigned vibs, stops, impacts, impact_intensity, impact_ms, first_ms, last_intensity, last_hz; };
 
 // Feeds `ms` of a sine of `hz` at `amplitude` (0: silence) in engine periods; counts the requests.
 static void feed(struct oa_state *s, struct tally *t, unsigned ms, double hz, double amplitude, unsigned channels, double *phase)
@@ -33,6 +33,7 @@ static void feed(struct oa_state *s, struct tally *t, unsigned ms, double hz, do
 		} else if (r.action == OA_IMPACT) {
 			t->impacts++;
 			t->impact_intensity = r.intensity;
+			t->impact_ms = r.ms;
 		}
 	}
 }
@@ -116,16 +117,16 @@ int main(void)
 		struct oa_state s; memset(&s, 0, sizeof s); s.native_taps = true;
 		struct tally t = { 0 };
 		feed(&s, &t, 5, 230, 32000, 1, &phase);
-		feed(&s, &t, 100, 0, 0, 1, &phase);
-		CHECK(t.impacts == 1 && t.vibs == 0 && t.stops == 0 && t.impact_intensity > 900,
-		    "native tap: impacts %u vibs %u stops %u intensity %u",
-		    t.impacts, t.vibs, t.stops, t.impact_intensity);
+		feed(&s, &t, 5, 0, 0, 1, &phase);
+		CHECK(t.impacts == 1 && t.vibs == 0 && t.stops == 0 && t.impact_intensity > 900 && t.impact_ms == 5,
+		    "native tap: impacts %u vibs %u stops %u intensity %u duration %u",
+		    t.impacts, t.vibs, t.stops, t.impact_intensity, t.impact_ms);
 		feed(&s, &t, 10, 145, 3277, 1, &phase);
-		feed(&s, &t, 100, 0, 0, 1, &phase);
+		feed(&s, &t, 5, 0, 0, 1, &phase);
 		CHECK(t.impacts == 2 && t.vibs == 0 && t.stops == 0 && t.impact_intensity >= 80 &&
-		    t.impact_intensity <= 120,
-		    "native keyboard: impacts %u vibs %u intensity %u",
-		    t.impacts, t.vibs, t.impact_intensity);
+		    t.impact_intensity <= 120 && t.impact_ms == 10,
+		    "native keyboard: impacts %u vibs %u intensity %u duration %u",
+		    t.impacts, t.vibs, t.impact_intensity, t.impact_ms);
 	}
 	{
 		struct oa_state s; memset(&s, 0, sizeof s); s.native_taps = true;

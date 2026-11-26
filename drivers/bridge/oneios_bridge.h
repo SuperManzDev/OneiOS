@@ -36,7 +36,7 @@ int  oneios_haptic_start(void);
 int  oneios_haptic_vib(uint32_t ms, uint32_t intensity, uint32_t frequency_hz);
 // A semantically discrete impact. Only when the host advertised OB_FEAT_HAPTIC_IMPACT;
 // not interchangeable with on_ms and never auto-falls back to a continuous buzz.
-int  oneios_haptic_impact(uint32_t kind);
+int  oneios_haptic_impact(uint32_t kind, uint32_t source_ms, uint32_t quiet_ms);
 void oneios_haptic_make_node(void);
 int  oneios_haptic_publish_closed_loop(void);
 // The Actuator IOAudio2Device of the audio archive (DroidVMAudio.cpp as staged): ready = may publish it;

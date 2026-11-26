@@ -191,7 +191,9 @@ obt_local_answer(struct obt_shim *s, const uint8_t *cmd, size_t n, uint8_t ev[OB
 	ev[3] = 1;
 	ev[4] = cmd[1];
 	ev[5] = cmd[2];
-	if ((op >> 10) == 0x3f) {
+	if ((op >> 10) == 0x3f && s->vsc_empty) {
+		len = 7;                        /* 04 0e 04 01 op op 00: BTVC's handleHciCmdDefault */
+	} else if ((op >> 10) == 0x3f) {
 		status = 0x01;
 		for (unsigned i = 0; i < sizeof(vsc) / sizeof(vsc[0]); i++) {
 			if (vsc[i].op == op) {

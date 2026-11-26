@@ -16,6 +16,7 @@ ${CC:-cc} -std=c11 -Wall -Wextra -Werror brightness/test_als_hid.c -o "${TMPDIR:
 ${CC:-cc} -std=c11 -Wall -Wextra -Werror brightness/test_bl_request.c -lm -o "${TMPDIR:-/tmp}/oneios-test-bl-request.$$" && "${TMPDIR:-/tmp}/oneios-test-bl-request.$$"; rc=$?; rm -f "${TMPDIR:-/tmp}/oneios-test-bl-request.$$"; [ $rc = 0 ]
 ${CC:-cc} -std=c11 -Wall -Wextra -Werror -Ibridge battery/test_battery_props.c -o "${TMPDIR:-/tmp}/oneios-test-battery-props.$$" && "${TMPDIR:-/tmp}/oneios-test-battery-props.$$"; rc=$?; rm -f "${TMPDIR:-/tmp}/oneios-test-battery-props.$$"; [ $rc = 0 ]
 ${CC:-cc} -std=c11 -Wall -Wextra -Werror -D_DEFAULT_SOURCE haptics/test_actuator.c -lm -o "${TMPDIR:-/tmp}/oneios-test-actuator.$$" && "${TMPDIR:-/tmp}/oneios-test-actuator.$$"; rc=$?; rm -f "${TMPDIR:-/tmp}/oneios-test-actuator.$$"; [ $rc = 0 ]
+${CC:-cc} -std=c11 -Wall -Wextra -Werror -D_DEFAULT_SOURCE -Ibluetooth -Ibluetooth/test-include bluetooth/test_bt_env.c bluetooth/oneios_bt_h4.c -o "${TMPDIR:-/tmp}/oneios-test-bt-env.$$" && "${TMPDIR:-/tmp}/oneios-test-bt-env.$$"; rc=$?; rm -f "${TMPDIR:-/tmp}/oneios-test-bt-env.$$"; [ $rc = 0 ]
 if ls ../out/kernel/unixnu/oneios/*/oneios/tree/build/xnu/ios-obj/*/osfmk/DEVELOPMENT/startup.o.json >/dev/null 2>&1; then
   # (drivers/build.py until 2026-11-13; the list of sources is drivers/sources.txt)
   tool=${ONEIOS_TOOL:-../tools/oneios-tool/target/release/oneios-tool}

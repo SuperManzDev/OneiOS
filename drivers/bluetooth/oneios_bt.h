@@ -15,7 +15,8 @@
  *   oneios_bt_ctl.c      kernel control com.apple.uart.bluetooth (as is; iOS 16's bluetoothd, not opened by 27's)
  *   oneios_bt_dev.c      /dev/uart.bluetooth, /dev/cu.bluetooth (as is; 27's bluetoothd only looks whether they
  *                        exist) and /dev/btwake (27's opens it before the pipe)
- *   oneios_bt.c          start, kill switch oneios_bt=0, the result line
+ *   oneios_bt.c          start, kill switch oneios_bt=0, the result line, bluetoothd's transport (oneios-bt-hci)
+ *   oneios_bt_env.h      BT_HCI_TRANSPORT for bluetoothd (no kernel calls; host test test_bt_env.c)
  *   OneiOSBluetooth.cpp  the device tree's "bluetooth" nub: the address in use, hidden when off
  * Not ported (the phone's HAL does them): UART, clocks, rails, power pulses, firmware download.
  */
@@ -91,11 +92,17 @@ int obt_qca_tlv_ack(const uint8_t *e, size_t n);       /* 1 accepted, 0 refused,
 bool obt_is_vendor_event(const uint8_t *e, size_t n);
 int obt_qca_baud_index(uint32_t baud);
 
-/* Answers on the controller's behalf for bluetoothd (negroni 0336/0337) */
+/* Answers on the controller's behalf for bluetoothd (negroni 0336/0337).
+ * vsc_empty: every vendor command (OGF 0x3f) gets Command Complete, status 0, no return parameters: what
+ * 24A446's own virtual controller answers (-[BTVCHciManager handleHciCmdDefault:params:length:]), which is
+ * what bluetoothd's virtual chip (APPLE_VIRTUAL, taken in a VM) was written against. Set while bluetoothd
+ * is told BT_HCI_TRANSPORT (oneios_bt.c); off: the iOS 16 table below. */
 #define OBT_LOCAL_EVENT_MAX     16u
 struct obt_shim {
 	bool mask_known, err_rd, err_wr;
+	bool vsc_empty;
 };
+extern bool obt_vsc_empty;                      /* oneios_bt.c: the mode of every new client's shim */
 unsigned obt_local_answer(struct obt_shim *s, const uint8_t *cmd, size_t n, uint8_t ev[OBT_LOCAL_EVENT_MAX]);
 unsigned obt_fix_event(struct obt_shim *s, uint8_t *e, size_t n);     /* bit 0 mask seen, bit 1 status rewritten */
 int obt_fix_command(uint8_t *c, size_t n);                             /* 1 if changed */
@@ -126,5 +133,12 @@ void obt_sk_pump(void);                         /* pump thread only: the pipe's 
 
 void oneios_bt_adt_publish(const uint8_t addr[6]);
 void oneios_bt_adt_hide(void);
+/* transport-encoding = v on the nub; returns the value it had (0 when none, -1 when there is no nub) */
+int oneios_bt_adt_transport(uint32_t v);
+
+/* ---- bluetoothd's environment (kern_exec.c, hosted 0087) ------------------------------------ */
+
+/* "BT_HCI_TRANSPORT=..." added to /usr/sbin/bluetoothd's environment at its exec; empty: nothing added */
+extern char oneios_bluetoothd_env[64];
 
 #endif /* ONEIOS_BT_H */
