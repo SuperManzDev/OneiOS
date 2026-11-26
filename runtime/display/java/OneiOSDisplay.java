@@ -107,6 +107,17 @@ public final class OneiOSDisplay {
         // hosted session's takeover does; beside One UI the display is the framework's
         sHoldRate = true;      // crosvm presents; nothing here sees touches or frames to raise the rate again
         int[] panel = panel(transaction, takeover, takeover, null);
+        if (takeover) {
+            // One UI may have left the physical display in OFF/DOZE_SUSPEND before its framework stopped. A SurfaceFlinger
+            // layer and a nonzero backlight then appear in screencap while the glass stays black. Force NORMAL once at
+            // takeover start; after this, power keys and framebuffer power belong to iOS, and One UI resets policy on return.
+            try {
+                sPanelToken = display()[1];
+                if (setPanel(true)) { sPanelOff = false; log("the panel is on for the takeover"); }
+            } catch (Throwable unavailable) {
+                log("the panel could not be forced on for the takeover (" + unavailable + ")");
+            }
+        }
         if (hz <= 0) hz = panel[2];
         // the frame fitted to the panel, centred (the guest's frame is normally the panel's own size)
         float scale = Math.min(panel[0] / (float) width, panel[1] / (float) height);
