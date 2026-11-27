@@ -12,6 +12,10 @@ apps they have decrypted themselves. The capability — re-sign ad-hoc, trust th
 SpringBoard — is exactly what the project already does for its own Metal plugin and helpers; appinst only
 generalises it to a whole app bundle.
 
+## Feather and AltStore
+
+Feather (`claration/feather`, GPL-3.0) is a useful UX/reference implementation: import an IPA, sign it, then install through a local `itms-services` server or an IDevice/pairing path. AltStore similarly signs with an Apple developer identity and hands installation to AltServer/MobileInstallation. OneiOS does not need their certificate lifecycle, pairing or seven-day refresh: its VM can trust an ad-hoc CDHash at boot. Reusing either installer unchanged would add certificate and provisioning dependencies without solving TXM trust. `appinst` therefore keeps the direct import/install flow but uses the OneiOS trust-cache route; Feather's source remains a UI/compatibility reference, not copied code.
+
 ## Why the obvious approaches don't fit
 
 Two routes were considered and rejected after reading the kernel:
