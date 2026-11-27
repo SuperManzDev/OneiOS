@@ -54,6 +54,19 @@ then `roottweak apply --helpers DIR` (it installs every signed Mach-O into `/pri
 its CDHash in `owner-trust.json`). Enable the services with `enabled/appinst-finalize` and
 `enabled/appinst-serve` in the Data seed. See `userland/helpers/README.md`.
 
+## Preflight an IPA on the build host
+
+Before sending an IPA to the guest, run the read-only checker. It validates ZIP paths, identifies the root app,
+walks every Mach-O/fat slice and refuses any nonzero FairPlay `cryptid`; it also warns about common injected
+jailbreak/cheat frameworks without modifying the archive:
+
+```sh
+userland/appinst/host/ipa-check.py FILE.ipa
+```
+
+Exit 0 means every Mach-O slice found is already decrypted, exit 2 means encrypted slices remain, and exit 1 is
+a malformed/unsafe archive. This is a compatibility and safety check, not permission to run software you do not own.
+
 ## Use
 
 **From the phone (no PC):** download a decrypted `.ipa` in Safari (it lands in Files), open
