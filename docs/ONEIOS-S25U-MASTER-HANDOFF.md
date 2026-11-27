@@ -1035,3 +1035,355 @@ Then:
 8. launch only with ADB attached and live thermal monitoring;
 9. stop early for the first current-image run;
 10. collect and redact logs before committing any evidence.
+
+---
+
+## Appendix F — Selected sanitized log excerpts
+
+These excerpts are included so the handoff carries concrete evidence, not only conclusions. Device/network/controller identifiers are omitted. Raw logs remain untracked.
+
+### F.1 Physical 120 Hz takeover and restoration
+
+From the accepted crosvm scanout display log:
+
+```text
+oneios-display: crosvm's display service oneios_disp is there
+oneios-display: panel modes: active 1440x3120 at 30 Hz (mode 4; up to 120 Hz at that size), native 1440x3120 at 120 Hz
+oneios-display: asked surfaceflinger for the native mode (id 0) held at 120 Hz
+oneios-display: the panel is in its native mode 1440x3120 at 120 Hz (mode 0); surfaceflinger's policy: default mode 0, the panel at 120 to 120 Hz
+oneios-display: layer up: the guest's 1440x3120 at 0,0 1440x3120 on the panel's 1440x3120, 120 Hz
+oneios-display: the Surface is crosvm's: it draws the VM's screen there (its scanout 0x0)
+oneios-display: the panel's rate over the session: 120 Hz 100 % (187 looks, 5 s apart)
+oneios-display: crosvm's display service is gone: the VM ended
+oneios-display: surfaceflinger's policy is One UI's again: default mode 4, the panel at 10 to 30 Hz
+oneios-display: crosvm's layer removed
+```
+
+### F.2 Bluetooth transport and AIDL ownership
+
+Guest/kernel and phone bridge lines:
+
+```text
+ONEIOS BT: bluetoothd: transport-encoding 10 -> 10 ... BT_HCI_TRANSPORT=H4:POSIX
+ONEIOS BT: transport up ... control com.apple.uart.sk.bluetooth ... /dev/btwake
+ONEIOS BT: sk: bluetoothd connects to com.apple.uart.sk.bluetooth: 0
+ONEIOS BT: bluetoothd: command 0x0c03, 0 parameter bytes
+ONEIOS BT: bluetoothd: command 0x1001, 0 parameter bytes
+ONEIOS BT: bluetoothd: command 0x1009, 0 parameter bytes
+```
+
+```text
+bluetooth: the HAL is the AIDL one (android.hardware.bluetooth.IBluetoothHci/default)
+bluetooth: AIDL ownership: previous client close complete
+bluetooth: HAL AIDL (SYST) found, initialising (power and firmware are the HAL's)
+bluetooth: HAL initialisation complete: the controller is on (status 0)
+bluetooth: first packet from the controller (H4 type 4, 6 bytes)
+bluetooth: the controller hears devices: 2048 report(s) so far (LE advertising)
+```
+
+### F.3 Bridge session summary
+
+```text
+serve: crosvm closed the port (the VM ended): 671 messages from the guest
+(1 hello, 33 haptic, 370 Bluetooth, 266 brightness, 1 battery queries,
+0 on channels not served; 0 bad frames), 2 Bluetooth, 1 brightness and
+19 battery states to it
+```
+
+### F.4 Brightness bounds and restoration path
+
+```text
+brightness: panel on: /sys/class/backlight/panel0-backlight/brightness,
+1..2953 of 12750 (One UI left 918), the slider squared
+```
+
+The separate bounded preflight wrote 119 and restored the saved level. The exact saved value changes with One UI and is not a constant.
+
+### F.5 Haptic guest classification versus physical result
+
+Guest proved the button-haptics personality and impact classification:
+
+```text
+ONEIOS BUTTON HAPTICS: on: AppleSPUHapticsAudioDriver published
+("Button Haptics Asset Interface" = 1, 8 asset slots)
+ONEIOS HAPTIC: native impact 1: kind 3 sent to the host; source 20 ms, classified after 5 ms silence
+ONEIOS HAPTIC: native impact 6: kind 3 sent to the host; source 15 ms, classified after 5 ms silence
+```
+
+Phone bridge accepted the requests:
+
+```text
+haptics: counters: 33 requests from the guest
+(12 vibrate, 1 stop; 0 replaced before they started),
+32 effects played, 1 stopped, 0 failed on the vibrator HAL
+(20 discrete impacts)
+```
+
+Owner observation remained: no useful physical vibration during takeover. Android VibratorManager under One UI was felt. That mismatch is why haptics remain open.
+
+### F.6 Audio transport and host-volume diagnosis
+
+```text
+ONEIOS AUDIO: on: virtio-snd up: output stream 0 ... Speaker and Mic published
+ONEIOS AUDIO: speaker running ... virtio-snd ... 0 dropped (host behind) ... 0 errors
+DroidVMAudio: speaker volume 128 of 128 (0.0 dB, gain 65536 of 65536)
+```
+
+Android later showed host `STREAM_MUSIC` at 1/15. The low physical speaker level was therefore not guest digital attenuation at maximum.
+
+### F.7 GPU telemetry and mapping refusal
+
+Normal active windows included:
+
+```text
+oneios-gpu-report: 10 s: submits +635 (fenced +635); frames +511 mean 6800 us;
+<1/<2/<4/<8/<16/<32 ms +0/+0/+116/+323/+35/+28 longer +9;
+fence timeouts +0; refusals +0
+```
+
+A pressure window showed:
+
+```text
+oneios-gpu-report: 10 s: submits +357 (fenced +357); frames +357 mean 23017 us;
+fence timeouts +2; refusals +1 (op 4 0xe00002c8)
+```
+
+Operation 4 was traced to `DROIDVM_VIRTGPU_MAP`; `0xe00002c8` is `kIOReturnVMError`, not a command-submit rejection.
+
+### F.8 Huge-page safe refusal
+
+A corrected 4 GiB launch stopped before crosvm when the pool was short:
+
+```text
+pool: 1741 pages free, 2032 wanted: topped up while One UI is down
+pool: 1764 pages free after the top-up
+refused pool 1764 of 2032 pages after a top-up
+```
+
+One UI was restored. This is expected fail-closed behavior.
+
+### F.9 Native build and prelink
+
+```text
+== kernel: patch 0085-native-addon-oneios-prefix.patch
+== kernel: native only ... kernel.macho sha256 4460e126...
+build-hosted: ... current-native-take23-appinst/xnu.macho
+```
+
+The first linker failure in the build log is the expected compile-record bootstrap pass. The archive generators then run and the second native link succeeds.
+
+```text
+audit: ca083f979f50a143: 2711 paired, 93 functions on the stub,
+9 data unpaired; 0 failures
+prelink: out/kernel/native-take23-appinst-24A446/kernel.kc
+```
+
+### F.10 IPA preflight
+
+For the locally available modified Subway archive:
+
+```text
+bundle: com.kiloo.subwaysurfers (Subway Surf)
+Mach-O files: 42
+...
+Payload/SubwaySurf.app/SubwaySurf: arm64 cryptid=0
+Payload/SubwaySurf.app/Frameworks/UnityFramework.framework/UnityFramework: arm64 cryptid=0
+WARNING: injected jailbreak/cheat component(s) found
+PASS: every Mach-O slice found has cryptid=0 (decrypted input)
+```
+
+The warning includes CydiaSubstrate/iGameGod-related paths; that archive was not executed.
+
+---
+
+## Appendix G — Representative source changes and diffs
+
+The full authoritative changes are in Git. These short excerpts show the mechanics behind the major fixes.
+
+### G.1 Restore correct GPU scanout packaging
+
+`build_take23_fixed.sh` uses the scanout path, not the copy fallback:
+
+```bash
+"$LOADER" "$KERNEL" "$OUT" \
+  --ram-mib "$RAM_MIB" \
+  --cpus 6 \
+  --display 1440x3120 \
+  --scale 3 \
+  --hz 120 \
+  --shared-ram \
+  --gpu-scanout \
+  --audio \
+  --wifi \
+  --bridge
+
+grep -qx 'scanout 1440 3120 120' "$OUT.disks"
+```
+
+The regression was literally the difference between `--gpu` and `--gpu-scanout`.
+
+### G.2 Bluetooth daemon transport split
+
+The native kernel publishes transport encoding 10 for bluetoothd’s VM power check while injecting the real HCI transport through its environment:
+
+```text
+transport-encoding = 10
+BT_HCI_TRANSPORT=H4:POSIX
+```
+
+Relevant files:
+
+```text
+drivers/bluetooth/oneios_bt_env.h
+drivers/bluetooth/oneios_bt.c
+kernel/patches/oneios-hosted/0084-native-bluetoothd-hci-transport.patch
+runtime/bridges/bt/hci_hidl.c
+```
+
+The host AIDL client now takes ownership before initialize:
+
+```c
+/* close() is idempotent in the stable AIDL HAL; take explicit ownership
+ * before initialize instead of depending on binder-death timing. */
+aidl_put_token(&p, AIDL_HCI, headers[i]);
+close_rc = call(b, b->service, AIDL_CLOSE, &p, NULL);
+```
+
+### G.3 Five-millisecond isolated haptic classification
+
+```c
+#define OA_NATIVE_QUIET_MS 5u
+...
+if (s->native_taps && !s->on && s->run_us > 0 &&
+    s->run_us < OA_LONG_MS * 1000u &&
+    s->quiet_us >= OA_NATIVE_QUIET_MS * 1000u) {
+    r.action = OA_IMPACT;
+    r.ms = (s->run_us + 999u) / 1000u;
+}
+```
+
+Short strong taps no longer automatically mean Samsung HEAVY_CLICK:
+
+```c
+uint32_t kind = r.intensity <= 250 ? OB_IMPACT_LIGHT :
+    (r.ms <= 10 || r.intensity <= 800) ? OB_IMPACT_MEDIUM : OB_IMPACT_HEAVY;
+```
+
+### G.4 Weak ptrauth linker aliases
+
+HID and display generators now skip only linker-local weak aliases such as:
+
+```rust
+if name.starts_with("l_") && name.ends_with(".ptrauth") {
+    continue;
+}
+```
+
+The corresponding global undefined method remains and receives the real original-kernel binding.
+
+### G.5 Screen-safe manual KernelSU preparation
+
+There are deliberately no boot scripts. State changes are explicit commands:
+
+```text
+oneios-native status
+oneios-native prepare 4096
+oneios-native launch
+oneios-native release
+```
+
+Prepare keeps Android running and is transactional. Launch is separately gated:
+
+```sh
+[ -f "$OWNED" ] && grep -q '^state=ready$' "$OWNED" ||
+    die "memory is not prepared"
+[ "$avail" -ge "$LAUNCH_NEED_PAGES" ] ||
+    die "pool has $avail/$LAUNCH_NEED_PAGES pages"
+```
+
+The app’s confirmation text explicitly warns:
+
+```text
+One UI will stop and the screen may go black until iOS posts its first frame.
+Hold Volume Down for 10 seconds when the key monitor is available, or wait
+for the 15-minute VM stop and 20-minute framework failsafe. If Android
+cannot recover, the last-resort failsafe may reboot the phone.
+```
+
+### G.6 Stage without starting
+
+`oneios-tool phone vm-boot --stage-only` still validates and pushes the Image, crosvm package, helpers, `boot.sh` and `ui.sh`, but returns before detached execution:
+
+```rust
+if o.stage_only {
+    println!("vm-boot: staged only: ... no VM started and One UI was not stopped");
+    return Ok(());
+}
+```
+
+### G.7 Native add-on namespace for guest helpers
+
+Kernel patch 0085 preserves normal `/private/var/ngpu` behavior but maps reviewed `oneios/` entries into the persistent helper tree:
+
+```c
+if (!strncmp(name, "oneios/", 7))
+    snprintf(path, sizeof(path), "/private/var/%s", name);
+else
+    snprintf(path, sizeof(path), "/private/var/ngpu/%s", name);
+```
+
+The existing validator still rejects absolute paths and every `..` before writing.
+
+### G.8 Pinned in-process IPA signer
+
+`appinst` no longer shells out to a missing guest `ldid` command:
+
+```c
+library = dlopen(APPINST_LDID_LIBRARY, RTLD_NOW | RTLD_LOCAL);
+sign = (ldid_sign_fn)dlsym(library, "unixnu_ldid_sign_bundle");
+return sign(file, why, why_size);
+```
+
+The signer is built from pinned Procursus ldid, OpenSSL and libplist sources, signed arm64e/ad-hoc with 4 KiB pages, and trust-cached with appinst.
+
+### G.9 Encrypted IPA refusal
+
+```c
+macho_err te = macho_thin(mc, &arch);
+if (te == MACHO_ENCRYPTED) {
+    logln("REFUSED: %s is still encrypted (cryptid=1). ... appinst does not strip DRM.", ...);
+    return 2;
+}
+```
+
+The host preflight mirrors that rule without modifying the IPA and also checks ZIP paths and common injected frameworks.
+
+### G.10 High-level file-change map
+
+| Area | Main files added/changed |
+|---|---|
+| Native Bluetooth | `drivers/bluetooth/*`, `runtime/bridges/bt/hci_hidl.c`, patch 0084 |
+| Brightness | `drivers/brightness/*`, bridge brightness backend, vm-boot opt-in |
+| Haptics | `drivers/haptics/oneios_actuator.h`, `oneios_haptic.c`, HAL backend/tests |
+| Display | `runtime/display/*`, `OneiOSDisplay.java`, scanout image build flags |
+| Kernel generators | `build_oneios_hid.rs`, `build_oneios_display.rs` |
+| KernelSU module | `scripts/hugepage/ksu-module/*` |
+| Android control app | `scripts/hugepage/ksu-module/app/*` |
+| Phone-local launch | `vmboot.rs`, `stage_take23_on_phone.sh`, `oneios-native` |
+| IPA installer | `userland/appinst/*`, patch 0085, loader GPU-add-on option |
+| Documentation | master handoff, native roadmap, appinst design, README precedence notice |
+
+For exact line-by-line diffs use:
+
+```bash
+git show 1a38396e   # Bluetooth transport + haptic classifier
+git show 63272210   # AIDL ownership
+git show 3c1b5d70   # scanout restoration
+git show 3531b7b8   # inert KernelSU module
+git show 80070d67   # Android control app
+git show 85fb3e5a   # stage-once / phone launch
+git show be00ffae   # pinned appinst signer
+git show d21c95ca   # boot add-on placement
+git show cf86cc0c   # IPA preflight
+git show 55dbe8f2   # first committed master handoff
+```
