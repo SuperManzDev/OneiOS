@@ -68,16 +68,12 @@ exists because installd validates the signature at install time and would reject
 
 ## Host wiring (the one open item outside the guest)
 
-At guest boot xnuhost must fold every `/private/var/oneios/trust-inbox/*.json` into the first module (the owner
-module) of the trust-cache bundle it injects, before handing it to the guest. `host/fold-trust-inbox.py` is the
+Before the next native crosvm boot, the Android/phone-resident launch path must fold every `/private/var/oneios/trust-inbox/*.json` into the first module (the owner module), regenerate the loader Image/trust sidecar, and stage that new Image before handing it to the guest. The current native path does not run xnuhost. `host/fold-trust-inbox.py` is the
 reference: it rebuilds the owner module to include the inbox hashes, leaves every other module (Apple's two
 originals, the App cryptex) byte-for-byte, re-sorts the hashes, and re-runs the loader's structural check. The
-phone has no Python, so the device-side fold is a small **xnuhost (Rust) change** that must emit exactly those
-bytes; the Python tool is the authority on the format and also serves the build PC.
+The phone has no Python, so the device-side implementation must be a native Android helper or Rust command that emits exactly those bytes and regenerates the phone-resident Image safely; the Python tool is the format authority and build-PC reference.
 
-Where the trust inbox lives relative to xnuhost matters: it sits on the guest's writable Data volume, which
-xnuhost backs. The restart-time fold reads it from there (or from a dedicated small shared region if that proves
-simpler on the device) — this choice is the xnuhost author's, and is the main integration decision left.
+The trust inbox currently sits inside the guest’s writable Data volume, while the Android launcher cannot read APFS directly. A complete design therefore needs an explicit guest-to-host export or dedicated shared mailbox before shutdown, followed by Android-side fold/Image regeneration. Merely writing `restart-requested` in the guest does not trigger any current host action.
 
 ## Built and signed like the helpers
 
@@ -92,7 +88,7 @@ The appinst binary and signer dylib are both arm64e, ad-hoc signed with 4 KiB pa
 ## What still needs on-device verification
 
 1. **Place and trust the two built arm64e components** (`appinst`, `libunixnu-ldid.dylib`) in the image's helpers. The Linux cross build and Mach-O/signature audits pass; neither component has run inside this guest yet.
-2. **Wire the trust-inbox fold** into the phone-resident restart path (reference: `host/fold-trust-inbox.py`).
+2. **Implement guest-to-host trust export, native fold, Image regeneration/restaging and restart consumption** in the phone-resident launch path (reference format: `host/fold-trust-inbox.py`).
 3. **LaunchServices registration** (`register.m`): `registerApplicationDictionary:` in place is the primary
    path. installd's provisioning-profile requirement is the most likely thing to reject a profile-less app; on
    this guest a trust-cached binary should read as anchor-trusted and skip it, but if installd still refuses, the

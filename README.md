@@ -1,6 +1,8 @@
 # YumikoHayamato's obsessed build
 
-*The Galaxy S25 Ultra build of **OneiOS** — iOS 27 (Darwin 26) running on the phone's own silicon, from a live Android session, with no bootloader unlock and no flashing.*
+*The Galaxy S25 Ultra build of **OneiOS** — iOS 27 running on the phone's own silicon, from a live Android session, with no flashing.*
+
+> **Current native status and precedence:** read [docs/ONEIOS-S25U-MASTER-HANDOFF.md](docs/ONEIOS-S25U-MASTER-HANDOFF.md) first. It is the authoritative 2026-11-26 build/session/recovery record. This README and older port notes contain historical hosted/native statements that may be stale.
 
 OneiOS runs a source-built Apple kernel (**XNU 12377**, from Droid-VM's UniXNU fork) and Apple's unmodified
 iPhone18,2 iOS 27.0.1 (`24A446`) user space on a rooted Samsung Galaxy, next to One UI, using
@@ -8,12 +10,12 @@ iPhone18,2 iOS 27.0.1 (`24A446`) user space on a rooted Samsung Galaxy, next to 
 in a folder, and the switch and the way back stay OneOS-shaped. Apple's binaries come from the owner's own IPSW
 download and are never redistributed here.
 
-This branch (`s25-ultra-sm8750`) is the **Galaxy S25 Ultra (SM-S938B, SM8750 "sun", Adreno 830)** build. It descends
+The reviewed current target profile is **Galaxy S25 Ultra SM-S938U (`pa3q`, SM8750, Adreno 830)**. This work descends
 from the S24 Ultra (SM8650) guest-boot baseline and the S26 Ultra (SM8850) branch, but every result below was
 measured on the owner's S25 Ultra (the `pa3q` sessions in [docs/SM8750_PORT.md](docs/SM8750_PORT.md)).
 
 > **Honesty up front.** Root on this phone is a **temporary KernelSU LKM loaded through an exploit on a *locked*
-> bootloader**; it is gone after any reboot. iOS runs **entirely from RAM** and writes nothing to UFS. There is no
+> bootloader**; it is gone after any reboot. XNU never accesses raw UFS, but the persistent guest Data store is a host file under Android `/data` and therefore can be UFS-backed. There is no
 > Secure Enclave, no passcode, no Face ID — the key store is software and is **not a security boundary**. Sessions
 > are owner-driven, reversible tests, not a daily driver you install. Nothing here is flashed.
 
@@ -81,8 +83,7 @@ iOS's own buffers. This is the owner's answer to the hosted path's trap overhead
 - **Input**: multi-touch, the on-screen keyboard (the dictation loop that pinned a core is fixed), and the hardware
   side keys — power switches the panel, volume goes to iOS, a long press exits.
 - **Takeover mode**: One UI's framework is paused while iOS runs, and restored on exit.
-- **In progress:** the GPU *device* inside the VM (drm2kgsl + virtio-gpu over crosvm's PCI) so the guest renders in
-  the VM instead of on the CPU; today the shared pool and scanout are proven, the in-VM renderer is next.
+- **GPU inside the VM is working:** NativeMetal/metal2vulkan/Turnip submit through virtio-gpu PCI and drm2kgsl to KGSL. Corrected crosvm GPU scanout is physically proven at 120 Hz; remaining work is GPU memory/fence latency, power and thermals.
 
 Per-session logs and raw numbers: [docs/SM8750_PORT.md](docs/SM8750_PORT.md) (hosted) and
 [docs/native.md](docs/native.md) (the Gunyah VM).
@@ -91,7 +92,7 @@ Per-session logs and raw numbers: [docs/SM8750_PORT.md](docs/SM8750_PORT.md) (ho
 
 ## The phone (measured on the owner's S25 Ultra, read-only)
 
-- **SM-S938B** (`pa3qxeea`), SM8750 board `sun`, One UI 9.0 on Android 17, kernel `6.6.127-android15-8`, **4 KiB
+- **SM-S938U** (`pa3q` / product `pa3qsqw`), SM8750, Android 17-era build, exact reviewed kernel `6.6.127-android15-8-p87b1ce1-abogkiS938USQUDDZJB-4k`, **4 KiB
   pages** (no 16 KiB granule on Oryon — iOS's 16 K code signatures are re-derived once per first boot).
 - **CPU:** Qualcomm Oryon, 6 E-cores 0.38–3.53 GHz + 2 P-cores 1.02–4.47 GHz; PAC + BTI. Mapped to 6 E + 2 P vCPUs.
 - **GPU:** Adreno 830 (`Adreno830v2`), KGSL, GMEM 12 MiB, 160–832 MHz; the guest's Turnip knows the a8xx gen1 chip.
@@ -107,9 +108,7 @@ test — is in [docs/SM8750_PORT.md](docs/SM8750_PORT.md) §0b.
 
 ## On-device `.ipa` installer (`appinst`, in review)
 
-[PR #1](https://github.com/YumikoHayamato/OneiOS/pull/1) adds a TrollStore-style **on-device installer**: download an
-already-decrypted `.ipa` in Safari, open a small local page, tap Install, and after a guest-VM restart the icon
-appears on SpringBoard — no PC, no 7-day certificate.
+The branch contains an experimental **decrypted-only on-device installer**. Its arm64e appinst binary and pinned in-process signer build successfully and are packaged/trusted in an unqualified native Image, but dynamic trust-inbox folding, phone-side Image regeneration and LaunchServices finalization are not implemented end to end. It must not yet be described as a working no-PC installer.
 
 Because the S25 runs in **SPTM/TXM** mode (the Trusted Execution Monitor is the signing authority; a binary runs only
 if its CDHash is in a trust cache, and AMFI is never patched), the installer leans on the fact that **the owner trust
