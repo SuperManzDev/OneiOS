@@ -5,8 +5,9 @@ ROOT=$(cd "$(dirname "$0")" && pwd)
 cd "$ROOT"
 
 LOADER=runtime/loader/build/host/xnuloader-crosvm
-KERNEL=out/kernel/native-take23-24A446/kernel.kc
-IMAGE_SET=/mnt/oneios-build/workspace/src/OneiOS/out/image/24A446
+KERNEL=${KERNEL:-out/kernel/native-take23-24A446/kernel.kc}
+IMAGE_SET=${IMAGE_SET:-/mnt/oneios-build/workspace/src/OneiOS/out/image/24A446}
+GPU_ADDON=${GPU_ADDON:-$IMAGE_SET/kernel.kc.gpuaddon}
 RAM_MIB=${RAM_MIB:-4096}
 OUT=${OUT:-out/crosvm/kernel-take23-fixed.img}
 
@@ -16,6 +17,7 @@ make -C runtime/loader
   --cpus 6 \
   --args-add 'oneios-data-wait=1800 oneios-hid-buttons-builtin=1 oneios-button-haptics=1 oneios_native_impacts=1' \
   --image "$IMAGE_SET" \
+  --gpu-addon "$GPU_ADDON" \
   --display 1440x3120 \
   --scale 3 \
   --hz 120 \

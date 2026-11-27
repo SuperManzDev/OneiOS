@@ -313,3 +313,7 @@
 # requires transport-encoding 10, while its real HCI must stay on the OneiOS H4/POSIX bridge; the driver publishes
 # transport 10 and kern_exec adds BT_HCI_TRANSPORT=H4:POSIX to bluetoothd. oneios-bt-hci=0 disables the override.
 0084-native-bluetoothd-hci-transport.patch
+# native add-on helper namespace (2026-11-26): entries below oneios/ are written into /private/var/oneios rather
+# than UniXNU's /private/var/ngpu, so appinst and its oneios-init service fragments can ship in the boot add-on.
+# Absolute paths and every `..` remain rejected before any file is written.
+0085-native-addon-oneios-prefix.patch

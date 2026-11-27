@@ -12,13 +12,15 @@ for f in "$BUILD/appinst" "$BUILD/libunixnu-ldid.dylib" "$HERE/services.d/appins
 done
 stage=$(mktemp -d "${TMPDIR:-/tmp}/oneios-appinst-addon.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
-mkdir -p "$stage/bin" "$stage/services.d"
+mkdir -p "$stage/bin" "$stage/services.d" "$stage/enabled"
 cp "$BUILD/appinst" "$stage/bin/appinst"
 cp "$BUILD/libunixnu-ldid.dylib" "$stage/bin/libunixnu-ldid.dylib"
 cp "$HERE/services.d/"*.conf "$stage/services.d/"
+: > "$stage/enabled/appinst-finalize"
+: > "$stage/enabled/appinst-serve"
 chmod 755 "$stage/bin/appinst"
 chmod 644 "$stage/bin/libunixnu-ldid.dylib" "$stage/services.d/"*.conf
 mkdir -p "$(dirname "$OUT")"
-python3 "$ADD" "$BASE" "$OUT" appinst "$stage"
+python3 "$ADD" "$BASE" "$OUT" oneios "$stage"
 sha256sum "$OUT" > "$OUT.sha256"
 cat "$OUT.sha256"

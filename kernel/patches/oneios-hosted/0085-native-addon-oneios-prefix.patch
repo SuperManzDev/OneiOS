@@ -1,0 +1,13 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -8518 +8518,9 @@
+-		snprintf(path, sizeof(path), "/private/var/ngpu/%s", name);
++		/* OneiOS native (0085): most add-on entries retain UniXNU's /private/var/ngpu root. A reviewed entry
++		 * below the explicit `oneios/` namespace belongs to the persistent helper tree oneios-init already
++		 * supervises. The add-on validator above rejects absolute paths and every `..`, so removing this one
++		 * prefix cannot escape /private/var/oneios. This lets a rebuilt helper and its service fragment ship in
++		 * the boot add-on without replacing the whole Data seed. */
++		if (!strncmp(name, "oneios/", 7))
++			snprintf(path, sizeof(path), "/private/var/%s", name);
++		else
++			snprintf(path, sizeof(path), "/private/var/ngpu/%s", name);

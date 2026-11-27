@@ -142,7 +142,8 @@ static uint8_t *slurp(const char *path, size_t *size)
 static void usage(void)
 {
   fprintf(stderr, "usage: xnuloader-crosvm KERNEL OUT [--cpus N] [--ram-mib N] [--timebase HZ] [--args TEXT] [--args-add TEXT] [--swiotlb MIB]\n"
-                  "                        [--image DIR [--phone-image DIR] [--phone-data FILE] [--display WxH [--scale 2|3] [--hz N]]] [--shared-ram [--gpu | --gpu-scanout] [--audio] [--wifi]] [--bridge]\n");
+                  "                        [--image DIR [--phone-image DIR] [--phone-data FILE] [--display WxH [--scale 2|3] [--hz N]]] [--shared-ram [--gpu | --gpu-scanout] [--audio] [--wifi]] [--bridge]\n"
+                  "                        [--gpu-addon FILE] [--prime-list FILE]\n");
   exit(2);
 }
 
@@ -167,7 +168,7 @@ int main(int argc, char **argv)
   unsigned display_w = 0, display_h = 0, display_scale = 3, display_hz = 60;
   uint32_t timebase = 19200000;         // the S25's (vm-probe: CNTFRQ_EL0 in the VM)
   bool shared_ram = false, gpu = false, gpu_scanout = false, audio = false, wifi = false, bridge = false;
-  const char *prime_list_path = NULL;
+  const char *prime_list_path = NULL, *gpu_addon_path = NULL;
   for (int i = 3; i < argc; i++) {
     if (!strcmp(argv[i], "--shared-ram")) { shared_ram = true; continue; }
     if (!strcmp(argv[i], "--gpu")) { gpu = true; continue; }
@@ -193,6 +194,7 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[i], "--scale")) display_scale = (unsigned)strtoul(argv[++i], NULL, 0);
     else if (!strcmp(argv[i], "--hz")) display_hz = (unsigned)strtoul(argv[++i], NULL, 0);
     else if (!strcmp(argv[i], "--prime-list")) prime_list_path = argv[++i];
+    else if (!strcmp(argv[i], "--gpu-addon")) gpu_addon_path = argv[++i];
     else usage();
   }
   if (cpus < 1 || cpus > XL_MAX_CPUS || ram_mib < 512 || ram_mib > 6144) { fprintf(stderr, "xnuloader-crosvm: 1-%d CPUs, 512-6144 MiB\n", XL_MAX_CPUS); return 2; }
@@ -235,11 +237,24 @@ int main(int argc, char **argv)
   static image_disk disks[IMAGE_DISKS_MAX];
   static char seed_hex[65];
   unsigned ndisk = image_dir ? image_disks(image_dir, phone_data, false, &set, disks, seed_hex) : 0;
-  xl_blob trust = { 0 };
+  xl_blob trust = { 0 }, gpu_addon = { 0 };
   if (image_dir) {
     const char *error = NULL;
     trust = xh_imageset_trustcaches(&set, &error);
     if (!trust.data) { fprintf(stderr, "%s: trust caches: %s\n", image_dir, error); return 1; }
+  }
+  if (gpu_addon_path) {
+    size_t addon_size = 0;
+    uint8_t *addon = slurp(gpu_addon_path, &addon_size);
+    uint64_t declared = 0;
+    if (addon_size >= 24) memcpy(&declared, addon + 16, sizeof declared);
+    if (addon_size < 24 || addon_size > (64u << 20) || memcmp(addon, "NGPUADD2", 8) || declared != addon_size) {
+      fprintf(stderr, "xnuloader-crosvm: --gpu-addon is not a complete NGPUADD2 sidecar (up to 64 MiB)\n");
+      return 2;
+    }
+    gpu_addon.data = addon;
+    gpu_addon.size = addon_size;
+    printf("xnuloader-crosvm: GPU add-on: %zu KiB from %s\n", addon_size >> 10, gpu_addon_path);
   }
 
   const char *err = NULL;
@@ -374,6 +389,7 @@ int main(int argc, char **argv)
   const xh_imageset_file *os = image_dir ? xh_imageset_role(&set, "os") : NULL;
   if (os && *os->volume_uuid) m.root_volume_uuid = os->volume_uuid;
   m.trust_cache = trust.data != NULL;
+  m.gpu_addon = gpu_addon.data != NULL;
   xl_adt_node *tree = xl_machine_tree(&m, &err);
   if (!tree) { fprintf(stderr, "board: %s\n", err); return 1; }
   for (unsigned i = 0, blocks = 0; i < ndisk; i++) {
@@ -411,7 +427,7 @@ int main(int argc, char **argv)
   uint8_t *ram = calloc(1, window);
   if (!ram) { fprintf(stderr, "xnuloader-crosvm: out of memory\n"); return 1; }
   xl_boot_request req = { .image = { image, size }, .kernel = &k, .ram = ram, .window = window, .phys_base = phys,
-                          .virt_base = k.base, .tree = tree, .command_line = args, .trustcache = trust,
+                          .virt_base = k.base, .tree = tree, .command_line = args, .trustcache = trust, .gpu_addon = gpu_addon,
                           .video = { display_w ? fb_pa : 0, display_w ? 1 : 0, fb_stride, display_w, display_h, display_w ? 32 : 0 } };
   xl_boot_layout lay;
   if (xl_boot_place(&req, &lay, &err)) { fprintf(stderr, "place: %s\n", err); return 1; }

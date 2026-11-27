@@ -6,7 +6,7 @@ cd "$ROOT"
 
 exec tools/oneios-tool/target/release/oneios-tool phone vm-boot \
   --stage-only \
-  --image out/crosvm/kernel-take23-fixed.img \
+  --image out/crosvm/kernel-take23-fixed-appinst.img \
   --droidvm /mnt/oneios-build/dl/droidvm-prebuilt/f7c6ce8 \
   --bridge runtime/display/build/android/displayctl \
   --bridgectl runtime/bridges/build/android/bridgectl \
