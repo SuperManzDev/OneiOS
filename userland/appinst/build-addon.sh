@@ -6,7 +6,7 @@ REPO=$(git -C "$HERE" rev-parse --show-toplevel)
 BUILD=${1:-$REPO/out/userland/appinst}
 BASE=${2:-$REPO/out/image/24A446/kernel.kc.gpuaddon}
 OUT=${3:-$REPO/out/userland/appinst/appinst.gpuaddon}
-ADD=${ADDON_ADD_DIR:-$REPO/out/kernel-native-take23/unixnu/oneios/ios-27.0.1-24A446/oneios_native/tree/scripts/addon-add-dir.py}
+ADD=${ADDON_ADD_DIR:-$REPO/out/kernel-native-take23-appinst/unixnu/oneios/ios-27.0.1-24A446/oneios_native/tree/scripts/addon-add-dir.py}
 for f in "$BUILD/appinst" "$BUILD/libunixnu-ldid.dylib" "$HERE/services.d/appinst-finalize.conf" "$HERE/services.d/appinst-serve.conf" "$BASE" "$ADD"; do
   [ -f "$f" ] || { echo "build-addon: no $f" >&2; exit 1; }
 done

@@ -201,7 +201,7 @@ public final class MainActivity extends Activity {
     private void confirmLaunch() {
         showConfirmation(
                 "Launch OneiOS now?",
-                "The VM image and disks are stored on this phone, so a computer is not required after staging. One UI will stop and the screen may go black until iOS posts its first frame. Hold Volume Down for 10 seconds to return, or wait for the 15-minute automatic recovery. Continue?",
+                "The VM image and disks are stored on this phone, so a computer is not required after staging. One UI will stop and the screen may go black until iOS posts its first frame. Hold Volume Down for 10 seconds when the key monitor is available, or wait for the 15-minute VM stop and 20-minute framework failsafe. If Android cannot recover, the last-resort failsafe may reboot the phone. Continue?",
                 "Launch OneiOS",
                 () -> runCommand("launch", "Handing the display to OneiOS…"));
     }
