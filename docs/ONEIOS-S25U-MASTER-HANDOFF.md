@@ -224,10 +224,10 @@ The phone-side server is `runtime/bridges/build/android/bridgectl`. Wi-Fi uses a
 | `OneiOS` | Older/main checkout, Takes 13–21 history and preserved unrelated user work |
 | OneOS/OneiOS Android app submodule | Root/session manager and historical app UI; not overwritten during this work |
 
-Repository state when this handoff was finalized:
+Repository state when this handoff was finalized and subsequently published:
 
-- branch `port/native-hardware-integration`; integration-code baseline immediately before this documentation commit: `a5611301`;
-- no configured upstream for this work branch;
+- branch `port/native-hardware-integration`; integration-code baseline immediately before the original documentation commit: `a5611301`;
+- the branch tracks the public `SuperManzDev/OneiOS` repository; the first published handoff checkpoint was `34a35ace`;
 - `app/` submodule is uninitialized in this checkout, gitlink `81438a53202825faa110183f10faea7141307e8d`;
 - source changes and this handoff are intentionally committed;
 - phone/build logs remain untracked evidence and must be sanitized before any commit because raw logs can contain Wi-Fi/Bluetooth/controller or LAN identifiers.
@@ -282,7 +282,7 @@ From `kernel/pins.sh`:
 - coreycusick/ios-guacamole, referenced commit `a3c8ef9`: GNSS feed idea.
 - qiumochen/UniXNU-zizhan, referenced display-link work `42629e5`.
 - ios-garnet, referenced snapshot-format work `f6276db`.
-- YumikoHayamato/OneiOS, referenced write-only display buffers `cdb297bb`.
+- YumikoHayamato/OneiOS, branch `take22` at `913fcf7010a5aadb00d7a63d471e58e57ef7e532`: shader-cache, GPU lifetime, RAM/thermal diagnostics, experimental recording and app work were source-reviewed. The port/reject matrix is in `docs/STABILITY-INVESTIGATION-REVIEW.md`; do not merge the branch wholesale. Earlier referenced write-only display-buffer change: `cdb297bb`.
 - iOSPlus10 patches: Bluetooth, Wi-Fi, camera, audio, and device-interface references.
 - AltStore source: `altstoreio/AltStore`, inspected local commit `56854e6`; requires Xcode/Swift project graph.
 - Feather source: `claration/feather`, inspected local commit `1535466`; GPL-3.0, used as installer UX/compatibility reference only.
@@ -992,12 +992,13 @@ Read in this order:
 
 1. `docs/ONEIOS-S25U-MASTER-HANDOFF.md` — authoritative current integration/build/recovery status.
 2. `docs/native-roadmap.md` — short current priorities.
-3. `docs/native.md` — native architecture and accumulated technical detail.
-4. `docs/hardware.md` — hardware bridge research and measurements.
-5. `docs/gpu.md` — GPU architecture, telemetry and memory work.
-6. `docs/appinst.md` — installer design and explicit incomplete integration.
-7. `~/oneios-s25u-knowledge-transfer.md` — historical Takes 13–17.
-8. Top-level `README.md`, `docs/SM8750_PORT.md`, `docs/newtodo.md` — useful historical context, but some statements predate current Take 23 integration.
+3. `docs/STABILITY-INVESTIGATION-REVIEW.md` — verified report findings and the Yumiko Take 22 port/reject matrix.
+4. `docs/native.md` — native architecture and accumulated technical detail.
+5. `docs/hardware.md` — hardware bridge research and measurements.
+6. `docs/gpu.md` — GPU architecture, telemetry and memory work.
+7. `docs/appinst.md` — installer design and explicit incomplete integration.
+8. `~/oneios-s25u-knowledge-transfer.md` — historical Takes 13–17.
+9. Top-level `README.md`, `docs/SM8750_PORT.md`, `docs/newtodo.md` — useful historical context, but some statements predate current Take 23 integration.
 
 When documents conflict, the master handoff wins for current status, but source code and artifact logs win over all prose.
 
@@ -1031,10 +1032,11 @@ Then:
 4. install/verify the newest hash-checked KernelSU ZIP and APK if needed;
 5. rerun `stage_take23_on_phone.sh` if the staged Image hash differs;
 6. run read-only status;
-7. prepare 4 GiB while the phone is cool;
-8. launch only with ADB attached and live thermal monitoring;
-9. stop early for the first current-image run;
-10. collect and redact logs before committing any evidence.
+7. do not start an extended run until the independent thermal/recovery guard is host-tested;
+8. prepare a 3.0 GiB guarded diagnostic profile while the phone is cool; qualify 3.5/4.0 GiB separately afterward;
+9. launch only with ADB attached and live thermal monitoring;
+10. stop early for the first current-image run;
+11. collect and redact logs before committing any evidence.
 
 ---
 

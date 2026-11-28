@@ -4,6 +4,8 @@ Owner goal (2026-11-25): make the native Gunyah VM feel like a daily driver—cl
 
 Legend: ✅ shipped to this branch · 🔄 in progress · ⏳ todo · 📱 needs an owner-run phone session.
 
+The verified review of Yumiko Take 22 and the supplied 762-line stability report is in [`STABILITY-INVESTIGATION-REVIEW.md`](STABILITY-INVESTIGATION-REVIEW.md). Its main correction is that native renderer fixes must be built into the pinned crosvm/`libvirglrenderer.so` artifacts, not only added to the local xnuhost patch series.
+
 ## 1. Current state (log-grounded)
 
 - **Hosted path:** full boot and Metal on Adreno, up to 120 fps. Syscall trapping and the old thermal path made it unsuitable for the daily-driver target.
@@ -29,14 +31,16 @@ Legend: ✅ shipped to this branch · 🔄 in progress · ⏳ todo · 📱 needs
 - ✅ **Bluetooth AIDL:** the S25 HAL is `android.hardware.bluetooth.IBluetoothHci/default`. The bridge now closes a stale previous AIDL client before initialize and retries `ALREADY_INITIALIZED` once. Physical preflight passed open, HCI Reset, Read BD_ADDR and close; Android Bluetooth recovered afterward. Never print controller identity data.
 - ✅ **Brightness:** bounded test wrote 119 with ceiling 2953 and restored One UI's saved level.
 - 🔄📱 **Speaker level:** Take 23's guest reached volume 128/128 (0 dB digital gain) and virtio-snd dropped no periods, but Android's host media stream was only 1/15. Running the AAudio helper as uid 2000 was rejected (`VIRTIO_SND_R_PCM_PREPARE ... Failed to open stream`), so keep the proven root AAudio stream. `vm-boot` now saves Android's media level, sets it to 15 for the VM, and restores it after One UI is back.
-- 🔄 **Thermal gate:** the temporary 2240 MiB diagnostic was stopped when cluster sensors reached about 103–105 °C, GPU about 85 °C, board 58 °C and battery 44.8 °C. Do not use the undersized guest again. Let the phone cool before another run; add an automatic host thermal stop before longer sessions.
+- 🔄 **Independent thermal/recovery guard:** the temporary 2240 MiB diagnostic was stopped when cluster sensors reached about 103–105 °C, GPU about 85 °C, board 58 °C and battery 44.8 °C. Do not use that undersized guest again. Before another extended run, add a host process independent of crosvm/the guest bridge that reads sensors and the escape chord directly, applies configurable stop/cooldown hysteresis, terminates a hung VM and restores display/audio/brightness/One UI idempotently. The existing thermal bridge is telemetry and affinity policy, not this fail-independent guard.
 - ✅ **Native haptic capability:** TICK/CLICK/HEAVY_CLICK read-only inventory passed on vibrator HAL v2.
 
 ### P1 — performance and upstream strategy
 
-- ⏳📱 **Kill virtio-gpu busy polling.** Give the PCI function a real interrupt, or use adaptive spin→WFI. Measure frame round-trip, idle residency and thermals on Gunyah.
-- ✅ **Upstream strategy:** cherry-pick isolated wins; do not wholesale-merge the rewritten Rust runtime.
-- ✅ **GPU memory fixes already in the active add-on:** command-pool cutoff, idle image/buffer cleanup, Turnip BO-cache trim, reduced keep-room and command-buffer-boundary submit splitting.
+- ⏳📱 **Kill virtio-gpu busy polling.** First add bounded adaptive spin/backoff with the current polling behavior as rollback. Then trace crosvm's existing PCI INTx mapping and prove an interrupt counter before designing new Gunyah irqfd plumbing. Measure frame round-trip, idle residency and thermals; avoid host CPUs 6–7 in the interim diagnostic profile.
+- ✅ **Upstream strategy:** cherry-pick isolated wins; do not wholesale-merge the rewritten Rust runtime or Yumiko Take 22.
+- ⏳ **Native renderer correctness:** reconstruct the exact source for the pinned phone `libvirglrenderer.so`, then evaluate WAIT_FENCE commits `a5e12ac`/`f7da477` and both zero-resource-ID guards `25c4e7f9`/`78c4b86e`. Changes under local `runtime/xnuhost/drm2kgsl/patches/` alone do not affect native crosvm sessions.
+- ⏳ **Warm shader cache:** adapt Take 22's persistent per-client cache from `14027c71` to the exact NativeMetal pin before trying render-server pipeline prewarm. Measure the same cold/warm scene and bound cache growth.
+- ✅ **GPU memory fixes already in the active add-on:** command-pool cutoff, idle image/buffer cleanup, Turnip BO-cache trim, reduced keep-room and command-buffer-boundary submit splitting. Verify these hooks execute in the staged add-on before adding overlapping Take 22 lifetime policy.
 - ⏳ **Auto-brightness:** port the sensor-hub/front-ALS path. First determine whether root can reach the S25 sensor service over QRTR; `als_rear` evdev is not a real front-ALS source.
 - ⏳ **GPU map failures:** operation 4 is `DROIDVM_VIRTGPU_MAP`; `0xe00002c8` is `kIOReturnVMError` from `createMappingInTask`, not a submit refusal. Keep tracking under memory pressure.
 
