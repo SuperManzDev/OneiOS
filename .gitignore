@@ -19,6 +19,11 @@ inputs/
 out/
 logs/
 dumps/
+# Phone captures and local build records may contain device, network or controller identifiers.
+phone-*/
+take*.log
+stage-*.log
+.impeccable/
 external/
 .DS_Store
 __pycache__/

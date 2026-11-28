@@ -4,7 +4,7 @@ Owner goal (2026-11-25): make the native Gunyah VM feel like a daily driver—cl
 
 Legend: ✅ shipped to this branch · 🔄 in progress · ⏳ todo · 📱 needs an owner-run phone session.
 
-The verified review of Yumiko Take 22 and the supplied 762-line stability report is in [`STABILITY-INVESTIGATION-REVIEW.md`](STABILITY-INVESTIGATION-REVIEW.md). Its main correction is that native renderer fixes must be built into the pinned crosvm/`libvirglrenderer.so` artifacts, not only added to the local xnuhost patch series.
+The verified review of Yumiko Take 22 and the supplied 762-line stability report is in [`STABILITY-INVESTIGATION-REVIEW.md`](STABILITY-INVESTIGATION-REVIEW.md). Its main correction is that native renderer fixes must be built into the pinned crosvm/`libvirglrenderer.so` artifacts, not only added to the local xnuhost patch series. Take 23.1's host-built 3 GiB guarded baseline and its remaining no-launch blockers are tracked in [`TAKE23.1.md`](TAKE23.1.md).
 
 ## 1. Current state (log-grounded)
 

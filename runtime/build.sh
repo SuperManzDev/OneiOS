@@ -76,6 +76,7 @@ make -s -C "$ROOT/runtime/bridges" NDK="$NDK" build/android/bridgectl build/andr
 make -s -C "$ROOT/runtime/bridges/brightness" NDK="$NDK" build/android/brightctl
 make -s -C "$ROOT/runtime/bridges/battery" NDK="$NDK" build/android/batteryctl
 make -s -C "$ROOT/runtime/bridges/thermal" NDK="$NDK" build/android/thermalctl
+make -s -C "$ROOT/runtime/guard" NDK="$NDK" build/android/oneios-guard
 make -s -C "$ROOT/runtime/display" NDK="$NDK" build/android/displayctl
 "$STRIP" -o "$STAGE/bin/bridgectl" "$ROOT/runtime/bridges/build/android/bridgectl"
 # wifictl: the Wi-Fi bridge alone (status and scan are read only; join takes wlan0 as a session does; restore gives
@@ -85,8 +86,9 @@ chmod 0755 "$STAGE/bin/wifictl"
 "$STRIP" -o "$STAGE/bin/brightctl" "$ROOT/runtime/bridges/brightness/build/android/brightctl"
 "$STRIP" -o "$STAGE/bin/batteryctl" "$ROOT/runtime/bridges/battery/build/android/batteryctl"
 "$STRIP" -o "$STAGE/bin/thermalctl" "$ROOT/runtime/bridges/thermal/build/android/thermalctl"
+"$STRIP" -o "$STAGE/bin/oneios-guard" "$ROOT/runtime/guard/build/android/oneios-guard"
 "$STRIP" -o "$STAGE/bin/displayctl" "$ROOT/runtime/display/build/android/displayctl"
-chmod 0755 "$STAGE/bin/bridgectl" "$STAGE/bin/brightctl" "$STAGE/bin/batteryctl" "$STAGE/bin/thermalctl" "$STAGE/bin/displayctl"
+chmod 0755 "$STAGE/bin/bridgectl" "$STAGE/bin/brightctl" "$STAGE/bin/batteryctl" "$STAGE/bin/thermalctl" "$STAGE/bin/oneios-guard" "$STAGE/bin/displayctl"
 # The display helper: a launcher, the library app_process loads, and the dex with the layer (needs javac and d8).
 D=$ROOT/runtime/display/build/android
 make -s -C "$ROOT/runtime/display" NDK="$NDK" build/android/oneios-display build/android/liboneios-display.so build/android/oneios-display.dex

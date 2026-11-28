@@ -37,7 +37,7 @@ for path, f in listed.items():
     assert f['mode'] == ('0755' if os.access(os.path.join(root, path), os.X_OK) else '0644'), path
 assert listed['bin/xnuhost']['mode'] == '0755'
 # the phone checks the OneOS fork's Hardware checks screen runs (runtime/build.sh stages them)
-for tool in ('gpuctl', 'bridgectl', 'wifictl', 'brightctl', 'displayctl', 'camctl', 'oneios-camera', 'oneios-audio', 'oneios-display', 'oneios-encoder', 'encctl'):
+for tool in ('gpuctl', 'bridgectl', 'wifictl', 'brightctl', 'displayctl', 'oneios-guard', 'camctl', 'oneios-camera', 'oneios-audio', 'oneios-display', 'oneios-encoder', 'encctl'):
     assert listed['bin/' + tool]['mode'] == '0755', tool
 PY
 ok "package, checksum, member order, manifest"

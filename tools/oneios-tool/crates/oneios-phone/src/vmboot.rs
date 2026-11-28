@@ -443,7 +443,8 @@ pub fn takeover_script(takeover: bool, need_pages: u64, audio: bool) -> (String,
          host_restore() {{ [ -n \"$host_music\" ] && cmd media_session volume --stream 3 --set \"$host_music\" >/dev/null 2>&1; host_music=; }}\n\
          {audio_prepare}\
          . $D/ui.sh\n\
-         rm -rf $CTL; mkdir -p $CTL\n\
+         rm -rf $CTL; mkdir -p $CTL; chmod 700 $CTL\n\
+         case \"$host_music\" in ''|*[!0-9]*) ;; *) echo \"$host_music\" > $CTL/host_music; chmod 600 $CTL/host_music ;; esac\n\
          for svc in zygote_secondary perfmond media.tuner zygote_next; do getprop init.svc.$svc > $CTL/base.$svc; done\n\
          {}\
          trap 'thp_restore; gpu_restore; cpu_restore; caps_restore; wifi_restore; start_ui \"the session ended\"; host_restore' EXIT HUP INT TERM\n\
@@ -455,7 +456,8 @@ pub fn takeover_script(takeover: bool, need_pages: u64, audio: bool) -> (String,
          echo \"pool: $avail pages free, $need wanted: topped up while One UI is down (the module's acquire, as hugepool grow)\"\n  \
          want=$(grep '^pool_want=' $P/refill_stat | cut -d= -f2); [ \"${{want:-0}}\" -ge $need ] || echo $need > $P/pool_want\n  \
          echo 3 > $P/acquire; sleep 3\n  \
-         t=0; while [ $t -lt 90 ] && ! grep -q '^acquire_active=0$' $P/refill_stat; do sleep 1; t=$((t + 1)); done\n  \
+         t=0; while [ $t -lt 90 ] && [ ! -e $D/stop.request ] && ! grep -q '^acquire_active=0$' $P/refill_stat; do sleep 1; t=$((t + 1)); done\n  \
+         if [ -e $D/stop.request ]; then echo 0 > $P/acquire; sleep 2; end \"guard stopped pool acquisition\"; exit 1; fi\n  \
          [ $t -lt 90 ] || {{ echo 0 > $P/acquire; sleep 2; }}\n  \
          avail=$(grep '^pool_avail=' $P/refill_stat | cut -d= -f2)\n  \
          echo \"pool: $avail pages free after the top-up: $(stat_line)\"\n  \
@@ -776,6 +778,25 @@ pub fn boot_script_with(l: &Label, seconds: u32, thp: bool, sha: &str, disks: Op
     } else {
         String::new()
     };
+    // Take 23.1: an independent process owns the physical escape and thermal stop. It arms before One UI stops,
+    // receives a PID/start-time identity immediately after crosvm starts, and can invoke ui.sh recovery itself.
+    let (guard_start, guard_session, guard_register, guard_end) = if t.takeover {
+        (
+            "guard=\nrm -rf $D/guard; mkdir -m 700 $D/guard\n\
+             : > $D/guard/guard.log; chmod 600 $D/guard/guard.log\n\
+             $D/oneios-guard --dir $D --crosvm $C </dev/null >>$D/guard/guard.log 2>&1 &\n\
+             guard=$!\nt=0; while [ $t -lt 100 ] && [ ! -f $D/guard/armed ] && kill -0 $guard 2>/dev/null; do sleep 0.1 2>/dev/null || sleep 1; t=$((t + 1)); done\n\
+             [ -f $D/guard/armed ] || { echo \"guard: refused: did not arm (guard/guard.log)\"; kill $guard 2>/dev/null; end \"refused guard\"; exit 1; }\n\
+             echo \"guard: $(cat $D/guard/armed)\"\n",
+            "touch $D/guard/session.started\n[ ! -e $D/stop.request ] || { end \"guard stopped takeover\"; exit 1; }\n",
+            "vm_start=$(awk '{print $22}' /proc/$pid/stat 2>/dev/null)\n\
+             case \"$vm_start\" in ''|*[!0-9]*) echo \"guard: no crosvm start time\"; touch $D/stop.request ;;\n\
+               *) printf '%s %s\\n' \"$pid\" \"$vm_start\" > $D/guard/vm.identity.new && chmod 600 $D/guard/vm.identity.new && mv $D/guard/vm.identity.new $D/guard/vm.identity ;; esac\n",
+            "if [ -n \"$guard\" ]; then touch $D/guard/cleanup.done $D/guard/session.done; t=0; while [ $t -lt 10 ] && kill -0 $guard 2>/dev/null; do sleep 1; t=$((t + 1)); done; fi\n",
+        )
+    } else {
+        ("", "", "", "")
+    };
     format!(
         r#"D={DIR}
 C={crosvm}
@@ -789,7 +810,7 @@ got=$(sha256sum kernel.img | cut -d' ' -f1)
 {share_check}
 tdev=
 tsock=
-{checks}rm -f serial.txt crosvm.log crosvm.sock fdt.dtb dmesg.txt display.txt touch.txt touch.sock stop.request screen.off wifi.txt wifi.mac bridge.txt bridge.sock
+{checks}rm -f serial.txt crosvm.log crosvm.sock fdt.dtb dmesg.txt display.txt touch.txt touch.sock stop.request screen.off wifi.txt wifi.mac bridge.txt bridge.sock guard.log
 {touch_find}
 ulimit -l unlimited 2>/dev/null || echo "ulimit -l unlimited: refused"
 # crosvm holds a file for every GPU buffer of the guest: at 32768 (the shell's) it ran out after 11 minutes of iOS (full2:
@@ -818,9 +839,10 @@ if [ {thp} = 1 ]; then
 fi
 grep -E '^(MemAvailable|SwapFree):' /proc/meminfo | tr -s ' ' | sed 's/^/before /'
 echo "start $(date +%s) up $(cut -d' ' -f1 /proc/uptime)"
-{takeover_stop}{touch_wake}{gpu_floor}{cpu_floor}{wifi_start}{serve_start}pool=
+{guard_start}{takeover_stop}{guard_session}{touch_wake}{gpu_floor}{cpu_floor}{wifi_start}{serve_start}pool=
 # crosvm logs at info: at debug its GPU renderer wrote a line per submission and fence (take8: 407 MB in 45 minutes,
 # whose copy at the end broke the adb link and left the session's other files empty)
+[ ! -e $D/stop.request ] || {{ end "guard stopped before crosvm"; exit 1; }}
 set -f
 {crosvm_env}$C --log-level info run --disable-sandbox --no-balloon --no-rng --no-usb --hypervisor gunyah \
   {protection} --hugepages --mem size={mem} --cpus num-cores={cpus}{affinity} \
@@ -828,7 +850,7 @@ set -f
   --dump-device-tree-blob $D/fdt.dtb{blocks} $D/kernel.img </dev/null >$D/crosvm.log 2>&1 &
 pid=$!
 set +f
-{pool_check}{bridge_start}{escape_start}{thermal_log}t=0
+{guard_register}{pool_check}{bridge_start}{escape_start}{thermal_log}t=0
 while [ $t -lt {seconds} ] && [ ! -e $D/stop.request ] && kill -0 $pid 2>/dev/null; do sleep 1; t=$((t + 1)); done
 how=itself
 if kill -0 $pid 2>/dev/null; then
@@ -838,7 +860,7 @@ fi
 if kill -0 $pid 2>/dev/null; then how=kill; kill -9 $pid; fi
 wait $pid; rc=$?
 thp_restore
-{wifi_end}{gpu_restore}{cpu_restore}{caps_restore}{bridge_end}{escape_end}{serve_end}echo "end $(date +%s) up $(cut -d' ' -f1 /proc/uptime) how $how exit $rc"
+{wifi_end}{gpu_restore}{cpu_restore}{caps_restore}{bridge_end}{escape_end}{serve_end}{guard_end}echo "end $(date +%s) up $(cut -d' ' -f1 /proc/uptime) how $how exit $rc"
 dmesg 2>/dev/null | grep -i -E 'gunyah|folio|gh_|crosvm|scm|memextent' | tail -n 80 > $D/dmesg.txt
 if [ "$pool" = bad ]; then end "refused pool: end how $how exit $rc"; else end "end how $how exit $rc"; fi
 "#,
@@ -958,6 +980,8 @@ pub struct Options {
     pub pin_first: u32,
     /// thermal.txt (Tuning::thermal_log)
     pub thermal_log: bool,
+    /// Independent phone-side thermal/key/recovery guard, required for takeover
+    pub guard: String,
     /// The sound card's backend uid (Tuning::audio_uid)
     pub audio_uid: Option<u32>,
     /// wifictl for the phone (runtime/bridges: make), pushed for an Image with the Wi-Fi in a takeover
@@ -998,6 +1022,9 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
     }
     if o.brightness && !matches!(o.brightness_max, Some(1..=65535)) {
         bail!("--brightness requires --brightness-max 1..65535, measured from One UI's manual range");
+    }
+    if o.takeover && !Path::new(&o.guard).is_file() {
+        bail!("a takeover requires the independent guard at {}: make -C runtime/guard", o.guard);
     }
     if l.ram > 480 && !o.thp {
         bail!("a VM of {} MiB needs --thp and gh_hugepage_reserve's pool (Gunyah's own memory ends near 0.5 GB of 4 KiB pages)", l.ram);
@@ -1066,6 +1093,11 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
         println!("vm-boot: a shared-RAM Image: Droid-VM's crosvm ({c}), --protected-vm-pseudo-unprotected");
     }
     adb.root_ok(&format!("mkdir -p {DIR} && chmod 777 {DIR} && rm -f {DIR}/result {DIR}/run.txt {DIR}/serial.txt\n"), "the VM's folder")?;
+    if o.takeover {
+        adb.push(&o.guard, &format!("{DIR}/oneios-guard"))?;
+        adb.root_ok(&format!("cd {DIR} && chown root:root oneios-guard && chmod 700 oneios-guard\n"), "the guard's owner")?;
+        println!("vm-boot: independent thermal and Volume Down recovery guard staged; takeover refuses unless it arms");
+    }
     println!("vm-boot: {} MiB Image, sha256 {sha}: pushing", data.len() >> 20);
     adb.push(image, &format!("{DIR}/kernel.img"))?;
     if let Some(f) = disks.as_ref().and_then(|d| d.fb.as_ref()) {
@@ -1145,7 +1177,7 @@ pub fn vm_boot(adb: &Adb, image: &str, out: &str, o: &Options) -> Result<()> {
             o.seconds + 300
         );
     }
-    adb.root_ok(&format!("chown root:root {DIR}/boot.sh {DIR}/kernel.img && chmod 700 {DIR}/boot.sh && chmod 600 {DIR}/kernel.img\n"), "the staged launcher")?;
+    adb.root_ok(&format!("chown root:root {DIR} {DIR}/boot.sh {DIR}/kernel.img && chmod 700 {DIR} {DIR}/boot.sh && chmod 600 {DIR}/kernel.img\n"), "the staged launcher")?;
     if o.stage_only {
         println!("vm-boot: staged only: {DIR}/kernel.img, boot.sh, ui.sh and helpers; no VM started and One UI was not stopped");
         return Ok(());
@@ -1394,7 +1426,7 @@ mod tests {
             "--serial type=file,hardware=serial,num=1,path=$D/serial.txt,console${bsock:+ --serial type=unix-stream,hardware=serial,num=2,path=$bsock,input-unix-stream} \\\n"
         ));
         // an old socket and log do not outlive the start; the tool is ended after crosvm and its last line shown
-        assert!(s.contains("wifi.txt wifi.mac bridge.txt bridge.sock\n"));
+        assert!(s.contains("wifi.txt wifi.mac bridge.txt bridge.sock guard.log\n"));
         let end = s.find("kill $bridged 2>/dev/null; wait $bridged 2>/dev/null").unwrap();
         assert!(end > s.find("wait $pid; rc=$?").unwrap() && end < s.find("echo \"end $(date +%s)").unwrap());
         // the battery alone
@@ -1533,11 +1565,35 @@ mod tests {
         let options = Options {
             seconds: 900, thp: true, bridge: "displayctl".into(), swipe_test: false, pin: true,
             droidvm: "droidvm".into(), gpu_floor_mhz: 0, cpu_floor_percent: 0, takeover: true,
-            pin_first: 2, thermal_log: true, audio_uid: None, wifictl: "wifictl".into(),
+            pin_first: 2, thermal_log: true, guard: "oneios-guard".into(), audio_uid: None, wifictl: "wifictl".into(),
             bridgectl: "bridgectl".into(), stage_only: true, haptics: true, native_haptics: true,
             brightness: true, brightness_max: Some(2953), bluetooth: true,
         };
         assert!(options.stage_only && options.takeover && options.thp && options.native_haptics && options.bluetooth);
+    }
+
+    #[test]
+    fn take23_1_guard_arms_before_takeover_and_owns_recovery() {
+        let d = parse_disks(&format!("{SCREEN}input touch\ngpu 00:0c.0 8 0x15f800000\nscanout 1440 3120 120\n")).unwrap();
+        let l = Label { ram: 3072, cpus: 6, swiotlb: 32, shared: true, gpu: true };
+        let s = boot_script_with(&l, 900, true, "ab12", Some(&d), false, true,
+                                 &Tuning { takeover: true, pin_first: 0, thermal_log: true, ..Tuning::DEFAULT });
+        let guard = s.find("$D/oneios-guard --dir $D --crosvm $C").unwrap();
+        let armed = s.find("[ -f $D/guard/armed ] ||").unwrap();
+        let stopped = s.find("setprop ctl.stop zygote").unwrap();
+        let session = s.find("touch $D/guard/session.started").unwrap();
+        let vm = s.find("pid=$!\n").unwrap();
+        let identity = s.find("$D/guard/vm.identity.new").unwrap();
+        let waited = s.find("wait $pid; rc=$?").unwrap();
+        let normal = s.find("touch $D/guard/cleanup.done $D/guard/session.done").unwrap();
+        assert!(guard < armed && armed < stopped, "the independent guard must arm before One UI stops");
+        assert!(stopped < session && session < vm, "thermal/key stops become active only after takeover completed");
+        assert!(vm < identity && identity < waited, "the guard receives crosvm's PID/start-time identity immediately");
+        assert!(waited < normal, "normal completion dismisses the guard only after crosvm is gone");
+        assert!(s.contains("--mem size=3072") && s.contains("need=1520"));
+        let ui = ui_script(1200);
+        assert!(ui.contains("--recover)") && ui.contains("start_ui \"${2:-the independent guard}\""));
+        assert!(ui.contains("cmd media_session volume --stream 3 --set \"$host_music\""));
     }
 
     #[test]

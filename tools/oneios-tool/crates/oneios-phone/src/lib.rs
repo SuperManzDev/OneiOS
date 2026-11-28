@@ -208,6 +208,9 @@ pub enum Command {
         /// the GPU's load, while the VM runs (read only)
         #[arg(long)]
         thermal_log: bool,
+        /// Independent thermal and Volume Down recovery guard required for a takeover
+        #[arg(long, value_name = "FILE", default_value = "runtime/guard/build/android/oneios-guard")]
+        guard: String,
         /// With an Image that has the sound card (xnuloader-crosvm --audio): crosvm's AAudio backend in its own process under
         /// this uid (crosvm's uid=; Droid-VM's crosvm: a stream of uid 0 is silenced while One UI runs). Default: in crosvm's
         #[arg(long, value_name = "UID")]
@@ -581,8 +584,8 @@ pub fn main(cli: Cli) -> i32 {
             HaltpollCommand::Load { ko, out } => haltpoll::load(&adb, &ko, &out),
             HaltpollCommand::Unload => haltpoll::unload(&adb),
         }),
-        Command::VmBoot { image, seconds, thp, out, stop, stage_only, bridge, swipe_test, pin, droidvm, gpu_floor, cpu_floor, takeover, pin_first, thermal_log, audio_uid, wifictl, bridgectl, no_haptics, native_haptics, brightness, brightness_max, bluetooth } => Adb::connect(serial).and_then(|adb| {
-            if stop { vmboot::stop(&adb) } else { vmboot::vm_boot(&adb, &image, &out, &vmboot::Options { seconds, thp, bridge, swipe_test, pin, droidvm, gpu_floor_mhz: gpu_floor, cpu_floor_percent: cpu_floor, takeover, pin_first, thermal_log, audio_uid, wifictl, bridgectl, stage_only, haptics: !no_haptics, native_haptics, brightness, brightness_max, bluetooth }) }
+        Command::VmBoot { image, seconds, thp, out, stop, stage_only, bridge, swipe_test, pin, droidvm, gpu_floor, cpu_floor, takeover, pin_first, thermal_log, guard, audio_uid, wifictl, bridgectl, no_haptics, native_haptics, brightness, brightness_max, bluetooth } => Adb::connect(serial).and_then(|adb| {
+            if stop { vmboot::stop(&adb) } else { vmboot::vm_boot(&adb, &image, &out, &vmboot::Options { seconds, thp, bridge, swipe_test, pin, droidvm, gpu_floor_mhz: gpu_floor, cpu_floor_percent: cpu_floor, takeover, pin_first, thermal_log, guard, audio_uid, wifictl, bridgectl, stage_only, haptics: !no_haptics, native_haptics, brightness, brightness_max, bluetooth }) }
         }),
         Command::VmProbe { payload, mem, timeout, out, thp, droidvm, shared_ram, thp_shmem } => Adb::connect(serial).and_then(|adb| {
             let crosvm = match droidvm.as_deref() {

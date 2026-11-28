@@ -18,6 +18,7 @@
 #   display   make -C runtime/display test
 #   bridges   runtime/bridges/tests/host.sh: the unit tests, test-binder (a binderfs in a user namespace: it says
 #             "skipped" when the kernel has no binderfs), brightness, battery; the Android build when the NDK is there
+#   guard     make -C runtime/guard test: the independent thermal/key/recovery guard policy and host build
 #   camera    runtime/bridges/camera/tests/host.sh
 #   encoder   runtime/bridges/encoder/tests/host.sh: the video encoder device over the real transport through the
 #             oneios-encoder helper (stand-in encoder); the Android build when the NDK is there
@@ -90,6 +91,7 @@ suite() {
   part xnuhost "${xn[@]}" test
   part display make -s -C runtime/display test
   part bridges runtime/bridges/tests/host.sh
+  part guard make -s -C runtime/guard test
   part camera runtime/bridges/camera/tests/host.sh
   part encoder runtime/bridges/encoder/tests/host.sh
   if ndk_ok; then
@@ -159,7 +161,7 @@ ndk_ok || { echo "host-tests: no NDK (runtime/host.mk: NDK=...)" >&2; exit 1; }
 # The Android parts the Linux tests use (check-arm64 runs build/android/xnuhost; the test kernel is built with the
 # NDK's clang): built here, so the container needs no NDK. Nothing of build/host is made on the Mac.
 part android-build sh -c 'make -s -C runtime/loader android && make -s -C runtime/xnuhost all build/android/testkernel.elf &&
-  make -s -C runtime/bridges all && make -s -C runtime/bridges/camera all && make -s -C runtime/display all'
+  make -s -C runtime/bridges all && make -s -C runtime/guard all && make -s -C runtime/bridges/camera all && make -s -C runtime/display all'
 case "${results[*]}" in *FAIL*) summary; exit 1 ;; esac
 results=()
 

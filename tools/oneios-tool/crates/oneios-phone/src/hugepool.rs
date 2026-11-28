@@ -199,11 +199,21 @@ last_resort() {
 # One UI started again, as oneios_return.sh starts it after a stop: once (a lock), from the main flow, its trap or the
 # failsafe, whichever comes first.
 start_ui() {
-    mkdir $CTL/start.lock 2>/dev/null || return 0
+    if ! mkdir $CTL/start.lock 2>/dev/null; then
+        owner=$(cat $CTL/start.lock/owner 2>/dev/null)
+        n=0
+        while [ $n -lt 330 ] && [ ! -e $CTL/start.done ] && [ -n "$owner" ] && is_ours "$owner" "ui.sh"; do sleep 1; n=$((n + 1)); done
+        [ -e $CTL/start.done ] && return 0
+        if [ -n "$owner" ] && is_ours "$owner" "ui.sh"; then last_resort "One UI recovery owner $owner hung"; return 1; fi
+        rm -rf $CTL/start.lock
+        mkdir $CTL/start.lock 2>/dev/null || { last_resort "One UI recovery lock could not be acquired"; return 1; }
+    fi
+    echo $$ > $CTL/start.lock/owner
     if [ ! -e $CTL/stopped ]; then
         say "start: One UI was not stopped ($1)"
         true > $CTL/feeder.off; true > $CTL/stop-loop.off
         [ -e $D/result ] || echo "refused $1" > $D/result
+        true > $CTL/start.done
         return 0
     fi
     say "start: One UI ($1)"
@@ -254,8 +264,13 @@ start_ui() {
         [ $up -gt 0 ] && [ $t -ge $((up + 20)) ] && break
         [ $up = 0 ] && [ $t -ge 180 ] && { say "start: user 0 not unlocked within 180 s (system_server lives)"; break; }
     done
+    # vm-boot persists the host media level before stopping the framework so guard recovery does not depend on
+    # shell-local state. Refuse malformed values; AudioService is available now.
+    host_music=$(cat $CTL/host_music 2>/dev/null)
+    case "$host_music" in ''|*[!0-9]*) ;; *) cmd media_session volume --stream 3 --set "$host_music" >/dev/null 2>&1 ;; esac
     say "start: One UI up; memory $(mem_line)"
     echo "done $1: $(stat_line)" > $D/result
+    true > $CTL/start.done
 }
 
 case "${1:-}" in
@@ -277,15 +292,25 @@ case "${1:-}" in
         sleep 2
     done
     exit 0 ;;
+--recover)
+    # A fail-independent guard invokes this only after the main launcher restored takeover-owned resources.
+    # The reason is a fixed token supplied by oneios-guard, never arbitrary guest text.
+    start_ui "${2:-the independent guard}"
+    exit $? ;;
+--guard-failed)
+    # The launcher did not report cleanup in time. Starting Android while helpers may own hardware is unsafe.
+    last_resort "${2:-the independent guard could not verify cleanup}"
+    exit 1 ;;
 --failsafe)
     # One UI started LIMIT s after the stop, whatever the main flow does (an acquire that does not end, a stuck write)
     t0=$(now)
-    while [ ! -e $CTL/start.lock ]; do
+    while :; do
         if [ -e $CTL/stopped ] && [ $(($(now) - $(cat $CTL/stopped))) -ge $LIMIT ]; then
             say "failsafe: One UI down for $LIMIT s"
             start_ui "the failsafe"
             break
         fi
+        [ -e $CTL/start.done ] && break
         [ $(($(now) - t0)) -ge $((LIMIT + 120)) ] && break
         sleep 1
     done
@@ -525,8 +550,8 @@ mod tests {
         assert!(body.find("trap 'start_ui").unwrap() < first_change);
         let stop = body.find("setprop ctl.stop zygote").unwrap();
         assert!(first_change < stop && stop < body.find("bg /system/bin/sh $SELF --feed").unwrap());
-        // One UI starts once: a lock
-        assert!(s.contains("mkdir $CTL/start.lock 2>/dev/null || return 0"));
+        // One UI starts once: a lock with a live owner; another path can detect a stale or hung recovery.
+        assert!(s.contains("if ! mkdir $CTL/start.lock") && s.contains("$CTL/start.lock/owner") && s.contains("$CTL/start.done"));
         // the feeder ends only once system_server is back
         let f = s.find("start_ui() {").unwrap();
         let start = &s[f..];
@@ -542,7 +567,7 @@ mod tests {
             );
         }
         // the phone restarts only when One UI does not come back
-        assert_eq!(s.matches("last_resort \"").count(), 2);
+        assert!(s.matches("last_resort \"").count() >= 5, "recovery-owner and guard cleanup failures also reboot safely");
         assert!(s.contains("[ -n \"$ss\" ] || { last_resort"));
         // the stop loop's pid is kept, and checked before it is signalled
         assert!(s.contains("echo $! > $CTL/stop-loop.pid") && s.contains("is_ours \"$sl\" \"cycle.sh --stop-loop\" && kill -9"));

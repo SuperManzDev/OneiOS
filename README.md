@@ -124,6 +124,7 @@ is no FairPlay decryption or DRM-stripping anywhere in it; an encrypted slice is
 - How the parts fit together: [docs/architecture.md](docs/architecture.md)
 - How to build and test it end to end: [docs/building.md](docs/building.md)
 - Verified S25 stability and Yumiko Take 22 port review: [docs/STABILITY-INVESTIGATION-REVIEW.md](docs/STABILITY-INVESTIGATION-REVIEW.md)
+- Take 23.1 guarded 3 GiB baseline and qualification status: [docs/TAKE23.1.md](docs/TAKE23.1.md)
 - Each part in depth: [docs/booter.md](docs/booter.md) (xnuhost + loader),
   [kernel/prelink/README.md](kernel/prelink/README.md) (`kernel.kc`), [docs/gpu.md](docs/gpu.md),
   [docs/userland.md](docs/userland.md), [docs/hardware.md](docs/hardware.md), [docs/native.md](docs/native.md).
